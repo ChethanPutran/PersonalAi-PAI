@@ -4,4 +4,5 @@ fastapi==0.115.12
 uvicorn==0.34.2
 keyboard==0.13.5
 sounddevice==0.5.2
-openai-whisper==20240930
+openai-whisper
+
