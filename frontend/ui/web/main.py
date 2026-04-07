@@ -1,6 +1,6 @@
       
-from agent.agent import AssistantAgent
-from voice.voice import VoiceInput,VoiceOutput
+from src.agent.agent import AssistantAgent
+from src.voice.voice import VoiceInput,VoiceOutput
 from langchain_community.tools.tavily_search import TavilySearchResults
 # import signal
 import sys

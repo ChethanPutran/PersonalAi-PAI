@@ -56,3 +56,5 @@ POST /process_command
 * Let the app act on it (e.g., control a smart device, fetch a web page, open app, etc.)
 
 ---
+
+npx @modelcontextprotocol/inspector python src/agent/tools/math_tool.py

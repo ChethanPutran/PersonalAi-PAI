@@ -1,5 +1,5 @@
 from typing import List, Optional
-from langchain.output_parsers import PydanticOutputParser
+from langchain_core.output_parsers import PydanticOutputParser
 from pydantic import BaseModel, Field
 # from langchain.pydantic_v1 import BaseModel, Field
 from .tasks import TASK_PRIORITY,EMMOTIONS

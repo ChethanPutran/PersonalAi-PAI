@@ -1,7 +1,7 @@
 from fastapi import FastAPI,File, UploadFile
 from pydantic import BaseModel
 from fastapi.responses import HTMLResponse
-from agent.agent import AssistantAgent
+from ....src.agent.agent import AssistantAgent
 import whisper
 import openai
 import tempfile
