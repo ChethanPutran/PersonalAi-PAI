@@ -12,6 +12,11 @@
 # httpx==0.28.1
 # aiofiles==25.1.0
 
+# Backend
+fastapi==0.128.0
+uvicorn==0.40.0
+python-multipart==0.0.21
+
 # Authentication & Security
 # jwt==1.4.0
 # python-jose==3.5.0
