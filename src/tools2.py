@@ -23,8 +23,8 @@ logger = logging.getLogger(__name__)
 
 # Environment validation
 def validate_environment(show_warnings: bool = False) -> bool:
-    """Validate all required environment variables are set."""
-    required_vars = {
+    """Validate environment variables and warn when optional services are missing."""
+    optional_vars = {
         "NVIDIA_API_KEY": "NVIDIA API key for LLM access",
         "GOOGLE_API_KEY": "Google API key for LLM access",
         "OPENAI_API_KEY": "OpenAI API key for TTS and LLM access",
@@ -33,20 +33,15 @@ def validate_environment(show_warnings: bool = False) -> bool:
         "WEATHER_API_KEY": "API key for OpenWeatherMap to enable weather tool",
     }
 
-    missing_vars = []
     warnings = []
-    
-    for var, description in required_vars.items():
+
+    for var, description in optional_vars.items():
         if not os.getenv(var):
-            missing_vars.append(f"{var} ({description})")
+            warnings.append(f"{var} ({description}) is not set. Related features will be skipped.")
     
     for var, description in tool_specific_vars.items():
         if not os.getenv(var):
             warnings.append(f"{var} ({description}) is not set. Related tool will be unavailable.")
-    
-    if missing_vars:
-        logger.error(f"Missing required environment variables: {', '.join(missing_vars)}")
-        raise EnvironmentError(f"Missing required environment variables: {', '.join(missing_vars)}")
     
     if show_warnings and warnings:
         for warning in warnings:

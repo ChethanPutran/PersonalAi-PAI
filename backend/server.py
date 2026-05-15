@@ -30,6 +30,7 @@ async def lifespan(app: FastAPI):
     print("Agent ready!")
     
     # Initialize WebSocket handler with your agent
+    app.state.agent = agent_instance
     app.state.ws_handler = WebSocketHandler(agent_instance)
     
     # Start cleanup task
@@ -39,9 +40,6 @@ async def lifespan(app: FastAPI):
             await session_manager.cleanup_expired()
     
     asyncio.create_task(cleanup_task())
-    
-    # Initialize WebSocket handler
-    app.state.ws_handler = WebSocketHandler(agent_instance)
     
     # Start background task processor
     await task_processor.start()

@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any, List
 from enum import Enum
 from datetime import datetime
@@ -22,14 +22,14 @@ class ClientMessage(BaseModel):
     type: MessageType
     content: str
     session_id: str
-    timestamp: datetime = datetime.now()
-    metadata: Optional[Dict[str, Any]] = {}
+    timestamp: datetime = Field(default_factory=datetime.now)
+    metadata: Optional[Dict[str, Any]] = Field(default_factory=dict)
 
 class ServerMessage(BaseModel):
     type: MessageType
     content: str
     session_id: str
-    timestamp: datetime = datetime.now()
+    timestamp: datetime = Field(default_factory=datetime.now)
     processing_time_ms: Optional[float] = None
     requires_approval: bool = False
     pending_action: Optional[Dict[str, Any]] = None
@@ -40,8 +40,9 @@ class UserSession(BaseModel):
     status: SessionStatus
     created_at: datetime
     last_active: datetime
-    conversation_history: List[Dict[str, Any]]
-    pending_approvals: List[Dict[str, Any]]
+    conversation_history: List[Dict[str, Any]] = Field(default_factory=list)
+    pending_approvals: List[Dict[str, Any]] = Field(default_factory=list)
+    notifications: List[Dict[str, Any]] = Field(default_factory=list)
 
 class WakeWordConfig(BaseModel):
     wake_word: str = "hey bot"

@@ -16,8 +16,9 @@ class SkillManager:
     def __init__(self, skills_dir=SKILLS_DIR):
         self.skills_dir = skills_dir
         self.skills = {}
-        self.load_skills()
         self.tools = []
+        self._init_tools()
+        self.load_skills()
     
     # ==================== TOOLS ====================
     def _init_tools(self):
@@ -66,6 +67,6 @@ class SkillManager:
         self.tools = [t for t in self.tools if t.name != name]
 
     def list_tools(self):
-        return [t.name for t in self.tools]
+        return self.tools
 
     

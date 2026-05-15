@@ -1,7 +1,7 @@
 import asyncio
 import uuid
 from datetime import datetime, timedelta
-from typing import Dict, Optional, Any, Union
+from typing import Dict, Optional, Any, Union, List
 from collections import defaultdict
 import json
 import redis.asyncio as redis
@@ -61,7 +61,7 @@ class SessionManager:
         if self.use_redis and self.redis_client:
             data = await self.redis_client.get(f"session:{session_id}")
             if data:
-                return UserSession.parse_raw(data)
+                return UserSession.model_validate_json(data)
         else:
             return self.sessions.get(session_id)
         
@@ -75,7 +75,7 @@ class SessionManager:
             await self.redis_client.setex(
                 f"session:{session.session_id}",
                 self.session_timeout,
-                session.json()
+                session.model_dump_json()
             )
         else:
             self.sessions[session.session_id] = session
@@ -146,7 +146,8 @@ class SessionManager:
     async def send_to_session(self, session_id: str, message: Any):
         """Send message to session's WebSocket"""
         if session_id in self.connections:
-            await self.connections[session_id].send_text(message.json())
+            payload = message.model_dump_json() if hasattr(message, "model_dump_json") else json.dumps(message)
+            await self.connections[session_id].send_text(payload)
     
     async def cleanup_expired(self):
         """Clean up expired sessions (Redis handles this automatically)"""
@@ -167,8 +168,6 @@ class SessionManager:
         else:
             session = await self.get_session(session_id)
             if session:
-                if not hasattr(session, 'notifications'):
-                    session.notifications = []
                 session.notifications.append(notification)
                 await self.update_session(session)
 
@@ -184,8 +183,8 @@ class SessionManager:
             return notifications
         else:
             session = await self.get_session(session_id)
-            if session and hasattr(session, 'notifications'):
-                notifs = session.notifications
+            if session:
+                notifs = list(session.notifications)
                 session.notifications = []
                 await self.update_session(session)
                 return notifs

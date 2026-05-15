@@ -21,6 +21,8 @@ class BackgroundTaskProcessor:
     
     async def start(self):
         """Start the background task processor"""
+        if self.is_running:
+            return
         self.is_running = True
         asyncio.create_task(self._process_queue())
     

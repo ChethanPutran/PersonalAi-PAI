@@ -3,6 +3,7 @@ from chromadb.utils import embedding_functions
 from datetime import datetime
 import hashlib
 from datetime import datetime
+import os
 from typing import Dict, List, Optional, Any
 from langchain_core.messages import (
     BaseMessage, HumanMessage, SystemMessage, AIMessage
@@ -26,27 +27,35 @@ DB_URI = f'postgresql://{POSTGRES_USER}:{POSTGRES_PASSWORD}@localhost:{POSTGRES_
 class Memory:
     def __init__(self, persist_directory=PERSIST_DIRECTORY):
         self.client = chromadb.PersistentClient(path=persist_directory / "chroma_db")
-        
-        # Use OpenAI embeddings (or you can use sentence-transformers locally)
-        self.embedding_fn = embedding_functions.GoogleGenaiEmbeddingFunction(
-            model_name="gemini-embedding-001"
-        )
+
+        # Use an external embedding function when available, otherwise let Chroma
+        # use its default local embedding behavior.
+        self.embedding_fn = None
+        try:
+            if os.getenv("GOOGLE_API_KEY"):
+                self.embedding_fn = embedding_functions.GoogleGenaiEmbeddingFunction(
+                    model_name="gemini-embedding-001"
+                )
+        except Exception:
+            self.embedding_fn = None
         
         # Create collections for different memory types
+        collection_kwargs = {"embedding_function": self.embedding_fn} if self.embedding_fn else {}
+
         self.conversation_memory = self.client.get_or_create_collection(
             name="conversation_memory",
-            embedding_function=self.embedding_fn,
-            metadata={"hnsw:space": "cosine"}
+            metadata={"hnsw:space": "cosine"},
+            **collection_kwargs,
         )
         
         self.skill_memory = self.client.get_or_create_collection(
             name="skill_memory",
-            embedding_function=self.embedding_fn
+            **collection_kwargs,
         )
         
         self.episodic_memory = self.client.get_or_create_collection(
             name="episodic_memory",
-            embedding_function=self.embedding_fn
+            **collection_kwargs,
         )
         
     def add_conversation(self, user_input: str, assistant_response: str, metadata: Dict[str, Any] = None):
@@ -89,15 +98,21 @@ class Memory:
 class PercistenceManager:
     def __init__(self, persist_directory=PERSIST_DIRECTORY):
         self.conn = sqlite3.connect(persist_directory / "agent.db", check_same_thread=False)
-        # Initialize PostgresSaver with connection string
-        self.checkpointer = PostgresSaver.from_conn_string(DB_URI)
+        # Initialize PostgresSaver only when a database is available.
+        try:
+            self.checkpointer = PostgresSaver.from_conn_string(DB_URI)
+            self.checkpointer.setup()
+        except Exception:
+            self.checkpointer = None
         self.graph = None  # Will be set by the agent when initialized
 
     @staticmethod
     def create_db():
-        with PostgresSaver.from_conn_string(DB_URI)  as saver:
-            # Ensure tables are created
-            saver.setup()
+        try:
+            with PostgresSaver.from_conn_string(DB_URI) as saver:
+                saver.setup()
+        except Exception:
+            return
 
     def get_checkpointer(self):
         return self.checkpointer
@@ -371,4 +386,3 @@ class PercistenceManager:
         """Close database connection."""
         if hasattr(self, 'conn'):
             self.conn.close()
-

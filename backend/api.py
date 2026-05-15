@@ -1,5 +1,6 @@
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from typing import Optional
+import asyncio
 from .models import ClientMessage, ServerMessage, WakeWordConfig
 from .session_manager import session_manager
 from fastapi import UploadFile, File, Form, BackgroundTasks
@@ -27,16 +28,16 @@ async def get_session_status(session_id: str):
     return {"status": session.status, "session": session.dict()}
 
 @router.post("/session/{session_id}/command")
-async def send_command(session_id: str, message: ClientMessage):
+async def send_command(session_id: str, message: ClientMessage, request: Request):
     """Send a command via HTTP (fallback when WebSocket isn't available)"""
     session = await session_manager.get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
-    
-    # Process synchronously (or queue for async processing)
-    # This is a simplified version - WebSocket is recommended
-    
-    return {"status": "queued", "session_id": session_id}
+
+    agent = request.app.state.agent
+    response_text = await asyncio.to_thread(agent.run, message.content, session_id)
+    await session_manager.add_to_history(session_id, message.content, response_text)
+    return {"status": "completed", "session_id": session_id, "response": response_text}
 
 @router.post("/config/wakeword")
 async def configure_wakeword(config: WakeWordConfig):

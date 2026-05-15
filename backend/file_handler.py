@@ -2,11 +2,11 @@ import os
 import shutil
 import hashlib
 import mimetypes
+import io
 from pathlib import Path
 from typing import Optional, Dict, Any, BinaryIO
 from datetime import datetime
 import aiofiles
-import magic
 from PIL import Image
 import PyPDF2
 from docx import Document
@@ -63,8 +63,13 @@ class FileHandler:
             raise HTTPException(400, f"File too large. Max {self.max_file_size / 1024 / 1024} MB")
         
         # Detect MIME type
-        mime = magic.from_buffer(await file.read(1024), mime=True)
+        sample = await file.read(1024)
         await file.seek(0)
+        try:
+            import magic
+            mime = magic.from_buffer(sample, mime=True)
+        except Exception:
+            mime = mimetypes.guess_type(file.filename)[0] or "application/octet-stream"
         
         # Validate file type
         if not self.is_allowed_type(mime):

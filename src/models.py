@@ -1,4 +1,4 @@
-from langchain_classic.schema import BaseMessage, AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import BaseMessage, AIMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 from typing import Annotated, List, Dict, Any, Optional, TypedDict
 import operator
