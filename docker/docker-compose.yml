@@ -1,0 +1,179 @@
+version: '3.8'
+
+services:
+  # PostgreSQL for relational data (production)
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: pai_db
+      POSTGRES_USER: pai_user
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-pai_secure_password}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - pai_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pai_user"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis for cache & pub/sub
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-redis_pass}
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - pai_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # NATS event bus (single node for dev, clustered for prod)
+  nats:
+    image: nats:2.10-alpine
+    command: -js
+    ports:
+      - "4222:4222"
+      - "8222:8222"  # monitoring
+    volumes:
+      - nats_data:/data
+    networks:
+      - pai_network
+    healthcheck:
+      test: ["CMD", "nats", "server", "check"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ChromaDB vector store
+  chroma:
+    image: chromadb/chroma:latest
+    environment:
+      - IS_PERSISTENT=TRUE
+      - PERSIST_DIRECTORY=/chroma/chroma
+    volumes:
+      - chroma_data:/chroma/chroma
+    ports:
+      - "8001:8000"
+    networks:
+      - pai_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/heartbeat"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # PAI API Server
+  pai-api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      - PAI_ENV=production
+      - DATABASE_URL=postgresql+asyncpg://pai_user:${DB_PASSWORD:-pai_secure_password}@postgres:5432/pai_db
+      - REDIS_HOST=redis
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-redis_pass}
+      - NATS_SERVERS=nats://nats:4222
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - GOOGLE_MAPS_API_KEY=${GOOGLE_MAPS_API_KEY}
+      - UBER_API_KEY=${UBER_API_KEY}
+      - JWT_SECRET=${JWT_SECRET}
+    ports:
+      - "8000:8000"
+    volumes:
+      - ../src:/app/src
+      - ../config:/app/config
+      - pai_data:/app/data
+      - ../logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      chroma:
+        condition: service_healthy
+    networks:
+      - pai_network
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+        reservations:
+          cpus: '1'
+          memory: 2G
+
+  # Optional: LLM serving (vLLM for local models)
+  llm-server:
+    image: vllm/vllm-openai:latest
+    command: --model Qwen/Qwen-14B-Chat --api-key ${LLM_API_KEY:-none} --port 8000
+    environment:
+      - HF_TOKEN=${HF_TOKEN}
+    volumes:
+      - ../models:/root/.cache/huggingface
+    ports:
+      - "8002:8000"
+    networks:
+      - pai_network
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    profiles:
+      - llm-local
+
+  # Prometheus for monitoring
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - pai_network
+    profiles:
+      - monitoring
+
+  # Grafana dashboards
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+    volumes:
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    networks:
+      - pai_network
+    depends_on:
+      - prometheus
+    profiles:
+      - monitoring
+
+networks:
+  pai_network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  nats_data:
+  chroma_data:
+  pai_data:
+  prometheus_data:
+  grafana_data:

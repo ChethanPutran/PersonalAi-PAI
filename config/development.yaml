@@ -1,0 +1,80 @@
+# Development Configuration
+environment: development
+debug: true
+
+# API Server
+api:
+  host: "0.0.0.0"
+  port: 8000
+  reload: true
+  workers: 1
+
+# Database
+database:
+  url: "sqlite+aiosqlite:///./data/pai.db"
+  echo: true
+  pool_size: 5
+  max_overflow: 10
+
+# Redis Cache & Pub/Sub
+redis:
+  host: "localhost"
+  port: 6379
+  db: 0
+  password: null
+  decode_responses: true
+
+# NATS Event Bus
+nats:
+  servers:
+    - "nats://localhost:4222"
+  connect_timeout: 5
+  max_reconnect_attempts: 5
+
+# Memory System
+memory:
+  vector_db_path: "./data/chroma"
+  embedding_model: "all-MiniLM-L6-v2"
+  short_term_ttl: 3600  # seconds
+  long_term_db_path: "./data/long_term.db"
+  episodic_db_path: "./data/episodic.db"
+
+# LLM Configuration
+llm:
+  provider: "openai"  # openai, local, or ollama
+  model: "gpt-4"
+  api_key: "${OPENAI_API_KEY}"
+  base_url: null
+  local_model_path: null
+  max_tokens: 2000
+  temperature: 0.7
+
+# Vision Models
+vision:
+  object_detection_model: "yolov8n.pt"
+  ocr_lang: "en"
+  pose_estimation: "mediapipe"
+
+# Automation
+automation:
+  browser:
+    headless: false
+    slow_mo: 100  # ms
+  android:
+    adb_path: "adb"
+    device_id: null
+
+# Logging
+logging:
+  level: "DEBUG"
+  format: "json"
+  file: "./logs/pai.log"
+  max_size_mb: 100
+  backup_count: 5
+
+# Security
+security:
+  jwt_secret: "${JWT_SECRET:-dev_secret}"
+  token_expiry_hours: 24
+  rate_limit: 100  # requests per minute
+  allowed_origins: ["*"]

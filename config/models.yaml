@@ -1,0 +1,65 @@
+# Model registry for the PAI system
+models:
+  # Embedding models
+  embeddings:
+    default: "all-MiniLM-L6-v2"
+    alternatives:
+      - name: "BAAI/bge-large-en-v1.5"
+        dimensions: 1024
+      - name: "intfloat/e5-large-v2"
+        dimensions: 1024
+
+  # LLM models
+  llm:
+    chat:
+      - name: "gpt-4"
+        provider: "openai"
+        context_length: 8192
+      - name: "gpt-3.5-turbo"
+        provider: "openai"
+        context_length: 4096
+      - name: "Qwen/Qwen-14B-Chat"
+        provider: "local"
+        context_length: 8192
+        quantization: "int4"
+      - name: "meta-llama/Llama-2-13b-chat-hf"
+        provider: "local"
+        context_length: 4096
+    reasoning:
+      - name: "gpt-4"
+        provider: "openai"
+      - name: "Qwen-72B-Chat"
+        provider: "local"
+
+  # Vision models
+  vision:
+    object_detection:
+      default: "yolov8n.pt"
+      high_accuracy: "yolov8x.pt"
+    segmentation:
+      default: "sam2_hiera_large"
+    ocr:
+      default: "paddleocr"
+      language: "en"
+    pose_estimation:
+      default: "mediapipe"
+      advanced: "openpose"
+
+  # Speech models
+  speech:
+    stt:
+      default: "whisper-base"
+      realtime: "faster-whisper"
+    tts:
+      default: "piper"
+      high_quality: "coqui"
+
+  # Translation
+  translation:
+    default: "m2m100_418M"
+    high_quality: "seamless_m4t"
+
+  # Learning / personalization
+  learning:
+    user_embedding_dim: 128
+    sequence_model: "lstm"

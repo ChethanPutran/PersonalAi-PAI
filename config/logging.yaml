@@ -1,0 +1,57 @@
+version: 1
+disable_existing_loggers: false
+
+formatters:
+  json:
+    format: '{"time": "%(asctime)s", "level": "%(levelname)s", "name": "%(name)s", "message": "%(message)s", "module": "%(module)s", "line": %(lineno)d}'
+    datefmt: "%Y-%m-%dT%H:%M:%SZ"
+  console:
+    format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    datefmt: "%Y-%m-%d %H:%M:%S"
+
+handlers:
+  console:
+    class: logging.StreamHandler
+    level: DEBUG
+    formatter: console
+    stream: ext://sys.stdout
+
+  file:
+    class: logging.handlers.RotatingFileHandler
+    level: INFO
+    formatter: json
+    filename: ./logs/pai.log
+    maxBytes: 104857600  # 100 MB
+    backupCount: 5
+
+  error_file:
+    class: logging.handlers.RotatingFileHandler
+    level: ERROR
+    formatter: json
+    filename: ./logs/pai_errors.log
+    maxBytes: 104857600
+    backupCount: 10
+
+loggers:
+  pai:
+    level: DEBUG
+    handlers: [console, file]
+    propagate: false
+  pai.kernel:
+    level: INFO
+    handlers: [file]
+    propagate: false
+  pai.agents:
+    level: DEBUG
+    handlers: [console, file]
+  pai.plugins:
+    level: INFO
+    handlers: [file]
+  uvicorn:
+    level: INFO
+    handlers: [console]
+    propagate: false
+
+root:
+  level: WARNING
+  handlers: [console, error_file]

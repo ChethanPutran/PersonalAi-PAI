@@ -1,0 +1,98 @@
+# Production Configuration
+environment: production
+debug: false
+
+# API Server
+api:
+  host: "0.0.0.0"
+  port: 8000
+  reload: false
+  workers: 4
+  ssl_cert: "/etc/ssl/certs/pai.crt"
+  ssl_key: "/etc/ssl/private/pai.key"
+
+# Database (PostgreSQL recommended)
+database:
+  url: "postgresql+asyncpg://pai_user:${DB_PASSWORD}@postgres:5432/pai_db"
+  echo: false
+  pool_size: 20
+  max_overflow: 40
+  pool_timeout: 30
+
+# Redis Cache & Pub/Sub
+redis:
+  host: "redis"
+  port: 6379
+  db: 0
+  password: "${REDIS_PASSWORD}"
+  ssl: false
+  decode_responses: true
+
+# NATS Event Bus (clustered)
+nats:
+  servers:
+    - "nats://nats1:4222"
+    - "nats://nats2:4222"
+    - "nats://nats3:4222"
+  connect_timeout: 10
+  max_reconnect_attempts: -1
+
+# Memory System
+memory:
+  vector_db_path: "/data/chroma"
+  embedding_model: "BAAI/bge-large-en-v1.5"
+  short_term_ttl: 1800  # 30 minutes
+  long_term_db_path: "/data/long_term.db"
+  episodic_db_path: "/data/episodic.db"
+
+# LLM Configuration (local or cloud)
+llm:
+  provider: "local"  # use vLLM or Ollama
+  model: "Qwen/Qwen-14B-Chat"
+  api_key: null
+  base_url: "http://llm-server:8000/v1"
+  local_model_path: "/models/qwen-14b"
+  max_tokens: 4096
+  temperature: 0.3
+  top_p: 0.95
+
+# Vision Models (optimized)
+vision:
+  object_detection_model: "yolov8s.pt"
+  ocr_lang: "en"
+  pose_estimation: "openpose"
+
+# Automation
+automation:
+  browser:
+    headless: true
+    slow_mo: 30
+  android:
+    adb_path: "/usr/bin/adb"
+    device_id: null
+
+# Logging (production)
+logging:
+  level: "INFO"
+  format: "json"
+  file: "/var/log/pai/pai.log"
+  max_size_mb: 500
+  backup_count: 10
+  sentry_dsn: "${SENTRY_DSN}"
+
+# Security
+security:
+  jwt_secret: "${JWT_SECRET}"
+  token_expiry_hours: 12
+  rate_limit: 20  # requests per minute per user
+  allowed_origins:
+    - "https://app.pai.example.com"
+  cors_allow_credentials: true
+
+# Monitoring
+monitoring:
+  prometheus:
+    enabled: true
+    port: 9090
+    path: "/metrics"
+  health_check_interval: 30

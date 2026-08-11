@@ -1,0 +1,28 @@
+{
+  "id": "plugin-voice",
+  "name": "Voice Plugin",
+  "version": "1.0.0",
+  "plugin_type": "sensor",
+  "entry_point": "main.py",
+  "description": "Speech recognition and synthesis for voice interaction",
+  "permissions": ["microphone", "speaker"],
+  "dependencies": ["openai-whisper", "piper-tts"],
+  "config_schema": {
+    "language": {
+      "type": "string",
+      "description": "Language code",
+      "default": "en"
+    },
+    "stt_model": {
+      "type": "string",
+      "description": "Speech-to-text model",
+      "default": "base",
+      "enum": ["tiny", "small", "base", "small", "medium", "large"]
+    },
+    "tts_model": {
+      "type": "string",
+      "description": "Text-to-speech model",
+      "default": "en_US-lessac-medium"
+    }
+  }
+}

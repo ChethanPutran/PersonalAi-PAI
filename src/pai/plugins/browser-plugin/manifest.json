@@ -1,0 +1,28 @@
+{
+  "id": "plugin-browser",
+  "name": "Browser Automation Plugin",
+  "version": "1.0.0",
+  "plugin_type": "action",
+  "entry_point": "main.py",
+  "description": "Web automation and browser control using Playwright",
+  "permissions": ["network", "file_write"],
+  "dependencies": ["playwright"],
+  "config_schema": {
+    "browser": {
+      "type": "string",
+      "description": "Browser to use",
+      "default": "chromium",
+      "enum": ["chromium", "firefox", "webkit"]
+    },
+    "headless": {
+      "type": "boolean",
+      "description": "Run in headless mode",
+      "default": true
+    },
+    "timeout": {
+      "type": "integer",
+      "description": "Navigation timeout in ms",
+      "default": 30000
+    }
+  }
+}
