@@ -1,0 +1,20 @@
+{
+  "id": "plugin-meeting",
+  "name": "Meeting Plugin",
+  "version": "1.0.0",
+  "plugin_type": "sensor",
+  "entry_point": "meeting_plugin.py",
+  "description": "Meeting notes and summaries",
+  "permissions": [
+    "microphone",
+    "file_write"
+  ],
+  "dependencies": [],
+  "config_schema": {
+    "language": {
+      "type": "string",
+      "description": "Meeting transcript language",
+      "default": "en"
+    }
+  }
+}

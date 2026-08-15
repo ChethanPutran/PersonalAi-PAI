@@ -4,9 +4,9 @@ Database setup script for the Personal AI System.
 Initializes SQLite databases for long-term memory, episodic memory, and relational data.
 """
 
-from src.pai.models.task import Base as TaskBase
-from src.pai.models.user import Base
-from src.pai.config import config
+from pai.models.task import Base as TaskBase
+from pai.models.user import Base
+from pai.config import config
 import sys
 import asyncio
 from pathlib import Path

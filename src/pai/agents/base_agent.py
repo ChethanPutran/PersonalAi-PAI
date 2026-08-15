@@ -13,7 +13,7 @@ class BaseAgent(ABC):
     to accomplish goals.
     """
     
-    def __init__(self, name: str, kernel=None):
+    def __init__(self, name: str, kernel):
         self.name = name
         self.kernel = kernel
         self._running = False

@@ -1,17 +1,18 @@
 # PAI Mobile App
 
-Flutter client for the Personal AI System. Provides voice input, camera capture, real‑time WebSocket communication, and push notifications.
+Flutter client for the Personal AI System. The app connects to the FastAPI backend, shows backend health, lists plugins, and lets you enable or disable them from the phone.
 
-## Getting Started
+## Run
 
-This project is a starting point for a Flutter application.
+1. Make sure the backend is running on the host configured in [lib/.env](lib/.env).
+2. From this folder, run `flutter pub get`.
+3. Start the app with `flutter run` or `flutter run -d <device-id>`.
+4. If you are using an Android emulator, change `API_BASE_URL` and `WS_URL` in [lib/.env](lib/.env) to `10.0.2.2` instead of your machine IP.
 
-A few resources to get you started if this is your first Flutter project:
+## Backend Endpoints Used
 
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
-
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+- `GET /health`
+- `GET /api/v1/plugins`
+- `POST /api/v1/plugins/{plugin_id}/enable`
+- `POST /api/v1/plugins/{plugin_id}/disable`
+- WebSocket goal sending through `WS_URL`

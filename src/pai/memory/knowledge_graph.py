@@ -6,7 +6,7 @@ from typing import (
 )
 
 from neo4j import AsyncGraphDatabase
-from neo4j.exceptions import Neo4jError
+from neo4j.exceptions import Neo4jError, ServiceUnavailable
 
 from loguru import logger
 
@@ -18,9 +18,9 @@ class KnowledgeGraph:
 
     def __init__(
         self,
-        uri: str = "bolt://localhost:7687",
-        user: str = "neo4j",
-        password: str = "password",
+        uri: str,
+        user: str,
+        password: str,
     ):
         self.uri = uri
         self.user = user
@@ -32,7 +32,7 @@ class KnowledgeGraph:
         """
         Initialize Neo4j driver and constraints.
         """
-
+        print(f"Initializing KnowledgeGraph with URI: {self.uri}, User: {self.user}, Password: {self.password}")
         try:
             self.driver = (
                 AsyncGraphDatabase.driver(
@@ -73,11 +73,13 @@ class KnowledgeGraph:
                 "KnowledgeGraph initialized"
             )
 
-        except Neo4jError as e:
-            logger.error(
-                f"Neo4j initialization error: {e}"
+        except (Neo4jError, ServiceUnavailable, OSError) as e:
+            if self.driver:
+                await self.driver.close()
+            self.driver = None
+            logger.warning(
+                f"KnowledgeGraph disabled because Neo4j is unavailable: {e}"
             )
-            raise
 
     async def add_entity(
         self,
@@ -92,9 +94,7 @@ class KnowledgeGraph:
         """
 
         if self.driver is None:
-            raise RuntimeError(
-                "KnowledgeGraph not initialized"
-            )
+            return
 
         try:
             cypher = f"""
@@ -130,9 +130,7 @@ class KnowledgeGraph:
         """
 
         if self.driver is None:
-            raise RuntimeError(
-                "KnowledgeGraph not initialized"
-            )
+            return
 
         try:
             cypher = f"""
@@ -169,9 +167,7 @@ class KnowledgeGraph:
         """
 
         if self.driver is None:
-            raise RuntimeError(
-                "KnowledgeGraph not initialized"
-            )
+            return []
 
         try:
             async with self.driver.session() as session:

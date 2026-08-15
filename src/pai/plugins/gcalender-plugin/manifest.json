@@ -1,0 +1,22 @@
+{
+  "id": "plugin-calendar",
+  "name": "Calendar Plugin",
+  "version": "1.0.0",
+  "plugin_type": "integration",
+  "entry_point": "calendar_plugin.py",
+  "description": "Google Calendar integration and scheduling",
+  "permissions": [
+    "calendar"
+  ],
+  "dependencies": [
+    "google-api-python-client",
+    "google-auth"
+  ],
+  "config_schema": {
+    "calendar_id": {
+      "type": "string",
+      "description": "Primary calendar ID",
+      "default": "primary"
+    }
+  }
+}

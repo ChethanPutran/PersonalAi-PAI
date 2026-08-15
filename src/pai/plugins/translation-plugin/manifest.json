@@ -1,0 +1,19 @@
+{
+  "id": "plugin-translation",
+  "name": "Translation Plugin",
+  "version": "1.0.0",
+  "plugin_type": "action",
+  "entry_point": "translation_plugin.py",
+  "description": "Text translation and language detection",
+  "permissions": [
+    "network"
+  ],
+  "dependencies": [],
+  "config_schema": {
+    "target_language": {
+      "type": "string",
+      "description": "Target language",
+      "default": "en"
+    }
+  }
+}

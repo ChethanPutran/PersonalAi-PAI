@@ -1,13 +1,12 @@
 """AI Kernel - Central intelligence layer."""
 
-import asyncio
 from typing import Dict, Any, Optional
-from datetime import datetime
 import logging
 
-from pai.config import config
+from pai.config import Config
 from pai.kernel.context_manager import ContextManager
 from pai.kernel.capability_router import CapabilityRouter
+from pai.kernel.llm_provider import LLMProvider
 from pai.kernel.security_manager import SecurityManager
 from pai.kernel.executor_scheduler import ExecutorScheduler
 from pai.memory.memory_manager import MemoryManager
@@ -31,22 +30,44 @@ class AIKernel:
     - Executor scheduling
     """
     
-    def __init__(self, name: str = "AIKernel", version: str = "1.0", host: str = "localhost", port: int = 8000):
+    def __init__(self,config: Config):
         self._initialized = False
         self._running = False
         
         # Core components
-        self.context_manager = ContextManager()
-        self.memory_manager = MemoryManager()
-        self.planning_engine = PlanningEngine()
+        self.context_manager = ContextManager(max_history=config.memory.context_history_size)
+        self.memory_manager = MemoryManager(
+            config.memory.long_term_db_url,
+            config.memory.episodic_db_url,
+            config.memory.vector_store_path,
+            config.memory.procedural_path,
+            config.memory.neo4j_url,
+            config.memory.neo4j_user,
+            config.memory.neo4j_password,
+            short_term_size=config.memory.short_term_size,
+            short_term_ttl=config.memory.short_term_ttl,
+            embedding_model=config.memory.embedding_model
+        )
+        self.llm= LLMProvider(config.llm.provider,
+                                        model=config.llm.model, 
+                                        api_key=config.llm.api_key, 
+                                        base_url=config.llm.base_url,
+                                        temperature=config.llm.temperature,
+                                        max_tokens=config.llm.max_tokens)
+        self.planning_engine = PlanningEngine(self)
         self.capability_router = CapabilityRouter()
         self.security_manager = SecurityManager(self)
-        self.executor_scheduler = ExecutorScheduler(name, host, port, self)
-        self.event_bus = EventBus()
+        self.executor_scheduler = ExecutorScheduler(config.executor.name, 
+                                                    config.executor.host, 
+                                                    config.executor.port, 
+                                                    self, 
+                                                    config.executor.executors)
+        self.event_bus = EventBus(config.event_bus.nats.url, 
+                                  max_queue_size=config.event_bus.max_queue_size)
         
         # Managers
         self.agent_manager = AgentManager(self)
-        self.plugin_manager = PluginManager(self)
+        self.plugin_manager = PluginManager(self,enabled_plugins=config.plugins.enabled_plugins)
         
         # State
         self.user_id: Optional[str] = None
@@ -91,16 +112,27 @@ class AIKernel:
         self._running = True
         logging.info("AI Kernel started")
     
-    async def stop(self) -> None:
-        """Gracefully stop the kernel."""
+    async def shutdown(self) -> None:
+        """
+        Shutdown the kernel and all subsystems."""
+        if not self._running:
+            return
         logging.info("Stopping AI Kernel...")
         
         self._running = False
         
         await self.agent_manager.stop()
         await self.executor_scheduler.stop()
-        await self.event_bus.stop()
+        await self.event_bus.shutdown()
         await self.plugin_manager.shutdown()
+        await self.memory_manager.shutdown()
+        await self.context_manager.shutdown()
+        await self.planning_engine.shutdown()
+        await self.capability_router.shutdown()
+        await self.security_manager.shutdown()
+        await self.executor_scheduler.shutdown()
+        await self.event_bus.shutdown()
+
         
         self._initialized = False
         logging.info("AI Kernel stopped")

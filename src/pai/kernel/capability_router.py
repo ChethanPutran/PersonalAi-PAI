@@ -23,3 +23,6 @@ class CapabilityRouter:
         executor = self._capability_map.get(task_type, "server")
         logger.debug(f"Routed {task_type} -> {executor}")
         return executor
+
+    async def shutdown(self) -> None:
+        logger.info("CapabilityRouter shutdown complete")

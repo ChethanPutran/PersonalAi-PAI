@@ -1,0 +1,20 @@
+{
+  "id": "plugin-health",
+  "name": "Health Plugin",
+  "version": "1.0.0",
+  "plugin_type": "intelligence",
+  "entry_point": "health_plugin.py",
+  "description": "Health and wellness suggestions",
+  "permissions": [
+    "health_data",
+    "file_read"
+  ],
+  "dependencies": [],
+  "config_schema": {
+    "goal": {
+      "type": "string",
+      "description": "Daily health goal",
+      "default": "balance"
+    }
+  }
+}

@@ -2,11 +2,14 @@ from typing import Dict, Any, List
 from loguru import logger
 import json
 
+from pai.kernel.llm_provider import BaseLLMProvider
+
+
 
 class GoalDecomposer:
     """Uses LLM to break high-level goals into executable tasks."""
-    def __init__(self, kernel=None):
-        self.kernel = kernel
+    def __init__(self, llm:BaseLLMProvider):
+        self.llm = llm
 
     async def initialize(self) -> None:
         logger.info("LLM GoalDecomposer initialized")
@@ -31,12 +34,11 @@ class GoalDecomposer:
         Return only a JSON array of tasks, no extra text."""
 
         # Use LLM plugin
-        if hasattr(self, 'kernel') and self.kernel:
-            response = await self.kernel.plugin_manager.execute_plugin(
-                "llm", "complete", {"prompt": prompt, "max_tokens": 1000}
-            )
+        if hasattr(self, 'llm') and self.llm:
+            response = await self.llm.complete(prompt, max_tokens=1000)
+            logger.info(f"LLM response for goal decomposition: {response}")
             try:
-                tasks = json.loads(response.get("text", "[]"))
+                tasks = json.loads(response)
             except:
                 tasks = []
         else:

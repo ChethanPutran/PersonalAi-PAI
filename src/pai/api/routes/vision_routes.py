@@ -1,5 +1,5 @@
 from fastapi import WebSocket, WebSocketDisconnect
-from pai.main import kernel
+from pai.app_context import get_ws_app_context
 from fastapi import APIRouter
 
 router = APIRouter()
@@ -7,6 +7,7 @@ router = APIRouter()
 @router.websocket("/ws/video")
 async def video_stream(websocket: WebSocket):
     await websocket.accept()
+    kernel = get_ws_app_context(websocket).kernel
     vision_plugin = kernel.plugin_manager._plugins.get("vision")
     if not vision_plugin:
         await websocket.close()

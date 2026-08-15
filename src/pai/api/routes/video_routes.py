@@ -4,13 +4,14 @@ import numpy as np
 import asyncio
 import base64
 from fastapi import APIRouter
-from pai.main import kernel
+from pai.app_context import get_ws_app_context
 
 router = APIRouter()
 
 @router.websocket("/ws/video")
 async def video_stream(ws: WebSocket):
     await ws.accept()
+    kernel = get_ws_app_context(ws).kernel
     frame_queue = asyncio.Queue(maxsize=10)
     processing = True
     

@@ -1,0 +1,20 @@
+{
+  "id": "plugin-planner",
+  "name": "Planner Plugin",
+  "version": "1.0.0",
+  "plugin_type": "action",
+  "entry_point": "planner_plugin.py",
+  "description": "Goal planning and daily schedule optimization",
+  "permissions": [
+    "calendar",
+    "file_read"
+  ],
+  "dependencies": [],
+  "config_schema": {
+    "time_horizon": {
+      "type": "integer",
+      "description": "Planning horizon in days",
+      "default": 7
+    }
+  }
+}

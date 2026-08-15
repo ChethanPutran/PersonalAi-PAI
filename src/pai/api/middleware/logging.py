@@ -1,11 +1,23 @@
-from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.types import ASGIApp, Scope, Receive, Send
 from loguru import logger
 import time
 
-class LoggingMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request, call_next):
+class LoggingMiddleware:
+    def __init__(self, app: ASGIApp):
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send):
+        # Skip WebSocket – let it pass through untouched
+        if scope["type"] == "websocket":
+            await self.app(scope, receive, send)
+            return
+
+        # Only log HTTP requests
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
         start = time.time()
-        response = await call_next(request)
+        await self.app(scope, receive, send)
         duration = time.time() - start
-        logger.info(f"{request.method} {request.url.path} -> {response.status_code} ({duration:.3f}s)")
-        return response
+        logger.info(f"{scope['method']} {scope['path']} - {duration:.3f}s")

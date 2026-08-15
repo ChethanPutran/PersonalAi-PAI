@@ -1,0 +1,19 @@
+{
+  "id": "plugin-smart-home",
+  "name": "Smart Home Plugin",
+  "version": "1.0.0",
+  "plugin_type": "action",
+  "entry_point": "smart_home_plugin.py",
+  "description": "Smart home device control",
+  "permissions": [
+    "device_control"
+  ],
+  "dependencies": [],
+  "config_schema": {
+    "home_id": {
+      "type": "string",
+      "description": "Home configuration ID",
+      "default": "default"
+    }
+  }
+}

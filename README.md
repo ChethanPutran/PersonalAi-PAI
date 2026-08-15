@@ -10,7 +10,7 @@ A distributed, multimodal AI ecosystem capable of understanding the user, learni
 
 ---
 
-## 📖 Table of Contents
+## Table of Contents
 
 - [Vision](#vision)
 - [Architecture](#architecture)
@@ -26,13 +26,13 @@ A distributed, multimodal AI ecosystem capable of understanding the user, learni
 
 ---
 
-## 🚀 Vision
+## Vision
 
 The Personal AI System transforms from a simple voice assistant into a **distributed cognitive architecture** – a modular AI operating system that becomes a persistent, personalized companion capable of autonomous workflows and real-world interaction.
 
 ---
 
-## 🧠 Architecture
+## Architecture
 
 ```text
                  ┌─────────────────────┐
@@ -48,9 +48,9 @@ The Personal AI System transforms from a simple voice assistant into a **distrib
                            │
       ┌────────────────────┼────────────────────┐
       │                    │                    │
-┌─────▼─────┐      ┌──────▼──────┐      ┌──────▼──────┐
-│  Agents   │      │   Plugins   │      │  Executors  │
-└───────────┘      └─────────────┘      └─────────────┘
+┌─────▼─────┐       ┌──────▼──────┐      ┌──────▼──────┐
+│  Agents   │       │   Plugins   │      │  Executors  │
+└───────────┘       └─────────────┘      └─────────────┘
 ```
 
 - **AI Kernel** – Central coordinator (context, memory, planning, routing)
@@ -60,7 +60,7 @@ The Personal AI System transforms from a simple voice assistant into a **distrib
 
 ---
 
-## ✨ Features
+## Features
 
 | Category | Capabilities |
 |----------|--------------|
@@ -75,7 +75,7 @@ The Personal AI System transforms from a simple voice assistant into a **distrib
 
 ---
 
-## 🛠️ Getting Started
+## Getting Started
 
 ### Prerequisites
 
@@ -120,7 +120,7 @@ The Personal AI System transforms from a simple voice assistant into a **distrib
 
 ---
 
-## ⚙️ Configuration
+## Configuration
 
 Configuration is managed via `config/development.yaml` and environment variables.
 
@@ -139,7 +139,7 @@ For production, set `PAI_ENV=production` and use a PostgreSQL URL.
 
 ---
 
-## 🏃 Running the System
+## Running the System
 
 ### Using Docker Compose (recommended for full stack)
 ```bash
@@ -174,7 +174,7 @@ python -m pai.executors.android_executor --device-id emulator-5554
 
 ---
 
-## 🧪 Testing
+## Testing
 
 Run the full test suite:
 ```bash
@@ -194,7 +194,7 @@ open htmlcov/index.html
 
 ---
 
-## 🔧 Extending
+## Extending
 
 ### Creating a New Plugin
 
@@ -240,12 +240,6 @@ Implement `BaseExecutor` and register it with `ExecutorScheduler`.
 
 ---
 
-## 📡 API Documentation
-
-Once running, visit:
-- Swagger UI: `http://localhost:8000/docs`
-- ReDoc: `http://localhost:8000/redoc`
-
 ### WebSocket Endpoint
 
 Connect to `ws://localhost:8000/ws` and send:
@@ -273,7 +267,7 @@ Receive results as JSON events.
 
 ---
 
-## 🐛 Troubleshooting
+## Troubleshooting
 
 | Issue | Solution |
 |-------|----------|
@@ -287,13 +281,13 @@ For more help, open an issue on GitHub.
 
 ---
 
-## 📄 License
+## License
 
 This project is licensed under the MIT License – see the [LICENSE](LICENSE) file for details.
 
 ---
 
-## 🙏 Acknowledgements
+## Acknowledgements
 
 - [LangGraph](https://github.com/langchain-ai/langgraph) – agent orchestration
 - [FastAPI](https://fastapi.tiangolo.com/) – API framework
@@ -303,10 +297,17 @@ This project is licensed under the MIT License – see the [LICENSE](LICENSE) fi
 
 ---
 
-*Built with ❤️ for a truly personal AI.*
-```
 
----
+## Docker Setup for Neo4j
+
+```bash
+docker run -d \
+    --name=neo4j \
+    --publish=7474:7474 \
+    --publish=7687:7687 \
+    --volume=$HOME/neo4j/data:/data \
+    neo4j:latest
+```
 
 ## `.env.example` – Environment template
 
@@ -335,6 +336,7 @@ GOOGLE_CALENDAR_CREDENTIALS=path/to/credentials.json
 ```
 
 ---
+flutter run -d linux --verbose --target lib/main.dart
 
 ## Final Steps
 
@@ -344,3 +346,9 @@ GOOGLE_CALENDAR_CREDENTIALS=path/to/credentials.json
 4. Start the system with `python -m pai.main` or `docker-compose up`.
 
 The Personal AI System is now fully operational, with all components, tests, and documentation ready.
+
+# RUn backend
+source .env && uvicorn pai.main:app --reload --host 0.0.0.0 --port 8000
+
+# RUn frontend
+cd frontend/ui/apps/pai_mobile && flutter pub get && flutter run -d <device-id>

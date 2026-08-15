@@ -1,0 +1,19 @@
+{
+  "id": "plugin-notification",
+  "name": "Notification Plugin",
+  "version": "1.0.0",
+  "plugin_type": "action",
+  "entry_point": "notification_plugin.py",
+  "description": "User notifications and alerts",
+  "permissions": [
+    "notification"
+  ],
+  "dependencies": [],
+  "config_schema": {
+    "channel": {
+      "type": "string",
+      "description": "Default delivery channel",
+      "default": "desktop"
+    }
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "id": "plugin-maps",
+  "name": "Maps Plugin",
+  "version": "1.0.0",
+  "plugin_type": "action",
+  "entry_point": "maps_plugin.py",
+  "description": "Location search and route planning",
+  "permissions": [
+    "network"
+  ],
+  "dependencies": [],
+  "config_schema": {
+    "region": {
+      "type": "string",
+      "description": "Preferred region",
+      "default": "US"
+    }
+  }
+}

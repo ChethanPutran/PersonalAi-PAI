@@ -8,16 +8,16 @@ from loguru import logger
 class LongTermMemory:
     """SQLite-based persistent memory for user preferences and facts."""
     
-    def __init__(self, db_path: str = "./data/long_term.db"):
-        self.db_path = db_path
+    def __init__(self, db_url: str):
+        self.db_url = db_url
         self._conn: Optional[aiosqlite.Connection] = None
     
     async def _check_connection(self):
         assert self._conn is not None, "LongTermMemory not initialized. Call initialize() first."
         
     async def initialize(self) -> None:
-        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = await aiosqlite.connect(self.db_path)
+        Path(self.db_url).parent.mkdir(parents=True, exist_ok=True)
+        self._conn = await aiosqlite.connect(self.db_url)
         await self._conn.execute("""
             CREATE TABLE IF NOT EXISTS memories (
                 key TEXT PRIMARY KEY,

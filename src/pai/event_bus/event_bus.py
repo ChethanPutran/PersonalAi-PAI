@@ -1,19 +1,6 @@
 """Event Bus for asynchronous communication."""
 
 import asyncio
-from typing import Dict, List, Callable, Any, Awaitable, Optional
-from collections import defaultdict
-import logging
-
-from pai.event_bus.event_types import EventType
-
-import asyncio
-import nats
-from nats.aio.client import Client as NATSClient
-from typing import Dict, Any, Callable, Awaitable
-
-
-import asyncio
 import json
 import logging
 from collections import defaultdict
@@ -25,9 +12,15 @@ from typing import (
     List,
     Optional,
 )
+from urllib.parse import urlparse
 
 import nats
 from nats.aio.client import Client as NATSClient
+from nats.errors import Error as NATSError
+
+
+async def _ignore_nats_error(exc: Exception) -> None:
+    return None
 
 
 class EventBus:
@@ -44,7 +37,8 @@ class EventBus:
 
     def __init__(
         self,
-        nats_url: str = "nats://localhost:4222",
+        nats_url: str,
+        max_queue_size: int = 1000,
     ):
         self.nats_url = nats_url
         self.nc: Optional[NATSClient] = None
@@ -58,7 +52,7 @@ class EventBus:
             ],
         ] = defaultdict(list)
         self._event_queue: asyncio.Queue = (
-            asyncio.Queue()
+            asyncio.Queue(maxsize=max_queue_size)
         )
         self._running = False
         self._worker_task: Optional[
@@ -68,13 +62,45 @@ class EventBus:
     async def initialize(self) -> None:
         """Initialize NATS connection."""
 
-        self.nc = await nats.connect(
-            self.nats_url
-        )
+        if not await self._nats_port_is_open():
+            self.nc = None
+            logging.warning("NATS unavailable; EventBus using local-only mode")
+            return
 
-        logging.info(
-            f"Connected to NATS: {self.nats_url}"
-        )
+        try:
+            self.nc = await asyncio.wait_for(
+                nats.connect(
+                    self.nats_url,
+                    allow_reconnect=False,
+                    connect_timeout=0.5,
+                    error_cb=_ignore_nats_error,
+                ),
+                timeout=1,
+            )
+            logging.info(
+                f"Connected to NATS: {self.nats_url}"
+            )
+        except (NATSError, OSError, TimeoutError) as exc:
+            self.nc = None
+            logging.warning(
+                f"NATS unavailable; EventBus using local-only mode: {exc}"
+            )
+
+    async def _nats_port_is_open(self) -> bool:
+        parsed = urlparse(self.nats_url)
+        host = parsed.hostname or "localhost"
+        port = parsed.port or 4222
+
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(host, port),
+                timeout=0.5,
+            )
+            writer.close()
+            await writer.wait_closed()
+            return True
+        except (OSError, TimeoutError):
+            return False
 
     async def start(self) -> None:
         """Start event processing."""
@@ -87,11 +113,12 @@ class EventBus:
             )
         )
 
-        await self._start_nats_listener()
+        if self.nc:
+            await self._start_nats_listener()
 
         logging.info("EventBus started")
 
-    async def stop(self) -> None:
+    async def shutdown(self) -> None:
         """Shutdown event bus."""
 
         self._running = False
@@ -105,7 +132,10 @@ class EventBus:
                 pass
 
         if self.nc:
-            await self.nc.drain()
+            try:
+                await self.nc.drain()
+            except Exception as exc:
+                logging.warning(f"Error while draining NATS connection: {exc}")
 
         logging.info("EventBus stopped")
 

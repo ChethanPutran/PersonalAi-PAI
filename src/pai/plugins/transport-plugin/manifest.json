@@ -1,0 +1,19 @@
+{
+  "id": "plugin-transport",
+  "name": "Transport Plugin",
+  "version": "1.0.0",
+  "plugin_type": "action",
+  "entry_point": "transport_plugin.py",
+  "description": "Ride booking and trip planning",
+  "permissions": [
+    "network"
+  ],
+  "dependencies": [],
+  "config_schema": {
+    "preferred_mode": {
+      "type": "string",
+      "description": "Default transport mode",
+      "default": "car"
+    }
+  }
+}

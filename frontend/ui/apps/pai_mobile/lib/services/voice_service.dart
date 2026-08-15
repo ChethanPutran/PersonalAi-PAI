@@ -1,7 +1,9 @@
+import 'dart:io' show Platform;
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:speech_to_text/speech_to_text.dart'
-    as stt;
+  as stt;
 
 class VoiceService {
   final stt.SpeechToText _speech =
@@ -12,13 +14,17 @@ class VoiceService {
   bool get isListening => _isListening;
 
   Future<bool> initialize() async {
-    final available =
-        await _speech.initialize(
+    // Speech plugins are only supported on mobile platforms.
+    if (!(Platform.isAndroid || Platform.isIOS)) {
+      debugPrint('STT not initialized: unsupported platform');
+      return false;
+    }
+
+    final available = await _speech.initialize(
       onStatus: (status) {
         debugPrint('STT status: $status');
 
-        if (status == 'done' ||
-            status == 'notListening') {
+        if (status == 'done' || status == 'notListening') {
           _isListening = false;
         }
       },
@@ -34,6 +40,11 @@ class VoiceService {
   Future<void> startListening(
     Function(String) onResult,
   ) async {
+    if (!(Platform.isAndroid || Platform.isIOS)) {
+      debugPrint('startListening ignored: unsupported platform');
+      return;
+    }
+
     if (_isListening) return;
 
     _isListening = true;
@@ -43,7 +54,7 @@ class VoiceService {
         onResult(result.recognizedWords);
       },
       listenFor: const Duration(seconds: 10),
-      pauseFor: const Duration(seconds: 2)
+      pauseFor: const Duration(seconds: 2),
     );
   }
 

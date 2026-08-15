@@ -1,0 +1,19 @@
+{
+  "id": "plugin-learning",
+  "name": "Learning Plugin",
+  "version": "1.0.0",
+  "plugin_type": "intelligence",
+  "entry_point": "learning_plugin.py",
+  "description": "Learning recommendations and habit tracking",
+  "permissions": [
+    "file_read"
+  ],
+  "dependencies": [],
+  "config_schema": {
+    "tracking_window": {
+      "type": "integer",
+      "description": "Tracking window in days",
+      "default": 30
+    }
+  }
+}

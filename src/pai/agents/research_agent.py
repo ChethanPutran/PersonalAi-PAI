@@ -9,7 +9,7 @@ from pai.agents.base_agent import BaseAgent
 class ResearchAgent(BaseAgent):
     """Autonomous research agent."""
     
-    def __init__(self, kernel=None):
+    def __init__(self, kernel):
         super().__init__("research_agent", kernel)
         self._capabilities = [
             "research.search_web",

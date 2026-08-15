@@ -25,7 +25,7 @@ class PlanningEngine:
     
     def __init__(self, kernel):
         self.kernel = kernel
-        self.goal_decomposer = GoalDecomposer(kernel)
+        self.goal_decomposer = GoalDecomposer(kernel.llm)
         self.workflow_executor = WorkflowExecutor(kernel)
         self.procedural_memory = ProceduralMemory()
         self.long_horizon = LongHorizonPlanner(kernel, self.goal_decomposer, self.workflow_executor)
@@ -182,3 +182,4 @@ class PlanningEngine:
         await self.workflow_executor.shutdown()
         self._initialized = False
         logger.info("Planning engine shutdown")
+

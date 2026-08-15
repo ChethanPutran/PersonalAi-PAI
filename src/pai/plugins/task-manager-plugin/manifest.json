@@ -1,0 +1,19 @@
+{
+  "id": "plugin-task-manager",
+  "name": "Task Manager Plugin",
+  "version": "1.0.0",
+  "plugin_type": "action",
+  "entry_point": "task_manager_plugin.py",
+  "description": "Create, update and track tasks",
+  "permissions": [
+    "file_write"
+  ],
+  "dependencies": [],
+  "config_schema": {
+    "default_status": {
+      "type": "string",
+      "description": "Default task status",
+      "default": "pending"
+    }
+  }
+}

@@ -4,7 +4,9 @@ from pai.agents.base_agent import BaseAgent
 
 class CommunicationAgent(BaseAgent):
     """Assists with translation, conversation, and summarization."""
-    
+    def __init__(self, kernel):
+        super().__init__("communication_agent", kernel)
+        
     async def initialize(self) -> None:
         self._capabilities = ["translate", "summarize", "suggest_response"]
         logger.info("CommunicationAgent initialized")

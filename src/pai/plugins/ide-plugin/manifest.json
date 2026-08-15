@@ -1,0 +1,20 @@
+{
+  "id": "plugin-ide",
+  "name": "IDE Plugin",
+  "version": "1.0.0",
+  "plugin_type": "action",
+  "entry_point": "ide_plugin.py",
+  "description": "Editor and workflow automation",
+  "permissions": [
+    "file_read",
+    "file_write"
+  ],
+  "dependencies": [],
+  "config_schema": {
+    "workspace_root": {
+      "type": "string",
+      "description": "IDE workspace root",
+      "default": "."
+    }
+  }
+}

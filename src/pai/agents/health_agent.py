@@ -4,6 +4,10 @@ from pai.agents.base_agent import BaseAgent
 
 class HealthAgent(BaseAgent):
     name = "health_agent"
+
+    def __init__(self, kernel):
+        super().__init__(self.name, kernel)
+        self._capabilities = ["health.track_exercise", "health.analyze_form", "health.daily_summary"]
     
     async def initialize(self) -> None:
         self._capabilities = ["health.track_exercise", "health.analyze_form", "health.daily_summary"]

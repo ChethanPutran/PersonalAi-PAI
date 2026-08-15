@@ -1,5 +1,6 @@
 import chromadb
 from chromadb.utils import embedding_functions
+from chromadb.config import Settings
 from datetime import datetime
 import hashlib
 from datetime import datetime
@@ -25,7 +26,10 @@ DB_URI = f'postgresql://{POSTGRES_USER}:{POSTGRES_PASSWORD}@localhost:{POSTGRES_
 
 class Memory:
     def __init__(self, persist_directory=PERSIST_DIRECTORY):
-        self.client = chromadb.PersistentClient(path=persist_directory / "chroma_db")
+        self.client = chromadb.PersistentClient(
+            path=persist_directory / "chroma_db",
+            settings=Settings(anonymized_telemetry=False),
+        )
         
         # Use OpenAI embeddings (or you can use sentence-transformers locally)
         self.embedding_fn = embedding_functions.GoogleGenaiEmbeddingFunction(

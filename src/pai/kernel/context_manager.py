@@ -62,3 +62,10 @@ class ContextManager:
                 self.active_tasks[task_id]["completed_at"] = datetime.now().isoformat()
                 # Optionally move to history
                 del self.active_tasks[task_id]
+
+    async def shutdown(self) -> None:
+        """Clean up resources."""
+        self.conversation_history.clear()
+        self.active_tasks.clear()
+        self.device_states.clear()
+        logger.info("ContextManager shutdown complete")

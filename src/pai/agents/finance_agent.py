@@ -5,6 +5,10 @@ from pai.agents.base_agent import BaseAgent
 
 class FinanceAgent(BaseAgent):
     name = "finance_agent"
+
+    def __init__(self, kernel):
+        super().__init__(self.name, kernel)
+        self._capabilities = ["finance.track_expense", "finance.get_budget", "finance.investment_advice"]
     
     async def initialize(self) -> None:
         self._capabilities = ["finance.track_expense", "finance.get_budget", "finance.investment_advice"]
@@ -32,3 +36,17 @@ class FinanceAgent(BaseAgent):
     async def _investment_advice(self, amount: float) -> Dict:
         advice = await self.use_plugin("llm", "complete", {"prompt": f"Investment advice for ${amount}"})
         return {"advice": advice.get('text', 'Consider diversified index funds')}
+
+    async def handle_event(self, event_type: str, data: Dict[str, Any]) -> None:
+        logger.info(f"FinanceAgent received event {event_type} with data: {data}")
+        if event_type == "expense_recorded":
+            amount = data.get("amount")
+            category = data.get("category")
+            logger.info(f"Expense recorded: ${amount} in category {category}")
+        elif event_type == "budget_update":
+            budget_info = data.get("budget_info", {})
+            logger.info(f"Budget updated: {budget_info}")
+        elif event_type == "investment_opportunity":
+            opportunity = data.get("opportunity", "")
+            advice = await self._investment_advice(opportunity)
+            logger.info(f"Investment advice for opportunity '{opportunity}': {advice}")

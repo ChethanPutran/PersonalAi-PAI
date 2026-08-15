@@ -1,3 +1,5 @@
+import 'dart:io' show Platform;
+
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 class NotificationService {
@@ -14,23 +16,30 @@ class NotificationService {
     const ios =
         DarwinInitializationSettings();
 
-    const settings = InitializationSettings(
+    final linux = LinuxInitializationSettings(
+      defaultActionName: 'Open',
+    );
+
+    final settings = InitializationSettings(
       android: android,
       iOS: ios,
+      linux: linux,
     );
 
     await _notifications.initialize(
       settings: settings,
     );
 
-    await _notifications
-        .resolvePlatformSpecificImplementation<
-            IOSFlutterLocalNotificationsPlugin>()
-        ?.requestPermissions(
-          alert: true,
-          badge: true,
-          sound: true,
-        );
+    if (Platform.isIOS) {
+      await _notifications
+          .resolvePlatformSpecificImplementation<
+              IOSFlutterLocalNotificationsPlugin>()
+          ?.requestPermissions(
+            alert: true,
+            badge: true,
+            sound: true,
+          );
+    }
   }
 
   static Future<void> showNotification(
@@ -50,9 +59,12 @@ class NotificationService {
     const iosDetails =
         DarwinNotificationDetails();
 
+    const linuxDetails = LinuxNotificationDetails();
+
     const details = NotificationDetails(
       android: androidDetails,
       iOS: iosDetails,
+      linux: linuxDetails,
     );
 
     final int id =

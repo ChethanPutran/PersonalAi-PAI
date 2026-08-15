@@ -80,3 +80,9 @@ class SecurityManager:
         # Timeout
         del self.pending_approvals[approval_id]
         return False
+
+    async def shutdown(self) -> None:
+        """Clean up resources."""
+        self.pending_approvals.clear()
+        self.user_consent_store.clear()
+        logger.info("SecurityManager shutdown complete")
