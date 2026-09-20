@@ -1,120 +1,244 @@
+from __future__ import annotations
+
 import json
-from typing import Dict, Any, List
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
 import aiosqlite
 from loguru import logger
 
-import numpy as np
+from pai.memory.models import MemoryRecord
+
 
 class EpisodicMemory:
-    """Stores past interactions as episodes for experience recall."""
-    
-    def __init__(self, db_url: str = "sqlite+aiosqlite:///./data/episodic.db"):
-        self.db_url = db_url
-        self._conn = None
-        self.model = None
-    
-    async def _check_connection(self):
-        assert self._conn is not None, "EpisodicMemory not initialized"
+    """
+    Persistent memory of past interactions and experiences.
 
-    def _get_model(self):
-        if self.model is not None:
-            return self.model
+    EpisodicMemory owns the episode records.
+    Semantic retrieval can be performed through VectorStore.
+    """
 
-        try:
-            from sentence_transformers import SentenceTransformer
+    def __init__(
+        self,
+        db_path: str = "./data/episodic.db",
+    ):
+        self.db_path = Path(db_path)
+        self._conn: Optional[aiosqlite.Connection] = None
 
-            self.model = SentenceTransformer("all-MiniLM-L6-v2")
-            return self.model
-        except Exception as exc:
-            logger.warning(
-                "Semantic episodic memory disabled because sentence-transformers "
-                f"could not be loaded: {exc}"
+    async def _check_connection(self) -> aiosqlite.Connection:
+        if self._conn is None:
+            raise RuntimeError(
+                "EpisodicMemory is not initialized."
             )
-            return None
+
+        return self._conn
 
     async def initialize(self) -> None:
-        self._conn = await aiosqlite.connect(self.db_url)
-        await self._conn.execute("""
-            CREATE TABLE IF NOT EXISTS episodes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                content TEXT,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        await self._ensure_embedding_column()
-        logger.info("EpisodicMemory initialized")
-    
-    async def _ensure_embedding_column(self) -> None:
-        await self._check_connection()
-        try:
-            await self._conn.execute("ALTER TABLE episodes ADD COLUMN embedding BLOB") # type: ignore
-        except aiosqlite.OperationalError as exc:
-            if "duplicate column name" not in str(exc).lower():
-                raise
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
-        await self._conn.commit()
-    
-    async def add_base(self, episode: Dict[str, Any]) -> None:
-        assert self._conn is not None
-        await self._check_connection()
-        await self._conn.execute( 
-            "INSERT INTO episodes (content) VALUES (?)",
-            (json.dumps(episode),)
-        ) 
-        await self._conn.commit()
+        self._conn = await aiosqlite.connect(str(self.db_path))
 
-        
-    async def add(self, episode: Dict[str, Any]) -> None:
-        model = self._get_model()
-        if model is None:
-            await self.add_base(episode)
-            return
-
-        embedding = model.encode(json.dumps(episode))
-        await self._check_connection()
         await self._conn.execute(
-            "INSERT INTO episodes (content, embedding) VALUES (?, ?)",
-            (json.dumps(episode), embedding.tobytes())
+            """
+            CREATE TABLE IF NOT EXISTS episodes (
+                id TEXT PRIMARY KEY,
+                content TEXT NOT NULL,
+                user_id TEXT,
+                session_id TEXT,
+                created_at TEXT NOT NULL,
+                importance REAL NOT NULL DEFAULT 0.5,
+                metadata TEXT NOT NULL DEFAULT '{}'
+            )
+            """
         )
+
+        await self._conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_episodes_user
+            ON episodes(user_id)
+            """
+        )
+
+        await self._conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_episodes_session
+            ON episodes(session_id)
+            """
+        )
+
         await self._conn.commit()
-    
-    async def get_similar(self, query_text: str, limit: int = 5) -> List[Dict]:
-        await self._check_connection()
-        model = self._get_model()
-        if model is None:
-            return await self.get_similar_db(query_text, limit)
 
-        query_vec = model.encode(query_text)
-        async with self._conn.execute(
-            "SELECT id, content, embedding FROM episodes WHERE embedding IS NOT NULL"
-        ) as cursor:
-            rows = await cursor.fetchall()
+        logger.info("EpisodicMemory initialized")
 
-        if not rows:
-            return await self.get_similar_db(query_text, limit)
+    async def add(
+        self,
+        content: Any,
+        *,
+        user_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        importance: float = 0.5,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> MemoryRecord:
 
-        scores = []
-        for row in rows:
-            stored_embedding = np.frombuffer(row[2], dtype=np.float32)
-            sim = np.dot(query_vec, stored_embedding) / (np.linalg.norm(query_vec) * np.linalg.norm(stored_embedding))
-            scores.append((sim, json.loads(row[1])))
-        scores.sort(key=lambda x: x[0], reverse=True)
-        return [ep for _, ep in scores[:limit]]
-    
-    async def get_similar_db(self, query_text: str, limit: int = 5) -> List[Dict[str, Any]]:
-        await self._check_connection()
-        # Simple keyword matching; for production, use embeddings
-        async with self._conn.execute(
-            "SELECT content FROM episodes ORDER BY timestamp DESC LIMIT ?", (limit * 3,)
-        ) as cursor:
-            rows = await cursor.fetchall()
-            episodes = [json.loads(r[0]) for r in rows]
-            # Simple relevance scoring: count query words in content string
-            words = set(query_text.lower().split())
-            scored = [(e, sum(word in str(e).lower() for word in words)) for e in episodes]
-            scored.sort(key=lambda x: x[1], reverse=True)
-            return [e for e, _ in scored[:limit]]
-    
+        record = MemoryRecord(
+            content=content,
+            memory_type="episodic",
+            user_id=user_id,
+            session_id=session_id,
+            importance=importance,
+            metadata=metadata or {},
+        )
+
+        conn = await self._check_connection()
+
+        await conn.execute(
+            """
+            INSERT INTO episodes (
+                id,
+                content,
+                user_id,
+                session_id,
+                created_at,
+                importance,
+                metadata
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                record.id,
+                json.dumps(content),
+                user_id,
+                session_id,
+                record.created_at.isoformat(),
+                record.importance,
+                json.dumps(record.metadata),
+            ),
+        )
+
+        await conn.commit()
+
+        return record
+
+    async def get(
+        self,
+        memory_id: str,
+    ) -> Optional[MemoryRecord]:
+
+        conn = await self._check_connection()
+
+        cursor = await conn.execute(
+            """
+            SELECT *
+            FROM episodes
+            WHERE id = ?
+            """,
+            (memory_id,),
+        )
+
+        row = await cursor.fetchone()
+
+        if row is None:
+            return None
+
+        return self._row_to_record(row)
+
+    async def get_recent(
+        self,
+        limit: int = 10,
+        *,
+        user_id: Optional[str] = None,
+    ) -> List[MemoryRecord]:
+
+        conn = await self._check_connection()
+
+        if user_id is None:
+            cursor = await conn.execute(
+                """
+                SELECT *
+                FROM episodes
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+        else:
+            cursor = await conn.execute(
+                """
+                SELECT *
+                FROM episodes
+                WHERE user_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (user_id, limit),
+            )
+
+        rows = await cursor.fetchall()
+
+        return [
+            self._row_to_record(row)
+            for row in rows
+        ]
+
+    async def search_text(
+        self,
+        query: str,
+        limit: int = 10,
+        *,
+        user_id: Optional[str] = None,
+    ) -> List[MemoryRecord]:
+
+        conn = await self._check_connection()
+
+        pattern = f"%{query}%"
+
+        if user_id is None:
+            cursor = await conn.execute(
+                """
+                SELECT *
+                FROM episodes
+                WHERE content LIKE ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (pattern, limit),
+            )
+        else:
+            cursor = await conn.execute(
+                """
+                SELECT *
+                FROM episodes
+                WHERE user_id = ?
+                AND content LIKE ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (user_id, pattern, limit),
+            )
+
+        rows = await cursor.fetchall()
+
+        return [
+            self._row_to_record(row)
+            for row in rows
+        ]
+
+    def _row_to_record(self, row: tuple) -> MemoryRecord:
+        return MemoryRecord(
+            id=row[0],
+            memory_type="episodic",
+            content=json.loads(row[1]),
+            user_id=row[2],
+            session_id=row[3],
+            created_at=datetime.fromisoformat(row[4]),
+            importance=row[5],
+            metadata=json.loads(row[6]),
+        )
+
     async def shutdown(self) -> None:
         if self._conn:
             await self._conn.close()
+            self._conn = None
+
+        logger.info("EpisodicMemory shutdown")

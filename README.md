@@ -348,7 +348,7 @@ flutter run -d linux --verbose --target lib/main.dart
 The Personal AI System is now fully operational, with all components, tests, and documentation ready.
 
 # RUn backend
-source .env && uvicorn pai.main:app --reload --host 0.0.0.0 --port 8000
+source .env && PYTHONPATH=src uvicorn pai.main:app --reload --host 0.0.0.0 --port 8000
 
 # RUn frontend
 cd frontend/ui/apps/pai_mobile && flutter pub get && flutter run -d <device-id>

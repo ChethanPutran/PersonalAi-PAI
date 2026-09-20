@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from fastapi import FastAPI, Request, WebSocket
 
 from pai.config import Config
-from pai.kernel.ai_kernel import AIKernel
+from pai.orchestration.orchestrator import AIKernel
 
 
 @dataclass

@@ -8,12 +8,14 @@ from loguru import logger
 
 from pai.app_context import PAIAppContext, create_app_context, get_app_context, get_ws_app_context
 from pai.config import config
-from pai.api.routes import agent_routes, plugin_routes, memory_routes
-from pai.api import plugins as plugins_v1
+from pai.api.routes import agent, plugins
+from api.routes import executors
 from pai.api.middleware.logging import LoggingMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp, Receive, Scope, Send
 from time import time
+
+from api.routes import audio
 
 REQUEST_COUNT = None
 REQUEST_LATENCY = None
@@ -47,22 +49,20 @@ def create_app(context: PAIAppContext) -> FastAPI:
 
     app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
     app.add_middleware(LoggingMiddleware)
-    # app.add_middleware(AuthMiddleware)
 
-    app.include_router(agent_routes.router, prefix="/api/agents", tags=["agents"])
-    app.include_router(plugin_routes.router, prefix="/api/plugins", tags=["plugins"])
-    # v1 compatibility routes for plugins (persisted configs, enable/disable)
-    app.include_router(plugins_v1.router)
+    app.include_router(agent.router, prefix="/api/agents", tags=["agents"])
+    app.include_router(plugins.router, prefix="/api/plugins", tags=["plugins"])
+
+    app.include_router(audio.router)
     # File browsing endpoints (v1)
-    from pai.api import files as files_v1
-    app.include_router(files_v1.router)
-    from pai.api import preferences as preferences_v1
-    app.include_router(preferences_v1.router)
-    from pai.api import devices as devices_v1
-    app.include_router(devices_v1.router)
-    from pai.api import builds as builds_v1
+    from api.routes import files
+    app.include_router(files.router)
+    from pai.api.routes import preferences 
+    app.include_router(preferences.router)
+    from pai.api.routes import devices 
+    app.include_router(devices.router)
+    from api.routes import builds
     app.include_router(builds_v1.router)
-    app.include_router(memory_routes.router, prefix="/api/memory", tags=["memory"])
 
     @app.get("/")
     async def root(context: PAIAppContext = Depends(get_app_context)):

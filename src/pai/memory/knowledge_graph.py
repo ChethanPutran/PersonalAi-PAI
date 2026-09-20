@@ -1,19 +1,21 @@
-from typing import (
-    Dict,
-    Any,
-    List,
-    Optional,
-)
+from __future__ import annotations
 
+import re
+from typing import Any, Dict, List, Optional
+
+from loguru import logger
 from neo4j import AsyncGraphDatabase
 from neo4j.exceptions import Neo4jError, ServiceUnavailable
 
-from loguru import logger
+
+_IDENTIFIER = re.compile(
+    r"^[A-Za-z_][A-Za-z0-9_]*$"
+)
 
 
 class KnowledgeGraph:
     """
-    Neo4j async knowledge graph manager.
+    Neo4j-backed entity and relationship graph.
     """
 
     def __init__(
@@ -27,27 +29,38 @@ class KnowledgeGraph:
         self.password = password
 
         self.driver = None
+        self._available = False
 
-    async def initialize(self) -> None:
-        """
-        Initialize Neo4j driver and constraints.
-        """
-        print(f"Initializing KnowledgeGraph with URI: {self.uri}, User: {self.user}, Password: {self.password}")
-        try:
-            self.driver = (
-                AsyncGraphDatabase.driver(
-                    self.uri,
-                    auth=(
-                        self.user,
-                        self.password,
-                    ),
-                )
+    @staticmethod
+    def _validate_identifier(
+        value: str,
+        field: str,
+    ) -> str:
+
+        if not _IDENTIFIER.fullmatch(value):
+            raise ValueError(
+                f"Invalid Neo4j {field}: {value!r}"
             )
 
+        return value
+
+    async def initialize(self) -> None:
+        try:
+            self.driver = AsyncGraphDatabase.driver(
+                self.uri,
+                auth=(
+                    self.user,
+                    self.password,
+                ),
+            )
+
+            await self.driver.verify_connectivity()
+
             async with self.driver.session() as session:
+
                 await session.run(
                     """
-                    CREATE CONSTRAINT IF NOT EXISTS
+                    CREATE CONSTRAINT user_id_unique IF NOT EXISTS
                     FOR (u:User)
                     REQUIRE u.id IS UNIQUE
                     """
@@ -55,7 +68,7 @@ class KnowledgeGraph:
 
                 await session.run(
                     """
-                    CREATE CONSTRAINT IF NOT EXISTS
+                    CREATE CONSTRAINT device_id_unique IF NOT EXISTS
                     FOR (d:Device)
                     REQUIRE d.id IS UNIQUE
                     """
@@ -63,22 +76,29 @@ class KnowledgeGraph:
 
                 await session.run(
                     """
-                    CREATE CONSTRAINT IF NOT EXISTS
+                    CREATE CONSTRAINT plugin_id_unique IF NOT EXISTS
                     FOR (p:Plugin)
-                    REQUIRE p.name IS UNIQUE
+                    REQUIRE p.id IS UNIQUE
                     """
                 )
+
+            self._available = True
 
             logger.info(
                 "KnowledgeGraph initialized"
             )
 
-        except (Neo4jError, ServiceUnavailable, OSError) as e:
-            if self.driver:
-                await self.driver.close()
-            self.driver = None
+        except (
+            Neo4jError,
+            ServiceUnavailable,
+            OSError,
+        ) as exc:
+
+            await self.close()
+
             logger.warning(
-                f"KnowledgeGraph disabled because Neo4j is unavailable: {e}"
+                "KnowledgeGraph unavailable: {}",
+                exc,
             )
 
     async def add_entity(
@@ -88,31 +108,38 @@ class KnowledgeGraph:
         properties: Optional[
             Dict[str, Any]
         ] = None,
-    ) -> None:
-        """
-        Add or update graph entity.
-        """
+    ) -> bool:
 
-        if self.driver is None:
-            return
+        if not self._available:
+            return False
+
+        entity_type = self._validate_identifier(
+            entity_type,
+            "entity type",
+        )
+
+        query = f"""
+        MERGE (e:{entity_type} {{id: $id}})
+        SET e += $properties
+        """
 
         try:
-            cypher = f"""
-            MERGE (e:{entity_type} {{id: $id}})
-            SET e += $props
-            """
-
             async with self.driver.session() as session:
                 await session.run(
-                    cypher,
+                    query,
                     id=entity_id,
-                    props=properties or {},
+                    properties=properties or {},
                 )
 
-        except Neo4jError as e:
+            return True
+
+        except Neo4jError as exc:
             logger.error(
-                f"Failed to add entity: {e}"
+                "Failed to add entity: {}",
+                exc,
             )
+
+            return False
 
     async def add_relationship(
         self,
@@ -124,36 +151,51 @@ class KnowledgeGraph:
         properties: Optional[
             Dict[str, Any]
         ] = None,
-    ) -> None:
-        """
-        Add relationship between entities.
-        """
+    ) -> bool:
 
-        if self.driver is None:
-            return
+        if not self._available:
+            return False
+
+        subject_type = self._validate_identifier(
+            subject_type,
+            "subject type",
+        )
+
+        object_type = self._validate_identifier(
+            object_type,
+            "object type",
+        )
+
+        relation = self._validate_identifier(
+            relation,
+            "relationship",
+        )
+
+        query = f"""
+        MATCH (a:{subject_type} {{id: $subject_id}})
+        MATCH (b:{object_type} {{id: $object_id}})
+        MERGE (a)-[r:{relation}]->(b)
+        SET r += $properties
+        """
 
         try:
-            cypher = f"""
-            MATCH (a:{subject_type} {{id: $sub_id}})
-            MATCH (b:{object_type} {{id: $obj_id}})
-
-            MERGE (a)-[r:{relation}]->(b)
-
-            SET r += $props
-            """
-
             async with self.driver.session() as session:
                 await session.run(
-                    cypher,
-                    sub_id=subject_id,
-                    obj_id=object_id,
-                    props=properties or {},
+                    query,
+                    subject_id=subject_id,
+                    object_id=object_id,
+                    properties=properties or {},
                 )
 
-        except Neo4jError as e:
+            return True
+
+        except Neo4jError as exc:
             logger.error(
-                f"Failed to add relationship: {e}"
+                "Failed to add relationship: {}",
+                exc,
             )
+
+            return False
 
     async def query(
         self,
@@ -162,11 +204,8 @@ class KnowledgeGraph:
             Dict[str, Any]
         ] = None,
     ) -> List[Dict[str, Any]]:
-        """
-        Execute arbitrary Cypher query.
-        """
 
-        if self.driver is None:
+        if not self._available:
             return []
 
         try:
@@ -181,65 +220,47 @@ class KnowledgeGraph:
                     async for record in result
                 ]
 
-        except Neo4jError as e:
+        except Neo4jError as exc:
             logger.error(
-                f"Query failed: {e}"
+                "Knowledge graph query failed: {}",
+                exc,
             )
+
             return []
 
-    async def get_user_preferences_graph(
+    async def get_user_graph(
         self,
         user_id: str,
-    ) -> Dict[str, List[Dict]]:
-        """
-        Retrieve user preferences graph.
-        """
+        *,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
 
-        cypher = """
-        MATCH (u:User {id: $user_id})-[r]->(n)
-
-        RETURN
-            type(r) AS relation,
-            labels(n)[0] AS entity_type,
-            n.id AS entity_id,
-            properties(n) AS props
-        """
-
-        records = await self.query(
-            cypher,
-            {"user_id": user_id},
+        return await self.query(
+            """
+            MATCH (u:User {id: $user_id})-[r]->(n)
+            RETURN
+                type(r) AS relation,
+                labels(n) AS labels,
+                n.id AS entity_id,
+                properties(n) AS properties
+            LIMIT $limit
+            """,
+            {
+                "user_id": user_id,
+                "limit": limit,
+            },
         )
 
-        preferences = {}
-
-        for rec in records:
-            relation = rec["relation"]
-
-            preferences.setdefault(
-                relation,
-                [],
-            ).append(
-                {
-                    "type": rec[
-                        "entity_type"
-                    ],
-                    "id": rec[
-                        "entity_id"
-                    ],
-                    "props": rec["props"],
-                }
-            )
-
-        return preferences
-
     async def close(self) -> None:
-        """
-        Close Neo4j connection.
-        """
-
         if self.driver:
-            await self.driver.close()
+            try:
+                await self.driver.close()
+            except Exception:
+                pass
 
-            logger.info(
-                "KnowledgeGraph closed"
-            )
+        self.driver = None
+        self._available = False
+
+        logger.info(
+            "KnowledgeGraph closed"
+        )

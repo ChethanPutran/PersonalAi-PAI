@@ -1,0 +1,60 @@
+{
+  "id": "planner",
+  "name": "Planner Plugin",
+  "version": "1.0.0",
+  "type": "action",
+  "description": "Goal planning and daily schedule optimization",
+
+  "runtime": {
+    "entry_point": "planner_plugin.py",
+    "class": "PlannerPlugin"
+  },
+
+  "permissions": [],
+
+  "dependencies": [],
+
+  "capabilities": [
+    {
+      "name": "planner.decompose_goal",
+      "description": "Decompose a high-level goal into subtasks",
+      "risk": "low",
+      "parameters": {
+        "goal": {
+          "type": "string",
+          "required": true
+        }
+      }
+    },
+    {
+      "name": "planner.create_daily_plan",
+      "description": "Create a daily time-blocked plan",
+      "risk": "low",
+      "parameters": {
+        "tasks": {
+          "type": "array",
+          "required": true
+        }
+      }
+    },
+    {
+      "name": "planner.optimize_schedule",
+      "description": "Optimize an existing schedule",
+      "risk": "low",
+      "parameters": {
+        "events": {
+          "type": "array",
+          "required": true
+        }
+      }
+    }
+  ],
+
+  "config_schema": {
+    "time_horizon": {
+      "type": "integer",
+      "description": "Planning horizon in days",
+      "default": 7
+    }
+  }
+}

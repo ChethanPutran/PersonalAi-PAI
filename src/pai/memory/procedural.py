@@ -1,44 +1,144 @@
+from __future__ import annotations
+
+import asyncio
 import json
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Any, Dict, List, Optional
+
 
 class ProceduralMemory:
-    """Stores and reuses successful workflows."""
-    
-    def __init__(self, path="./data/procedural.json"):
+    """
+    Stores reusable workflows and their outcomes.
+    """
+
+    def __init__(
+        self,
+        path: str = "./data/procedural.json",
+    ):
         self.path = Path(path)
-        self.path.parent.mkdir(exist_ok=True)
+
+        self.workflows: Dict[str, Dict[str, Any]] = {}
+
+        self._lock = asyncio.Lock()
+
+    async def initialize(self) -> None:
+        self.path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
         self.workflows = self._load()
-    
-    async def initialize(self):
-        pass  # No async initialization needed for file-based storage
-    
-    def _load(self):
-        if self.path.exists():
-            return json.loads(self.path.read_text())
-        return {}
-    
-    def _save(self):
-        self.path.write_text(json.dumps(self.workflows, indent=2))
-    
-    def add_workflow(self, goal_pattern: str, steps: List[Dict], success_count: int = 1):
-        if goal_pattern not in self.workflows:
-            self.workflows[goal_pattern] = {"steps": steps, "successes": 0, "failures": 0}
-        self.workflows[goal_pattern]["successes"] += success_count
-        self.workflows[goal_pattern]["steps"] = steps  # overwrite with latest
-        self._save()
-    
-    async def get_workflow(self, goal: str) -> List[Dict]:
-        # Find best matching pattern
-        best = []
-        best_score = 0
-        for pattern, data in self.workflows.items():
-            if pattern in goal:
-                score = data["successes"] / (data["successes"] + data["failures"] + 1)
-                if score > best_score:
-                    best_score = score
-                    best = data["steps"]
-        return best
-    
-    async def shutdown(self):
-        self._save()
+
+    def _load(self) -> Dict[str, Dict[str, Any]]:
+        if not self.path.exists():
+            return {}
+
+        try:
+            return json.loads(
+                self.path.read_text(
+                    encoding="utf-8"
+                )
+            )
+        except (json.JSONDecodeError, OSError):
+            return {}
+
+    async def _save(self) -> None:
+        temporary_path = self.path.with_suffix(
+            ".tmp"
+        )
+
+        temporary_path.write_text(
+            json.dumps(
+                self.workflows,
+                indent=2,
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        temporary_path.replace(self.path)
+
+    async def add_workflow(
+        self,
+        goal_pattern: str,
+        steps: List[Dict[str, Any]],
+        *,
+        success: bool = True,
+    ) -> None:
+
+        if not goal_pattern:
+            raise ValueError(
+                "goal_pattern cannot be empty"
+            )
+
+        async with self._lock:
+            workflow = self.workflows.setdefault(
+                goal_pattern,
+                {
+                    "steps": steps,
+                    "successes": 0,
+                    "failures": 0,
+                },
+            )
+
+            workflow["steps"] = steps
+
+            if success:
+                workflow["successes"] += 1
+            else:
+                workflow["failures"] += 1
+
+            await self._save()
+
+    async def get_workflow(
+        self,
+        goal: str,
+    ) -> Optional[Dict[str, Any]]:
+
+        goal_lower = goal.lower()
+
+        best_workflow = None
+        best_score = -1.0
+
+        for pattern, workflow in self.workflows.items():
+
+            if pattern.lower() not in goal_lower:
+                continue
+
+            successes = workflow.get(
+                "successes",
+                0,
+            )
+
+            failures = workflow.get(
+                "failures",
+                0,
+            )
+
+            total = successes + failures
+
+            success_rate = (
+                successes / total
+                if total > 0
+                else 0.0
+            )
+
+            if success_rate > best_score:
+                best_score = success_rate
+
+                best_workflow = {
+                    "pattern": pattern,
+                    "steps": workflow.get(
+                        "steps",
+                        [],
+                    ),
+                    "successes": successes,
+                    "failures": failures,
+                    "success_rate": success_rate,
+                }
+
+        return best_workflow
+
+    async def shutdown(self) -> None:
+        async with self._lock:
+            await self._save()

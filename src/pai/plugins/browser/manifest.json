@@ -1,0 +1,113 @@
+{
+  "id": "browser",
+  "name": "Browser Automation",
+  "version": "1.0.0",
+  "type": "action",
+  "description": "Web browser automation using Playwright",
+
+  "runtime": {
+    "entry_point": "browser_plugin.py",
+    "class": "BrowserPlugin"
+  },
+
+  "permissions": [
+    "network"
+  ],
+
+  "dependencies": [
+    "playwright"
+  ],
+
+  "capabilities": [
+    {
+      "name": "browser.navigate",
+      "description": "Navigate to a URL",
+      "risk": "medium",
+      "parameters": {
+        "url": {
+          "type": "string",
+          "required": true
+        }
+      }
+    },
+    {
+      "name": "browser.click",
+      "description": "Click an element",
+      "risk": "medium",
+      "parameters": {
+        "selector": {
+          "type": "string",
+          "required": true
+        }
+      }
+    },
+    {
+      "name": "browser.type",
+      "description": "Enter text into an element",
+      "risk": "medium",
+      "parameters": {
+        "selector": {
+          "type": "string",
+          "required": true
+        },
+        "text": {
+          "type": "string",
+          "required": true
+        }
+      }
+    },
+    {
+      "name": "browser.screenshot",
+      "description": "Capture a browser screenshot",
+      "risk": "low",
+      "parameters": {
+        "path": {
+          "type": "string",
+          "required": false
+        }
+      }
+    },
+    {
+      "name": "browser.get_text",
+      "description": "Extract text from an element",
+      "risk": "low",
+      "parameters": {
+        "selector": {
+          "type": "string",
+          "required": true
+        }
+      }
+    },
+    {
+      "name": "browser.fill_form",
+      "description": "Fill multiple form fields",
+      "risk": "medium",
+      "parameters": {
+        "fields": {
+          "type": "object",
+          "required": true
+        }
+      }
+    }
+  ],
+
+  "config_schema": {
+    "browser": {
+      "type": "string",
+      "default": "chromium",
+      "enum": [
+        "chromium",
+        "firefox",
+        "webkit"
+      ]
+    },
+    "headless": {
+      "type": "boolean",
+      "default": true
+    },
+    "timeout": {
+      "type": "integer",
+      "default": 30000
+    }
+  }
+}

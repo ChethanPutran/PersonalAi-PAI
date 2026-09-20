@@ -17,6 +17,6 @@ class AIMessage {
         type: json['type'] ?? 'unknown',
         goal: json['goal'],
         context: json['context'],
-        result: json['result'],
+        result: (json['result'] ?? json['data']) as Map<String, dynamic>?,
       );
 }
