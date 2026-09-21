@@ -5,7 +5,7 @@
 
 #include <memory>
 #include <string>
-
+#include "../abi/pai_plugin_abi.h"
 #include "plugin_module.h"
 
 namespace pai::agent {

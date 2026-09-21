@@ -1,12 +1,10 @@
-// linux/runner/agent/bridge/plugin_channel.h
 #pragma once
 
-#include <flutter/binary_messenger.h>
-#include <flutter/encodable_value.h>
-#include <flutter/method_channel.h>
-#include <flutter/method_result.h>
+#include <flutter_linux/flutter_linux.h>
 
-#include <memory>
+#include <map>
+#include <string>
+#include <vector>
 
 #include "../permissions/permission_manager.h"
 #include "../plugins/native_module_registry.h"
@@ -16,17 +14,14 @@ namespace pai::agent {
 
 class PluginChannel {
  public:
-  explicit PluginChannel(flutter::BinaryMessenger* messenger);
+  explicit PluginChannel(FlBinaryMessenger* messenger);
+
+  NativeModuleRegistry registry;
+  PluginManager manager{&registry};
+  PermissionManager permissions;
 
  private:
-  void HandleMethodCall(
-      const flutter::MethodCall<flutter::EncodableValue>& call,
-      std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
-
-  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> channel_;
-  NativeModuleRegistry registry_;
-  PluginManager manager_{&registry_};
-  PermissionManager permissions_;
+  FlMethodChannel* channel_ = nullptr;
 };
 
 }  // namespace pai::agent

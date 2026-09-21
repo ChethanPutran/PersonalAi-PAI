@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:web_socket_channel/web_socket_channel.dart';
 
+
 enum DeviceConnectionState {
   disconnected,
   connecting,
@@ -14,9 +15,14 @@ typedef DeviceMessageHandler = Future<void> Function(
   Map<String, dynamic> message,
 );
 
+
 class DeviceConnectionService {
   final String baseUrl;
   final String deviceId;
+
+  /// JWT sent as `?token=` on the WebSocket URL.
+  /// The WS endpoint validates it before accepting the connection.
+  final String? token;
 
   WebSocketChannel? _channel;
 
@@ -26,38 +32,48 @@ class DeviceConnectionService {
   bool _disposed = false;
   bool _manualDisconnect = false;
 
-  DeviceConnectionState _state =
-      DeviceConnectionState.disconnected;
+  DeviceConnectionState _state = DeviceConnectionState.disconnected;
 
   DeviceMessageHandler? _messageHandler;
 
   DeviceConnectionService({
     required this.baseUrl,
     required this.deviceId,
+    this.token,
   });
 
   DeviceConnectionState get state => _state;
-
-  bool get isConnected =>
-      _state == DeviceConnectionState.connected;
+  bool get isConnected => _state == DeviceConnectionState.connected;
 
   void setMessageHandler(DeviceMessageHandler handler) {
     _messageHandler = handler;
   }
 
+  // -----------------------------------------------------------------
+  // URL
+  // -----------------------------------------------------------------
+
   String get _webSocketUrl {
     final uri = Uri.parse(baseUrl);
+    final scheme = uri.scheme == 'https' ? 'wss' : 'ws';
 
-    final scheme =
-        uri.scheme == 'https' ? 'wss' : 'ws';
+    final params = <String, String>{};
+    if (token != null && token!.isNotEmpty) {
+      params['token'] = token!;
+    }
 
     return Uri(
       scheme: scheme,
       host: uri.host,
       port: uri.hasPort ? uri.port : null,
       path: '${uri.path}/devices/$deviceId/ws',
+      queryParameters: params.isEmpty ? null : params,
     ).toString();
   }
+
+  // -----------------------------------------------------------------
+  // Connect / disconnect
+  // -----------------------------------------------------------------
 
   Future<void> connect() async {
     if (_disposed) return;
@@ -68,19 +84,13 @@ class DeviceConnectionService {
     }
 
     _manualDisconnect = false;
-
     _setState(DeviceConnectionState.connecting);
 
     try {
       final uri = Uri.parse(_webSocketUrl);
+      print('[DeviceConnection] Connecting to $uri');
 
-      print(
-        '[DeviceConnection] Connecting to $uri',
-      );
-
-      final channel =
-          WebSocketChannel.connect(uri);
-
+      final channel = WebSocketChannel.connect(uri);
       _channel = channel;
 
       await channel.ready;
@@ -91,11 +101,7 @@ class DeviceConnectionService {
       }
 
       _setState(DeviceConnectionState.connected);
-
-      print(
-        '[DeviceConnection] Connected '
-        'device=$deviceId',
-      );
+      print('[DeviceConnection] Connected device=$deviceId');
 
       _startHeartbeat();
 
@@ -106,12 +112,8 @@ class DeviceConnectionService {
         cancelOnError: false,
       );
     } catch (e) {
-      print(
-        '[DeviceConnection] Connection failed: $e',
-      );
-
+      print('[DeviceConnection] Connection failed: $e');
       _setState(DeviceConnectionState.disconnected);
-
       _scheduleReconnect();
     }
   }
@@ -133,28 +135,19 @@ class DeviceConnectionService {
     } catch (_) {}
 
     _setState(DeviceConnectionState.disconnected);
-
-    print(
-      '[DeviceConnection] Disconnected '
-      'device=$deviceId',
-    );
+    print('[DeviceConnection] Disconnected device=$deviceId');
   }
 
-  Future<void> send(
-    Map<String, dynamic> message,
-  ) async {
+  // -----------------------------------------------------------------
+  // Outbound messages
+  // -----------------------------------------------------------------
+
+  Future<void> send(Map<String, dynamic> message) async {
     if (!isConnected || _channel == null) {
-      throw StateError(
-        'Device is not connected',
-      );
+      throw StateError('Device is not connected');
     }
-
     final payload = jsonEncode(message);
-
-    print(
-      '[DeviceConnection] Sending: $payload',
-    );
-
+    print('[DeviceConnection] Sending: $payload');
     _channel!.sink.add(payload);
   }
 
@@ -167,8 +160,7 @@ class DeviceConnectionService {
       'event': event,
       'device_id': deviceId,
       'data': data ?? {},
-      'timestamp':
-          DateTime.now().toUtc().toIso8601String(),
+      'timestamp': DateTime.now().toUtc().toIso8601String(),
     });
   }
 
@@ -185,48 +177,34 @@ class DeviceConnectionService {
       'success': success,
       'result': result,
       'error': error,
-      'timestamp':
-          DateTime.now().toUtc().toIso8601String(),
+      'timestamp': DateTime.now().toUtc().toIso8601String(),
     });
   }
 
-  Future<void> _handleMessage(
-    dynamic rawMessage,
-  ) async {
+  // -----------------------------------------------------------------
+  // Inbound messages
+  // -----------------------------------------------------------------
+
+  Future<void> _handleMessage(dynamic rawMessage) async {
     try {
-      print(
-        '[DeviceConnection] Received: $rawMessage',
-      );
+      print('[DeviceConnection] Received: $rawMessage');
 
       final Map<String, dynamic> message;
 
       if (rawMessage is String) {
         final decoded = jsonDecode(rawMessage);
-
         if (decoded is! Map) {
-          print(
-            '[DeviceConnection] Invalid message',
-          );
+          print('[DeviceConnection] Invalid message');
           return;
         }
-
-        message =
-            Map<String, dynamic>.from(decoded);
+        message = Map<String, dynamic>.from(decoded);
       } else if (rawMessage is List<int>) {
-        final decoded =
-            jsonDecode(utf8.decode(rawMessage));
-
-        if (decoded is! Map) {
-          return;
-        }
-
-        message =
-            Map<String, dynamic>.from(decoded);
+        final decoded = jsonDecode(utf8.decode(rawMessage));
+        if (decoded is! Map) return;
+        message = Map<String, dynamic>.from(decoded);
       } else {
-        print(
-          '[DeviceConnection] Unsupported message '
-          'type: ${rawMessage.runtimeType}',
-        );
+        print('[DeviceConnection] Unsupported message type: '
+            '${rawMessage.runtimeType}');
         return;
       }
 
@@ -254,92 +232,66 @@ class DeviceConnectionService {
           break;
 
         default:
-          print(
-            '[DeviceConnection] Unknown message type: '
-            '$type',
-          );
-
+          print('[DeviceConnection] Unknown message type: $type');
           if (_messageHandler != null) {
             await _messageHandler!(message);
           }
       }
     } catch (e, stackTrace) {
-      print(
-        '[DeviceConnection] Message handling error: '
-        '$e',
-      );
-
+      print('[DeviceConnection] Message handling error: $e');
       print(stackTrace);
     }
   }
 
-  Future<void> _handlePing(
-    Map<String, dynamic> message,
-  ) async {
+  Future<void> _handlePing(Map<String, dynamic> message) async {
     await send({
       'type': 'pong',
       'device_id': deviceId,
-      'timestamp':
-          DateTime.now().toUtc().toIso8601String(),
+      'timestamp': DateTime.now().toUtc().toIso8601String(),
     });
   }
 
-  Future<void> _handleHeartbeat(
-    Map<String, dynamic> message,
-  ) async {
+  Future<void> _handleHeartbeat(Map<String, dynamic> message) async {
     await send({
       'type': 'heartbeat',
       'device_id': deviceId,
-      'timestamp':
-          DateTime.now().toUtc().toIso8601String(),
+      'timestamp': DateTime.now().toUtc().toIso8601String(),
     });
   }
 
-  Future<void> _handleCommand(
-    Map<String, dynamic> message,
-  ) async {
+  Future<void> _handleCommand(Map<String, dynamic> message) async {
     if (_messageHandler != null) {
       await _messageHandler!(message);
     }
   }
 
-  Future<void> _handleEvent(
-    Map<String, dynamic> message,
-  ) async {
+  Future<void> _handleEvent(Map<String, dynamic> message) async {
     if (_messageHandler != null) {
       await _messageHandler!(message);
     }
   }
 
-  Future<void> _handleResult(
-    Map<String, dynamic> message,
-  ) async {
+  Future<void> _handleResult(Map<String, dynamic> message) async {
     if (_messageHandler != null) {
       await _messageHandler!(message);
     }
   }
 
-  void _handleError(
-    Object error,
-    StackTrace stackTrace,
-  ) {
-    print(
-      '[DeviceConnection] WebSocket error: $error',
-    );
+  // -----------------------------------------------------------------
+  // Errors / reconnect
+  // -----------------------------------------------------------------
 
+  void _handleError(Object error, StackTrace stackTrace) {
+    print('[DeviceConnection] WebSocket error: $error');
     _setState(DeviceConnectionState.disconnected);
-
     _scheduleReconnect();
   }
 
   void _handleDisconnected() {
-    print(
-      '[DeviceConnection] WebSocket closed',
-    );
+    print('[DeviceConnection] WebSocket closed');
 
     _heartbeatTimer?.cancel();
     _heartbeatTimer = null;
-
     _channel = null;
 
     _setState(DeviceConnectionState.disconnected);
@@ -356,60 +308,39 @@ class DeviceConnectionService {
       const Duration(seconds: 30),
       (_) async {
         if (!isConnected) return;
-
         try {
           await send({
             'type': 'heartbeat',
             'device_id': deviceId,
-            'timestamp':
-                DateTime.now()
-                    .toUtc()
-                    .toIso8601String(),
+            'timestamp': DateTime.now().toUtc().toIso8601String(),
           });
         } catch (e) {
-          print(
-            '[DeviceConnection] Heartbeat failed: $e',
-          );
+          print('[DeviceConnection] Heartbeat failed: $e');
         }
       },
     );
   }
 
   void _scheduleReconnect() {
-    if (_disposed ||
-        _manualDisconnect ||
-        _reconnectTimer != null) {
+    if (_disposed || _manualDisconnect || _reconnectTimer != null) {
       return;
     }
 
     _setState(DeviceConnectionState.reconnecting);
+    print('[DeviceConnection] Reconnecting in 5 seconds...');
 
-    print(
-      '[DeviceConnection] Reconnecting in 5 seconds...',
-    );
-
-    _reconnectTimer = Timer(
-      const Duration(seconds: 5),
-      () {
-        _reconnectTimer = null;
-
-        if (!_disposed && !_manualDisconnect) {
-          connect();
-        }
-      },
-    );
+    _reconnectTimer = Timer(const Duration(seconds: 5), () {
+      _reconnectTimer = null;
+      if (!_disposed && !_manualDisconnect) {
+        connect();
+      }
+    });
   }
 
-  void _setState(
-    DeviceConnectionState newState,
-  ) {
+  void _setState(DeviceConnectionState newState) {
     if (_state == newState) return;
-
     _state = newState;
-
-    print(
-      '[DeviceConnection] State: $_state',
-    );
+    print('[DeviceConnection] State: $_state');
   }
 
   void dispose() {

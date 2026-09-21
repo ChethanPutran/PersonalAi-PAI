@@ -1,11 +1,6 @@
-// linux/runner/agent/bridge/plugin_channel.cc
 #include "plugin_channel.h"
 
-#include <flutter/standard_method_codec.h>
-
-#include <map>
-#include <string>
-#include <vector>
+#include <cstring>
 
 #include "../plugins/dynamic_loader.h"
 
@@ -13,144 +8,160 @@ namespace pai::agent {
 
 namespace {
 
-std::string GetStr(const flutter::EncodableMap& m, const char* key) {
-  auto it = m.find(flutter::EncodableValue(key));
-  if (it == m.end()) return {};
-  if (auto* s = std::get_if<std::string>(&it->second)) return *s;
-  return {};
+std::string GetStr(FlValue* v) {
+  if (v == nullptr) return {};
+  if (fl_value_get_type(v) != FL_VALUE_TYPE_STRING) return {};
+  const gchar* s = fl_value_get_string(v);
+  return s ? std::string(s) : std::string();
 }
 
-std::vector<std::string> GetStrList(const flutter::EncodableMap& m, const char* key) {
+std::vector<std::string> GetStrList(FlValue* v) {
   std::vector<std::string> out;
-  auto it = m.find(flutter::EncodableValue(key));
-  if (it == m.end()) return out;
-  if (auto* l = std::get_if<flutter::EncodableList>(&it->second)) {
-    out.reserve(l->size());
-    for (const auto& v : *l) {
-      if (auto* s = std::get_if<std::string>(&v)) out.push_back(*s);
-    }
+  if (v == nullptr || fl_value_get_type(v) != FL_VALUE_TYPE_LIST) return out;
+  const size_t n = fl_value_get_length(v);
+  out.reserve(n);
+  for (size_t i = 0; i < n; ++i) {
+       out.push_back(GetStr(fl_value_get_list_value(v, i)));
   }
   return out;
 }
 
-std::map<std::string, std::string> GetStrMap(const flutter::EncodableMap& m, const char* key) {
+std::map<std::string, std::string> GetStrMap(FlValue* v) {
   std::map<std::string, std::string> out;
-  auto it = m.find(flutter::EncodableValue(key));
-  if (it == m.end()) return out;
-  if (auto* mm = std::get_if<flutter::EncodableMap>(&it->second)) {
-    for (const auto& [k, v] : *mm) {
-      auto* ks = std::get_if<std::string>(&k);
-      auto* vs = std::get_if<std::string>(&v);
-      if (ks && vs) out[*ks] = *vs;
+  if (v == nullptr || fl_value_get_type(v) != FL_VALUE_TYPE_MAP) return out;
+  const size_t n = fl_value_get_length(v);
+  for (size_t i = 0; i < n; ++i) {
+       FlValue* k = fl_value_get_map_key(v, i);
+    FlValue* val = fl_value_get_map_value(v, i);
+    if (fl_value_get_type(k) == FL_VALUE_TYPE_STRING &&
+        fl_value_get_type(val) == FL_VALUE_TYPE_STRING) {
+      out[fl_value_get_string(k)] = fl_value_get_string(val);
     }
   }
   return out;
 }
 
-flutter::EncodableMap ToEncodable(const std::map<std::string, std::string>& m) {
-  flutter::EncodableMap out;
+FlValue* ToFlMap(const std::map<std::string, std::string>& m) {
+  FlValue* out = fl_value_new_map();
   for (const auto& [k, v] : m) {
-    out[flutter::EncodableValue(k)] = flutter::EncodableValue(v);
+    fl_value_set_string_take(out, k.c_str(), fl_value_new_string(v.c_str()));
   }
   return out;
+}
+
+void ReplyMap(FlMethodCall* call, const std::map<std::string, std::string>& m) {
+  FlValue* v = ToFlMap(m);
+  g_autoptr(FlMethodResponse) resp =
+      FL_METHOD_RESPONSE(fl_method_success_response_new(v));
+  fl_method_call_respond(call, resp, nullptr);
+  fl_value_unref(v);
+}
+
+void ReplyBool(FlMethodCall* call, bool b) {
+  g_autoptr(FlMethodResponse) resp =
+      FL_METHOD_RESPONSE(fl_method_success_response_new(fl_value_new_bool(b)));
+  fl_method_call_respond(call, resp, nullptr);
+}
+
+void ReplyError(FlMethodCall* call, const char* code, const char* msg) {
+  g_autoptr(FlMethodResponse) resp =
+      FL_METHOD_RESPONSE(fl_method_error_response_new(code, msg, nullptr));
+  fl_method_call_respond(call, resp, nullptr);
+}
+
+void ReplyVoid(FlMethodCall* call) {
+  g_autoptr(FlMethodResponse) resp =
+      FL_METHOD_RESPONSE(fl_method_success_response_new(nullptr));
+  fl_method_call_respond(call, resp, nullptr);
+}
+
+void MethodCallHandler(FlMethodChannel* /*channel*/,
+                       FlMethodCall* call,
+                       gpointer user_data) {
+  auto* self = static_cast<PluginChannel*>(user_data);
+  const gchar* method = fl_method_call_get_name(call);
+  FlValue* args = fl_method_call_get_args(call);
+
+  if (std::strcmp(method, "listModules") == 0) {
+    FlValue* out = fl_value_new_list();
+    for (const auto& n : self->registry.List()) {
+      fl_value_append_take(out, fl_value_new_string(n.c_str()));
+    }
+    g_autoptr(FlMethodResponse) resp =
+        FL_METHOD_RESPONSE(fl_method_success_response_new(out));
+    fl_method_call_respond(call, resp, nullptr);
+    fl_value_unref(out);
+    return;
+  }
+
+  if (std::strcmp(method, "isModuleAvailable") == 0) {
+    std::string name;
+    if (args && fl_value_get_type(args) == FL_VALUE_TYPE_MAP) {
+      name = GetStr(fl_value_lookup_string(args, "nativeModule"));
+    }
+    ReplyBool(call, self->registry.Contains(name));
+    return;
+  }
+
+  if (std::strcmp(method, "loadNativeModule") == 0) {
+    std::string path;
+    if (args && fl_value_get_type(args) == FL_VALUE_TYPE_MAP) {
+      path = GetStr(fl_value_lookup_string(args, "artifactPath"));
+    }
+    try {
+      auto mod = DynamicLoader::Load(path);
+      self->registry.Register(mod);
+      ReplyBool(call, true);
+    } catch (const std::exception& e) {
+      ReplyError(call, "LOAD_FAILED", e.what());
+    }
+    return;
+  }
+
+  if (std::strcmp(method, "unloadNativeModule") == 0) {
+    std::string name;
+    if (args && fl_value_get_type(args) == FL_VALUE_TYPE_MAP) {
+      name = GetStr(fl_value_lookup_string(args, "nativeModule"));
+    }
+    self->registry.Unregister(name);
+    ReplyVoid(call);
+    return;
+  }
+
+  if (std::strcmp(method, "invoke") == 0) {
+    std::string module, capability;
+    std::map<std::string, std::string> params;
+    if (args && fl_value_get_type(args) == FL_VALUE_TYPE_MAP) {
+      module = GetStr(fl_value_lookup_string(args, "nativeModule"));
+      capability = GetStr(fl_value_lookup_string(args, "capability"));
+      params = GetStrMap(fl_value_lookup_string(args, "parameters"));
+    }
+    ReplyMap(call, self->manager.Invoke(module, capability, params));
+    return;
+  }
+
+  if (std::strcmp(method, "requestPermissions") == 0) {
+    std::vector<std::string> perms;
+    if (args && fl_value_get_type(args) == FL_VALUE_TYPE_MAP) {
+      perms = GetStrList(fl_value_lookup_string(args, "permissions"));
+    }
+    ReplyMap(call, self->permissions.Request(perms));
+    return;
+  }
+
+  g_autoptr(FlMethodResponse) resp =
+      FL_METHOD_RESPONSE(fl_method_not_implemented_response_new());
+  fl_method_call_respond(call, resp, nullptr);
 }
 
 }  // namespace
 
-PluginChannel::PluginChannel(flutter::BinaryMessenger* messenger) {
-  channel_ = std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
-      messenger, "pai/plugin_runtime",
-      &flutter::StandardMethodCodec::GetInstance());
-
-  channel_->SetMethodCallHandler(
-      [this](const auto& call, auto result) {
-        HandleMethodCall(call, std::move(result));
-      });
-}
-
-void PluginChannel::HandleMethodCall(
-    const flutter::MethodCall<flutter::EncodableValue>& call,
-    std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
-
-  const auto* args = std::get_if<flutter::EncodableMap>(call.arguments());
-
-  // ------------------------------------------------------------------
-  // listModules
-  // ------------------------------------------------------------------
-  if (call.method_name() == "listModules") {
-    flutter::EncodableList out;
-    for (const auto& n : registry_.List()) {
-      out.emplace_back(flutter::EncodableValue(n));
-    }
-    result->Success(flutter::EncodableValue(out));
-    return;
-  }
-
-  // ------------------------------------------------------------------
-  // isModuleAvailable
-  // ------------------------------------------------------------------
-  if (call.method_name() == "isModuleAvailable") {
-    if (!args) { result->Error("BAD_ARGS", "expected map"); return; }
-    result->Success(flutter::EncodableValue(registry_.Contains(GetStr(*args, "nativeModule"))));
-    return;
-  }
-
-  // ------------------------------------------------------------------
-  // loadNativeModule
-  // ------------------------------------------------------------------
-  if (call.method_name() == "loadNativeModule") {
-    if (!args) { result->Error("BAD_ARGS", "expected map"); return; }
-
-    const std::string path = GetStr(*args, "artifactPath");
-    if (path.empty()) { result->Error("BAD_ARGS", "artifactPath missing"); return; }
-
-    try {
-      auto mod = DynamicLoader::Load(path);
-      registry_.Register(mod);
-      result->Success(flutter::EncodableValue(true));
-    } catch (const std::exception& e) {
-      result->Error("LOAD_FAILED", e.what());
-    }
-    return;
-  }
-
-  // ------------------------------------------------------------------
-  // unloadNativeModule
-  // ------------------------------------------------------------------
-  if (call.method_name() == "unloadNativeModule") {
-    if (!args) { result->Error("BAD_ARGS", "expected map"); return; }
-    registry_.Unregister(GetStr(*args, "nativeModule"));
-    result->Success();
-    return;
-  }
-
-  // ------------------------------------------------------------------
-  // invoke
-  // ------------------------------------------------------------------
-  if (call.method_name() == "invoke") {
-    if (!args) { result->Error("BAD_ARGS", "expected map"); return; }
-
-    const std::string module = GetStr(*args, "nativeModule");
-    const std::string capability = GetStr(*args, "capability");
-    auto params = GetStrMap(*args, "parameters");
-
-    auto out = manager_.Invoke(module, capability, params);
-    result->Success(flutter::EncodableValue(ToEncodable(out)));
-    return;
-  }
-
-  // ------------------------------------------------------------------
-  // requestPermissions
-  // ------------------------------------------------------------------
-  if (call.method_name() == "requestPermissions") {
-    if (!args) { result->Error("BAD_ARGS", "expected map"); return; }
-    auto perms = GetStrList(*args, "permissions");
-    auto out = permissions_.Request(perms);
-    result->Success(flutter::EncodableValue(ToEncodable(out)));
-    return;
-  }
-
-  result->NotImplemented();
+PluginChannel::PluginChannel(FlBinaryMessenger* messenger) {
+  g_autoptr(FlStandardMethodCodec) codec = fl_standard_method_codec_new();
+  channel_ = fl_method_channel_new(
+      messenger, "pai/plugin_runtime", FL_METHOD_CODEC(codec));
+  fl_method_channel_set_method_call_handler(
+      channel_, MethodCallHandler, this, nullptr);
 }
 
 }  // namespace pai::agent

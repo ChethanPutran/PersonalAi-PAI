@@ -1,71 +1,24 @@
 import 'device_plugin.dart';
-import 'models/plugin_info_short.dart';
+import 'models/plugin_capability.dart';
 
 class PluginRegistry {
   final Map<String, DevicePlugin> _plugins = {};
 
-  void register(
-    String pluginId,
-    DevicePlugin plugin,
+  void add(DevicePlugin p) => _plugins[p.id] = p;
+  void remove(String id) => _plugins.remove(id);
+  DevicePlugin? byId(String id) => _plugins[id];
+  List<DevicePlugin> all() => _plugins.values.toList();
+  List<DevicePlugin> enabled() =>
+      _plugins.values.where((p) => p.enabled).toList();
+
+  ({DevicePlugin plugin, PluginCapability capability})? resolveCapability(
+    String capId,
   ) {
-    _plugins[pluginId] = plugin;
-  }
-
-  DevicePlugin? get(String pluginId) {
-    return _plugins[pluginId];
-  }
-
-  bool contains(String pluginId) {
-    return _plugins.containsKey(pluginId);
-  }
-
-  Future<void> install(
-    PluginInfo info,
-  ) async {
-    // Installation handled by PluginInstaller.
-  }
-
-  Future<void> enable(
-    String pluginId,
-  ) async {
-    final plugin = _plugins[pluginId];
-
-    if (plugin == null) {
-      throw StateError(
-        'Plugin not installed: $pluginId',
-      );
+    for (final p in enabled()) {
+      for (final c in p.info.capabilityDetails) {
+        if (c.id == capId) return (plugin: p, capability: c);
+      }
     }
-
-    await plugin.enable();
-  }
-
-  Future<void> disable(
-    String pluginId,
-  ) async {
-    final plugin = _plugins[pluginId];
-
-    if (plugin == null) {
-      throw StateError(
-        'Plugin not installed: $pluginId',
-      );
-    }
-
-    await plugin.disable();
-  }
-
-  Future<dynamic> execute(
-    String pluginId,
-    String action,
-    Map<String, dynamic> params,
-  ) async {
-    final plugin = _plugins[pluginId];
-
-    if (plugin == null) {
-      throw StateError(
-        'Plugin not installed: $pluginId',
-      );
-    }
-
-    return plugin.execute(action, params);
+    return null;
   }
 }

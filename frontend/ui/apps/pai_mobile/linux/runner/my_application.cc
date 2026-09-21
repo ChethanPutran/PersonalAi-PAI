@@ -80,8 +80,9 @@ static void my_application_activate(GApplication* application) {
   gtk_widget_grab_focus(GTK_WIDGET(view));
 
   // Setup the plugin channel for communication between Flutter and native code.
-  auto messenger = flutter_engine_get_messenger(
-      fl_view_get_engine(FL_VIEW(view)));
+    FlEngine* engine = fl_view_get_engine(FL_VIEW(view));
+  FlBinaryMessenger* messenger = fl_engine_get_binary_messenger(engine);
+  
   // keep the channel alive for the lifetime of the app
   static std::unique_ptr<pai::agent::PluginChannel> g_plugin_channel;
   g_plugin_channel = std::make_unique<pai::agent::PluginChannel>(messenger);

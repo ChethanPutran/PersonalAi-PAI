@@ -1,157 +1,81 @@
-import 'models/plugin_info_short.dart';
-import 'plugin_registry.dart';
+import 'plugin_service.dart';
 
 class PluginCommandRouter {
-  final PluginRegistry registry;
+  final PluginService service;
 
-  PluginCommandRouter({
-    required this.registry,
-  });
+  PluginCommandRouter({required this.service});
 
-  Future<Map<String, dynamic>> handle(
-    Map<String, dynamic> message,
-  ) async {
-    final type =
-        message['type']?.toString();
+  Future<Map<String, dynamic>> handle(Map<String, dynamic> message) async {
+    final type = message['type']?.toString();
 
     switch (type) {
       case 'plugin.install':
-        return _install(message);
+        final id = _requireString(message, 'plugin_id');
+        final version = _requireString(message, 'version');
+        await service.install(id, version);
+        return {
+          'operation': 'plugin.install',
+          'plugin_id': id,
+          'version': version,
+        };
 
       case 'plugin.enable':
-        return _enable(message);
+        final id = _requireString(message, 'plugin_id');
+        final ok = await service.enable(id);
+        if (!ok) throw StateError('Enable failed: $id');
+        return {'operation': 'plugin.enable', 'plugin_id': id};
 
       case 'plugin.disable':
-        return _disable(message);
+        final id = _requireString(message, 'plugin_id');
+        await service.disable(id);
+        return {'operation': 'plugin.disable', 'plugin_id': id};
 
+      case 'plugin.uninstall':
+        final id = _requireString(message, 'plugin_id');
+        await service.uninstall(id);
+        return {'operation': 'plugin.uninstall', 'plugin_id': id};
+
+      // New style: capability-based dispatch.
+      case 'capability.invoke':
+        final cap = _requireString(message, 'capability');
+        final params = _params(message);
+        final result = await service.invoke(cap, params);
+        return {
+          'operation': 'capability.invoke',
+          'capability': cap,
+          'result': result,
+        };
+
+      // Backwards-compatible: action == capability id.
       case 'plugin.execute':
-        return _execute(message);
+        final cap = (message['capability'] ?? message['action'])?.toString();
+        if (cap == null || cap.isEmpty) {
+          throw ArgumentError('plugin.execute missing capability/action');
+        }
+        final params = _params(message);
+        final result = await service.invoke(cap, params);
+        return {
+          'operation': 'plugin.execute',
+          'capability': cap,
+          'result': result,
+        };
 
       default:
-        throw UnsupportedError(
-          'Unsupported plugin command: $type',
-        );
+        throw UnsupportedError('Unsupported plugin command: $type');
     }
   }
 
-  Future<Map<String, dynamic>> _install(
-    Map<String, dynamic> message,
-  ) async {
-    final rawPlugin =
-        message['plugin'];
-
-    if (rawPlugin is! Map) {
-      throw ArgumentError(
-        'plugin.install missing plugin metadata',
-      );
+  String _requireString(Map<String, dynamic> m, String key) {
+    final v = m[key]?.toString();
+    if (v == null || v.isEmpty) {
+      throw ArgumentError('Missing required field: $key');
     }
-
-    final plugin = PluginInfo.fromJson(
-      Map<String, dynamic>.from(
-        rawPlugin,
-      ),
-    );
-
-    await registry.install(plugin);
-
-    return {
-      'operation': 'plugin.install',
-      'plugin_id': plugin.id,
-      'version': plugin.version,
-    };
+    return v;
   }
 
-  Future<Map<String, dynamic>> _enable(
-    Map<String, dynamic> message,
-  ) async {
-    final pluginId =
-        message['plugin_id']?.toString();
-
-    if (pluginId == null ||
-        pluginId.isEmpty) {
-      throw ArgumentError(
-        'plugin.enable missing plugin_id',
-      );
-    }
-
-    await registry.enable(
-      pluginId,
-    );
-
-    return {
-      'operation': 'plugin.enable',
-      'plugin_id': pluginId,
-    };
-  }
-
-  Future<Map<String, dynamic>> _disable(
-    Map<String, dynamic> message,
-  ) async {
-    final pluginId =
-        message['plugin_id']?.toString();
-
-    if (pluginId == null ||
-        pluginId.isEmpty) {
-      throw ArgumentError(
-        'plugin.disable missing plugin_id',
-      );
-    }
-
-    await registry.disable(
-      pluginId,
-    );
-
-    return {
-      'operation': 'plugin.disable',
-      'plugin_id': pluginId,
-    };
-  }
-
-  Future<Map<String, dynamic>> _execute(
-    Map<String, dynamic> message,
-  ) async {
-    final pluginId =
-        message['plugin_id']?.toString();
-
-    final action =
-        message['action']?.toString();
-
-    if (pluginId == null ||
-        pluginId.isEmpty) {
-      throw ArgumentError(
-        'plugin.execute missing plugin_id',
-      );
-    }
-
-    if (action == null ||
-        action.isEmpty) {
-      throw ArgumentError(
-        'plugin.execute missing action',
-      );
-    }
-
-    final rawParams =
-        message['params'];
-
-    final params =
-        rawParams is Map
-            ? Map<String, dynamic>.from(
-                rawParams,
-              )
-            : <String, dynamic>{};
-
-    final result =
-        await registry.execute(
-      pluginId,
-      action,
-      params,
-    );
-
-    return {
-      'operation': 'plugin.execute',
-      'plugin_id': pluginId,
-      'action': action,
-      'result': result,
-    };
+  Map<String, dynamic> _params(Map<String, dynamic> m) {
+    final raw = m['params'] ?? m['parameters'];
+    if (raw is Map) return Map<String, dynamic>.from(raw);
+    return <String, dynamic>{};
   }
 }

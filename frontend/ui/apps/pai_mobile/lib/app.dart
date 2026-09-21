@@ -1,25 +1,34 @@
+import 'dart:async';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
+import 'auth/auth_service.dart';
+import 'config/app_config.dart';
 import 'core/api/api_client.dart';
 
+import 'device/device_info.dart';
 import 'device/device_registration.dart';
 import 'device/device_connection_service.dart';
 
 import 'chat/chat_service.dart';
 
 import 'plugins/plugin_manager.dart';
-import 'plugins/plugin_service2.dart';
+import 'plugins/plugin_service.dart';
+import 'plugins/plugin_installer.dart';
+import 'plugins/plugin_repository.dart';
+import 'plugins/plugin_registry.dart';
 import 'plugins/plugin_command_handler.dart';
 import 'plugins/plugin_command_router.dart';
-import 'plugins/plugin_registry.dart';
-import 'plugins/platform/platform_plugin_registrar.dart';
+import 'plugins/runtime/plugin_runtime.dart';
 
 import 'tasks/task_service.dart';
 
+import 'ui/auth/login_screen.dart';
 import 'ui/chat/chat_screen.dart';
 import 'ui/plugins/plugins_screen.dart';
 import 'ui/tasks/tasks_screen.dart';
-import 'ui/home_screen.dart';
+
 
 class PaiApp extends StatefulWidget {
   const PaiApp({super.key});
@@ -29,161 +38,121 @@ class PaiApp extends StatefulWidget {
 }
 
 class _PaiAppState extends State<PaiApp> {
+  late final AuthService auth;
   late final ApiClient api;
 
   String? deviceId;
-
+  DeviceInfo? _device;
   PluginManager? pluginManager;
-
-  PluginRegistry? pluginRegistry;
-
+  PluginService? pluginService;
   PluginCommandHandler? pluginCommandHandler;
-
   DeviceConnectionService? connectionService;
+
+  bool _booting = true;
+  bool _initializing = false;
+  String? _initError;
 
   int page = 0;
 
   @override
   void initState() {
     super.initState();
-
-    api = ApiClient();
-
-    initialize();
+    auth = AuthService(baseUrl: AppConfig.baseUrl);
+    api = ApiClient(baseUrl: AppConfig.baseUrl, auth: auth);
+    _bootstrap();
   }
 
-  // ==============================================================
-  // INITIALIZATION
-  // ==============================================================
+  // ----------------------------------------------------------------
+  // Boot
+  // ----------------------------------------------------------------
 
-  Future<void> initialize() async {
+  Future<void> _bootstrap() async {
+    await auth.restore();
+
+    if (!mounted) return;
+    setState(() => _booting = false);
+
+    if (auth.isAuthenticated) {
+      unawaited(_initialize());
+    }
+  }
+
+  // ----------------------------------------------------------------
+  // Called from LoginScreen on success, or from _bootstrap if a token
+  // is already on disk.
+  // ----------------------------------------------------------------
+
+  Future<void> _initialize() async {
+    if (_initializing) return;
+    setState(() {
+      _initializing = true;
+      _initError = null;
+    });
+
     try {
-      /*
-       * ------------------------------------------------------------
-       * 1. Register device
-       * ------------------------------------------------------------
-       *
-       * Backend generates the device ID.
-       */
-      final registration =
-          DeviceRegistration(api);
-
-      final device =
-          await registration.register();
-
+      // --------------------------------------------------------
+      // 1. Register device (backend assigns device id, attached
+      //    to the authenticated user).
+      // --------------------------------------------------------
+      final registration = DeviceRegistration(api);
+      final device = await registration.register();
+      _device = device;
       final id = device.id;
+      debugPrint('[PaiApp] Device registered: $id');
 
-      print(
-        '[PaiApp] Device registered: $id',
+      // --------------------------------------------------------
+      // 2. Plugin runtime + service.
+      // --------------------------------------------------------
+      final runtime = PluginRuntime();
+      final repository = PluginRepository(
+        baseUrl: AppConfig.pluginRegistryUrl,
       );
+      final installer = PluginInstaller(repository);
+      final registry = PluginRegistry();
 
-      /*
-       * ------------------------------------------------------------
-       * 2. Create device-side plugin registry
-       * ------------------------------------------------------------
-       *
-       * This registry contains the actual plugin implementations
-       * that run on this device.
-       */
-      final registry =
-          PluginRegistry();
-
-      PlatformPluginRegistrar.register(registry);
-
-      /*
-       * ------------------------------------------------------------
-       * 3. Create plugin command router
-       * ------------------------------------------------------------
-       *
-       * Backend:
-       *
-       * plugin.install
-       * plugin.enable
-       * plugin.disable
-       * plugin.execute
-       *
-       * will be routed here.
-       */
-      final commandRouter =
-          PluginCommandRouter(
+      final service = PluginService(
+        installer: installer,
+        repository: repository,
+        runtime: runtime,
         registry: registry,
       );
 
-      /*
-       * ------------------------------------------------------------
-       * 4. Create plugin command handler
-       * ------------------------------------------------------------
-       *
-       * Handles errors and converts command execution into a
-       * success/failure response.
-       */
-      final commandHandler =
-          PluginCommandHandler(
-        router: commandRouter,
-      );
+      await service.restoreInstalled();
 
-      /*
-       * ------------------------------------------------------------
-       * 5. Create device WebSocket connection
-       * ------------------------------------------------------------
-       */
-      final connection =
-          DeviceConnectionService(
-        baseUrl: api.baseUrl,
+      // --------------------------------------------------------
+      // 3. UI-facing manager.
+      // --------------------------------------------------------
+      final manager = PluginManager(
+        service: service,
+        api: api,
         deviceId: id,
       );
 
-      /*
-       * IMPORTANT:
-       *
-       * The connection only transports messages.
-       *
-       * It does not know about plugins.
-       *
-       * All application messages are forwarded to PaiApp.
-       */
-      connection.setMessageHandler(
-        (message) async {
-          await _handleDeviceMessage(
-            message,
-            commandHandler,
-          );
-        },
-      );
-
-      /*
-       * ------------------------------------------------------------
-       * 6. Create frontend PluginManager
-       * ------------------------------------------------------------
-       *
-       * This manager controls the plugin state shown by the UI
-       * and communicates with the backend REST API.
-       */
-      final manager =
-          PluginManager(
-        service: PluginService(api),
-        deviceId: id,
-      );
-
-      /*
-       * ------------------------------------------------------------
-       * 7. Load plugin catalog
-       * ------------------------------------------------------------
-       */
       await manager.loadCatalog(
         platform: device.platform,
         architecture: device.architecture,
       );
 
-      /*
-       * ------------------------------------------------------------
-       * 8. Store state BEFORE connecting WebSocket
-       * ------------------------------------------------------------
-       *
-       * This guarantees that if the backend immediately sends a
-       * command after connection, the application infrastructure
-       * already exists.
-       */
+      // --------------------------------------------------------
+      // 4. Command router + handler.
+      // --------------------------------------------------------
+      final commandRouter = PluginCommandRouter(service: service);
+      service.attachRouter(commandRouter);
+      final commandHandler = PluginCommandHandler(router: commandRouter);
+
+      // --------------------------------------------------------
+      // 5. WebSocket — with the JWT.
+      // --------------------------------------------------------
+      final connection = DeviceConnectionService(
+        baseUrl: api.baseUrl,
+        deviceId: id,
+        token: auth.token,
+      );
+
+      connection.setMessageHandler((message) async {
+        await _handleDeviceMessage(message, commandHandler);
+      });
+
       if (!mounted) {
         connection.dispose();
         return;
@@ -191,221 +160,112 @@ class _PaiAppState extends State<PaiApp> {
 
       setState(() {
         deviceId = id;
-
         pluginManager = manager;
-
-        pluginRegistry = registry;
-
-        pluginCommandHandler =
-            commandHandler;
-
-        connectionService =
-            connection;
+        pluginService = service;
+        pluginCommandHandler = commandHandler;
+        connectionService = connection;
+        _initializing = false;
       });
 
-      /*
-       * ------------------------------------------------------------
-       * 9. Connect WebSocket
-       * ------------------------------------------------------------
-       */
       await connection.connect();
 
-      print(
-        '[PaiApp] Device connection established: $id',
-      );
+      debugPrint('[PaiApp] Initialization complete');
+    } on UnauthorizedException {
+      debugPrint('[PaiApp] Token rejected — logging out');
+      await _logout();
+    } catch (e, st) {
+      debugPrint('[PaiApp] Initialization failed: $e');
+      debugPrintStack(stackTrace: st);
 
-      /*
-       * ------------------------------------------------------------
-       * 10. Initialization complete
-       * ------------------------------------------------------------
-       */
-      print(
-        '[PaiApp] Initialization complete',
-      );
-    } catch (e, stackTrace) {
-      print(
-        '[PaiApp] Initialization failed: $e',
-      );
-
-      print(stackTrace);
-
-      if (!mounted) {
-        return;
-      }
-
-      ScaffoldMessenger.of(context)
-          .showSnackBar(
-        SnackBar(
-          content: Text(
-            'Failed to connect to PAI: $e',
-          ),
-        ),
-      );
+      if (!mounted) return;
+      setState(() {
+        _initializing = false;
+        _initError = e.toString();
+      });
     }
   }
 
-  // ==============================================================
-  // DEVICE MESSAGE ROUTING
-  // ==============================================================
+  // ----------------------------------------------------------------
+  // Reconcile (called on WS connect)
+  // ----------------------------------------------------------------
+
+  Future<void> _reconcilePlugins() async {
+    final manager = pluginManager;
+    final device = _device;
+    if (manager == null || device == null) return;
+
+    await manager.reconcileWithBackend();
+
+    await manager.loadCatalog(
+      platform: device.platform,
+      architecture: device.architecture,
+    );
+    debugPrint('[PaiApp] Plugin state reconciled + catalog refreshed');
+  }
+
+  // ----------------------------------------------------------------
+  // Device messages
+  // ----------------------------------------------------------------
 
   Future<void> _handleDeviceMessage(
     Map<String, dynamic> message,
     PluginCommandHandler commandHandler,
   ) async {
-    print(
-      '[PaiApp] Device message: $message',
-    );
+    final type = message['type']?.toString();
 
-    final type =
-        message['type']?.toString();
-
-    /*
-     * ------------------------------------------------------------
-     * Plugin commands
-     * ------------------------------------------------------------
-     */
     switch (type) {
       case 'plugin.install':
       case 'plugin.enable':
       case 'plugin.disable':
+      case 'plugin.uninstall':
       case 'plugin.execute':
-        await _handlePluginCommand(
-          message,
-          commandHandler,
-        );
+      case 'capability.invoke':
+        await _handlePluginCommand(message, commandHandler);
         return;
 
-      /*
-       * ----------------------------------------------------------
-       * Device connection confirmation
-       * ----------------------------------------------------------
-       */
       case 'connected':
-        print(
-          '[PaiApp] Backend connection confirmed',
-        );
+        debugPrint('[PaiApp] Backend connection confirmed');
+        unawaited(_reconcilePlugins());
         return;
 
-      /*
-       * ----------------------------------------------------------
-       * Heartbeat acknowledgement
-       * ----------------------------------------------------------
-       */
       case 'heartbeat_ack':
         return;
 
-      /*
-       * ----------------------------------------------------------
-       * Generic command
-       * ----------------------------------------------------------
-       */
       case 'command':
-        await _handleCommand(
-          message,
-        );
-        return;
-
-      /*
-       * ----------------------------------------------------------
-       * Generic event
-       * ----------------------------------------------------------
-       */
       case 'event':
-        await _handleEvent(
-          message,
-        );
-        return;
-
-      /*
-       * ----------------------------------------------------------
-       * Result generated by another subsystem
-       * ----------------------------------------------------------
-       */
       case 'result':
-        await _handleResult(
-          message,
-        );
+        debugPrint('[PaiApp] $type received: $message');
         return;
 
-      /*
-       * ----------------------------------------------------------
-       * Unknown
-       * ----------------------------------------------------------
-       */
       default:
-        print(
-          '[PaiApp] Unknown message type: $type',
-        );
+        debugPrint('[PaiApp] Unknown message type: $type');
     }
   }
-
-  // ==============================================================
-  // PLUGIN COMMAND HANDLING
-  // ==============================================================
 
   Future<void> _handlePluginCommand(
     Map<String, dynamic> message,
     PluginCommandHandler commandHandler,
   ) async {
-    final requestId =
-        message['request_id']?.toString();
-
-    final type =
-        message['type']?.toString();
-
-    print(
-      '[PaiApp] Plugin command: '
-      '$type '
-      'request=$requestId',
-    );
+    final requestId = message['request_id']?.toString();
+    final type = message['type']?.toString();
 
     try {
-      /*
-       * ----------------------------------------------------------
-       * Execute plugin command
-       * ----------------------------------------------------------
-       */
-      final response =
-          await commandHandler.handle(
-        message,
-      );
+      final response = await commandHandler.handle(message);
+      final success = response['success'] == true;
 
-      final success =
-          response['success'] == true;
-
-      /*
-       * ----------------------------------------------------------
-       * Send result back to backend
-       * ----------------------------------------------------------
-       */
-      final connection =
-          connectionService;
-
+      final connection = connectionService;
       if (connection == null) {
-        print(
-          '[PaiApp] Cannot send plugin result: '
-          'connection is null',
-        );
-
+        debugPrint('[PaiApp] Cannot send result: connection is null');
         return;
       }
 
       await connection.sendResult(
-        requestId:
-            requestId ?? 'unknown',
-        success:
-            success,
-        result:
-            response['result'],
-        error:
-            response['error']?.toString(),
+        requestId: requestId ?? 'unknown',
+        success: success,
+        result: response['result'],
+        error: response['error']?.toString(),
       );
 
-      /*
-       * ----------------------------------------------------------
-       * Update local plugin state
-       * ----------------------------------------------------------
-       */
       if (success) {
         pluginManager?.handleCommandResult({
           'success': true,
@@ -419,147 +279,151 @@ class _PaiAppState extends State<PaiApp> {
           'error': response['error'],
         });
       }
-    } catch (e, stackTrace) {
-      /*
-       * ----------------------------------------------------------
-       * Unexpected command handling failure
-       * ----------------------------------------------------------
-       */
-      print(
-        '[PaiApp] Plugin command failed: $e',
-      );
+    } catch (e, st) {
+      debugPrint('[PaiApp] Plugin command failed: $e');
+      debugPrintStack(stackTrace: st);
 
-      print(stackTrace);
-
-      /*
-       * Try to notify backend.
-       */
       try {
         await connectionService?.sendResult(
-          requestId:
-              requestId ?? 'unknown',
+          requestId: requestId ?? 'unknown',
           success: false,
-          result: {
-            'operation': type,
-          },
+          result: {'operation': type},
           error: e.toString(),
         );
       } catch (sendError) {
-        print(
-          '[PaiApp] Failed to send plugin error: '
-          '$sendError',
-        );
+        debugPrint('[PaiApp] Failed to send error: $sendError');
       }
     }
   }
 
-  // ==============================================================
-  // GENERIC COMMAND
-  // ==============================================================
+  // ----------------------------------------------------------------
+  // Logout
+  // ----------------------------------------------------------------
 
-  Future<void> _handleCommand(
-    Map<String, dynamic> message,
-  ) async {
-    print(
-      '[PaiApp] Command received: $message',
-    );
+  Future<void> _logout() async {
+    connectionService?.dispose();
+    connectionService = null;
 
-    /*
-     * Future:
-     *
-     * TaskCommandRouter
-     * DeviceCommandRouter
-     * ExecutorRouter
-     */
+    deviceId = null;
+    _device = null;
+    pluginManager = null;
+    pluginService = null;
+    pluginCommandHandler = null;
+
+    await auth.logout();
+
+    if (!mounted) return;
+    setState(() {
+      _initializing = false;
+      _initError = null;
+    });
   }
 
-  // ==============================================================
-  // EVENT
-  // ==============================================================
-
-  Future<void> _handleEvent(
-    Map<String, dynamic> message,
-  ) async {
-    print(
-      '[PaiApp] Event received: $message',
-    );
-
-    /*
-     * Future:
-     *
-     * EventBus
-     * NotificationManager
-     * TaskManager
-     */
-  }
-
-  // ==============================================================
-  // RESULT
-  // ==============================================================
-
-  Future<void> _handleResult(
-    Map<String, dynamic> message,
-  ) async {
-    print(
-      '[PaiApp] Result received: $message',
-    );
-
-    /*
-     * Generic result handling.
-     *
-     * Plugin command results generated locally are already handled
-     * by _handlePluginCommand().
-     */
-  }
-
-  // ==============================================================
-  // DISPOSE
-  // ==============================================================
+  // ----------------------------------------------------------------
+  // Dispose
+  // ----------------------------------------------------------------
 
   @override
   void dispose() {
-    print(
-      '[PaiApp] Disposing application',
-    );
-
     connectionService?.dispose();
-
     super.dispose();
   }
 
-  // ==============================================================
-  // UI
-  // ==============================================================
+  // ----------------------------------------------------------------
+  // Build
+  // ----------------------------------------------------------------
 
   @override
-  Widget build(
-    BuildContext context,
-  ) {
-    /*
-     * ------------------------------------------------------------
-     * Loading state
-     * ------------------------------------------------------------
-     */
-    if (deviceId == null ||
-        pluginManager == null ||
-        connectionService == null) {
+  Widget build(BuildContext context) {
+    // 1. Booting — reading token from disk.
+    if (_booting) {
+      return const MaterialApp(
+        debugShowCheckedModeBanner: false,
+        home: Scaffold(
+          body: Center(child: CircularProgressIndicator()),
+        ),
+      );
+    }
+
+    // 2. Not authenticated — show login.
+    if (!auth.isAuthenticated) {
+      return MaterialApp(
+        debugShowCheckedModeBanner: false,
+        theme: ThemeData(
+          colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
+          useMaterial3: true,
+        ),
+        home: LoginScreen(
+          auth: auth,
+          onAuthenticated: () {
+            if (!mounted) return;
+            setState(() {});
+            unawaited(_initialize());
+          },
+        ),
+      );
+    }
+
+    // 3. Init error — allow retry or logout.
+    if (_initError != null) {
       return MaterialApp(
         debugShowCheckedModeBanner: false,
         home: Scaffold(
           body: Center(
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.error_outline, size: 48, color: Colors.red),
+                  const SizedBox(height: 16),
+                  const Text(
+                    'Failed to connect to PAI',
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    _initError!,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(color: Colors.grey),
+                  ),
+                  const SizedBox(height: 24),
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      OutlinedButton(
+                        onPressed: _logout,
+                        child: const Text('Sign out'),
+                      ),
+                      const SizedBox(width: 12),
+                      ElevatedButton(
+                        onPressed: _initialize,
+                        child: const Text('Retry'),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    // 4. Still initializing.
+    if (deviceId == null ||
+        pluginManager == null ||
+        connectionService == null) {
+      return const MaterialApp(
+        debugShowCheckedModeBanner: false,
+        home: Scaffold(
+          body: Center(
             child: Column(
-              mainAxisAlignment:
-                  MainAxisAlignment.center,
-              children: const [
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
                 CircularProgressIndicator(),
-
-                SizedBox(
-                  height: 16,
-                ),
-
-                Text(
-                  'Connecting to PAI...',
-                ),
+                SizedBox(height: 16),
+                Text('Connecting to PAI...'),
               ],
             ),
           ),
@@ -567,138 +431,42 @@ class _PaiAppState extends State<PaiApp> {
       );
     }
 
-    /*
-     * ------------------------------------------------------------
-     * Application screens
-     * ------------------------------------------------------------
-     */
+    // 5. Full app.
     final screens = [
-      ChatScreen(
-        service:
-            ChatService(api),
-        deviceId:
-            deviceId!,
-      ),
-
-      TasksScreen(
-        service:
-            TaskService(api),
-      ),
-
-      PluginsScreen(
-        manager:
-            pluginManager!,
-      ),
+      ChatScreen(service: ChatService(api), deviceId: deviceId!),
+      TasksScreen(service: TaskService(api)),
+      PluginsScreen(manager: pluginManager!),
     ];
 
-    /*
-     * ------------------------------------------------------------
-     * Main application
-     * ------------------------------------------------------------
-     */
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-
       theme: ThemeData(
-        colorScheme:
-            ColorScheme.fromSeed(
-          seedColor:
-              Colors.blue,
-        ),
+        colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
         useMaterial3: true,
       ),
-
       home: Scaffold(
-        body:
-            screens[page],
-
-        bottomNavigationBar:
-            NavigationBar(
-          selectedIndex:
-              page,
-
-          onDestinationSelected:
-              (index) {
-            setState(() {
-              page = index;
-            });
-          },
-
-          destinations: const [
-            NavigationDestination(
-              icon:
-                  Icon(Icons.chat),
-              label:
-                  'Chat',
-            ),
-
-            NavigationDestination(
-              icon:
-                  Icon(Icons.task),
-              label:
-                  'Tasks',
-            ),
-
-            NavigationDestination(
-              icon:
-                  Icon(Icons.extension),
-              label:
-                  'Plugins',
+        appBar: AppBar(
+          title: const Text('PAI'),
+          actions: [
+            IconButton(
+              icon: const Icon(Icons.logout),
+              tooltip: 'Sign out',
+              onPressed: _logout,
             ),
           ],
         ),
-      ),
-    );
-  }
-}
-
-// ================================================================
-// GLOBAL SCAFFOLD MESSENGER
-// ================================================================
-
-final GlobalKey<ScaffoldMessengerState>
-    scaffoldMessengerKey =
-    GlobalKey<ScaffoldMessengerState>();
-
-// ================================================================
-// LEGACY ROOT APPLICATION
-// ================================================================
-//
-// Keep this only if another part of your application still uses
-// MyApp. If main.dart directly uses PaiApp, you can remove this
-// class and the HomeScreen import.
-// ================================================================
-
-class MyApp extends StatelessWidget {
-  const MyApp({
-    super.key,
-  });
-
-  @override
-  Widget build(
-    BuildContext context,
-  ) {
-    return MaterialApp(
-      title:
-          'Personal AI',
-
-      scaffoldMessengerKey:
-          scaffoldMessengerKey,
-
-      theme:
-          ThemeData(
-        colorScheme:
-            ColorScheme.fromSeed(
-          seedColor:
-              Colors.deepPurple,
+        body: screens[page],
+        bottomNavigationBar: NavigationBar(
+          selectedIndex: page,
+          onDestinationSelected: (i) => setState(() => page = i),
+          destinations: const [
+            NavigationDestination(icon: Icon(Icons.chat), label: 'Chat'),
+            NavigationDestination(icon: Icon(Icons.task), label: 'Tasks'),
+            NavigationDestination(
+                icon: Icon(Icons.extension), label: 'Plugins'),
+          ],
         ),
       ),
-
-      home:
-          const HomeScreen(),
-
-      debugShowCheckedModeBanner:
-          false,
     );
   }
 }

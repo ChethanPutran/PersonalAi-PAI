@@ -1,16 +1,15 @@
-import 'models/plugin_info_short.dart';
+import 'models/plugin_info.dart';
 
-abstract class DevicePlugin {
-  PluginInfo get info;
+class DevicePlugin {
+  final PluginInfo info;
+  bool enabled;
+  final DateTime installedAt;
 
-  Future<void> install();
+  DevicePlugin({
+    required this.info,
+    this.enabled = false,
+    DateTime? installedAt,
+  }) : installedAt = installedAt ?? DateTime.now();
 
-  Future<void> enable();
-
-  Future<void> disable();
-
-  Future<dynamic> execute(
-    String action,
-    Map<String, dynamic> params,
-  );
+  String get id => info.id;
 }
