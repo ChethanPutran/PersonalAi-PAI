@@ -1,4 +1,4 @@
-import 'models/plugin_info.dart';
+import 'models/plugin_info_short.dart';
 import 'device_plugin.dart';
 
 typedef PluginFactory =

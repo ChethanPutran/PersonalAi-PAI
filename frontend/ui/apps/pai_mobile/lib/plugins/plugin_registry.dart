@@ -1,67 +1,40 @@
 import 'device_plugin.dart';
-import 'models/plugin_info.dart';
-import 'plugin_factory.dart';
+import 'models/plugin_info_short.dart';
 
 class PluginRegistry {
   final Map<String, DevicePlugin> _plugins = {};
 
-  final Map<String, PluginFactory> _factories = {};
-
-  void registerFactory(
+  void register(
     String pluginId,
-    PluginFactory factory,
+    DevicePlugin plugin,
   ) {
-    _factories[pluginId] =
-        factory;
+    _plugins[pluginId] = plugin;
   }
 
-  DevicePlugin? get(
-    String pluginId,
-  ) {
+  DevicePlugin? get(String pluginId) {
     return _plugins[pluginId];
   }
 
-  bool contains(
-    String pluginId,
-  ) {
+  bool contains(String pluginId) {
     return _plugins.containsKey(pluginId);
   }
 
   Future<void> install(
     PluginInfo info,
   ) async {
-    var plugin =
-        _plugins[info.id];
-
-    /*
-     * Create plugin implementation
-     * from registered factory.
-     */
-    if (plugin == null) {
-      final factory =
-          _factories[info.id];
-
-      if (factory == null) {
-        throw UnsupportedError(
-          'No plugin factory registered '
-          'for ${info.id}',
-        );
-      }
-
-      plugin = factory(info);
-
-      _plugins[info.id] =
-          plugin;
-    }
-
-    await plugin.install();
+    // Installation handled by PluginInstaller.
   }
 
   Future<void> enable(
     String pluginId,
   ) async {
-    final plugin =
-        _require(pluginId);
+    final plugin = _plugins[pluginId];
+
+    if (plugin == null) {
+      throw StateError(
+        'Plugin not installed: $pluginId',
+      );
+    }
 
     await plugin.enable();
   }
@@ -69,8 +42,13 @@ class PluginRegistry {
   Future<void> disable(
     String pluginId,
   ) async {
-    final plugin =
-        _require(pluginId);
+    final plugin = _plugins[pluginId];
+
+    if (plugin == null) {
+      throw StateError(
+        'Plugin not installed: $pluginId',
+      );
+    }
 
     await plugin.disable();
   }
@@ -80,20 +58,7 @@ class PluginRegistry {
     String action,
     Map<String, dynamic> params,
   ) async {
-    final plugin =
-        _require(pluginId);
-
-    return plugin.execute(
-      action,
-      params,
-    );
-  }
-
-  DevicePlugin _require(
-    String pluginId,
-  ) {
-    final plugin =
-        _plugins[pluginId];
+    final plugin = _plugins[pluginId];
 
     if (plugin == null) {
       throw StateError(
@@ -101,6 +66,6 @@ class PluginRegistry {
       );
     }
 
-    return plugin;
+    return plugin.execute(action, params);
   }
 }

@@ -8,10 +8,11 @@ import 'device/device_connection_service.dart';
 import 'chat/chat_service.dart';
 
 import 'plugins/plugin_manager.dart';
-import 'plugins/plugin_service.dart';
+import 'plugins/plugin_service2.dart';
 import 'plugins/plugin_command_handler.dart';
 import 'plugins/plugin_command_router.dart';
 import 'plugins/plugin_registry.dart';
+import 'plugins/platform/platform_plugin_registrar.dart';
 
 import 'tasks/task_service.dart';
 
@@ -86,6 +87,8 @@ class _PaiAppState extends State<PaiApp> {
        */
       final registry =
           PluginRegistry();
+
+      PlatformPluginRegistrar.register(registry);
 
       /*
        * ------------------------------------------------------------

@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-import '../../../plugins/models/plugin_info.dart';
+import '../../plugins/models/plugin_info_short.dart';
 import '../../../plugins/plugin_manager.dart';
 
 

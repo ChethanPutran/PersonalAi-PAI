@@ -28,6 +28,37 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+
+        // host JNI lib
+        externalNativeBuild {
+            cmake {
+                cppFlags "-std=c++17 -fexceptions"
+            }
+        }
+
+        ndk {
+            abiFilters "arm64-v8a", "armeabi-v7a", "x86_64"
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path "src/main/cpp/CMakeLists.txt"
+            version "3.22.1"
+        }
+    }
+
+    // Extract .so from APK so dlopen can find the host lib
+    packagingOptions {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
+
+    sourceSets {
+        main {
+            jniLibs.srcDirs += ["src/main/jniLibs"]
+        }
     }
 
     buildTypes {

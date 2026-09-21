@@ -1,10 +1,12 @@
 #include "my_application.h"
 
+
 #include <flutter_linux/flutter_linux.h>
 #ifdef GDK_WINDOWING_X11
 #include <gdk/gdkx.h>
 #endif
 
+#include "agent/bridge/plugin_channel.h"
 #include "flutter/generated_plugin_registrant.h"
 
 struct _MyApplication {
@@ -76,6 +78,14 @@ static void my_application_activate(GApplication* application) {
   fl_register_plugins(FL_PLUGIN_REGISTRY(view));
 
   gtk_widget_grab_focus(GTK_WIDGET(view));
+
+  // Setup the plugin channel for communication between Flutter and native code.
+  auto messenger = flutter_engine_get_messenger(
+      fl_view_get_engine(FL_VIEW(view)));
+  // keep the channel alive for the lifetime of the app
+  static std::unique_ptr<pai::agent::PluginChannel> g_plugin_channel;
+  g_plugin_channel = std::make_unique<pai::agent::PluginChannel>(messenger);
+
 }
 
 // Implements GApplication::local_command_line.

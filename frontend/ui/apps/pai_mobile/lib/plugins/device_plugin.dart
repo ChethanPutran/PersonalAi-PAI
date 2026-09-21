@@ -1,4 +1,4 @@
-import 'models/plugin_info.dart';
+import 'models/plugin_info_short.dart';
 
 abstract class DevicePlugin {
   PluginInfo get info;

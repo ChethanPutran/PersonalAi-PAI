@@ -29,7 +29,7 @@ class PluginService {
   }
 
   static Future<List<PluginInfo>> getPlugins() async {
-    print('➡️ Fetching plugins from /api/v1/plugins');
+    print('Fetching plugins from /api/v1/plugins');
     final userId = const String.fromEnvironment('USER_ID', defaultValue: 'test');
     final response = await _dio.get(
       '/api/v1/plugins',
@@ -37,7 +37,7 @@ class PluginService {
     );
     final payload = Map<String, dynamic>.from(response.data as Map);
     final plugins = payload['plugins'] as List<dynamic>? ?? const [];
-    print('✅ Plugins response: ${plugins.length} plugins found');
+    print('Plugins response: ${plugins.length} plugins found');
     return plugins
         .map(
           (plugin) =>
@@ -47,13 +47,13 @@ class PluginService {
   }
 
   static Future<Map<String, dynamic>> getPlugin(String pluginId) async {
-    print('➡️ Fetching plugin from /api/v1/plugins/$pluginId');
+    print('Fetching plugin from /api/v1/plugins/$pluginId');
     final userId = const String.fromEnvironment('USER_ID', defaultValue: 'test');
     final response = await _dio.get(
       '/api/v1/plugins/$pluginId',
       queryParameters: {'user_id': userId},
     );
-    print('✅ Plugin response: ${response.data}');
+    print('Plugin response: ${response.data}');
     return Map<String, dynamic>.from(response.data as Map);
   }
 

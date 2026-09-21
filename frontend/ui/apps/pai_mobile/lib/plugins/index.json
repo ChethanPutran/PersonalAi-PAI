@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2025-01-15T10:00:00Z",
+  "plugins": [
+    {
+      "id": "camera",
+      "name": "Camera",
+      "latest": "1.0.0",
+      "versions": {
+        "1.0.0": {
+          "manifestUrl": "https://cdn.pai.example/plugins/camera/1.0.0/manifest.json",
+          "artifacts": {
+            "android": "https://cdn.pai.example/plugins/camera/1.0.0/android.aar",
+            "linux":   "https://cdn.pai.example/plugins/camera/1.0.0/linux.so"
+          },
+          "sha256": { "android": "…", "linux": "…" },
+          "sizeBytes": { "android": 812345, "linux": 234567 },
+          "minPaiVersion": "0.4.0"
+        }
+      }
+    },
+    {
+      "id": "whatsapp",
+      "name": "WhatsApp",
+      "latest": "2.1.0",
+      "versions": { "...": {} }
+    }
+  ]
+}

@@ -1,7 +1,7 @@
 import 'package:flutter/foundation.dart';
 
-import 'models/plugin_info.dart';
-import 'plugin_service.dart';
+import 'models/plugin_info_short.dart';
+import 'plugin_service2.dart';
 
 class PluginManager extends ChangeNotifier {
   final PluginService service;
