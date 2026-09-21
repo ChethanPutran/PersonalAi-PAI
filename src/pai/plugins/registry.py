@@ -202,7 +202,7 @@ class PluginRegistry:
     ) -> Optional[str]:
         return self._capability_registry.get(capability)
 
-    def get_all_manifests(self) -> List[PluginManifest]:
+    def get_all_manifests(self, user_id: Optional[str] = None) -> List[PluginManifest]:
         return list(self._manifests.values())
 
     def get_all_capabilities(self) -> Dict[str, str]:

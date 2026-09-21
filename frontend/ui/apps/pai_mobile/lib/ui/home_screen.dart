@@ -10,7 +10,7 @@ import '../providers/websocket_provider.dart';
 import '../services/camera_service.dart';
 import '../services/plugin_service.dart';
 import '../services/voice_service.dart';
-import 'plugin_detail_screen.dart';
+import 'plugins/plugin_detail_screen.dart';
 import 'device_selection_screen.dart';
 import 'file_browser_screen.dart';
 import 'file_requests_screen.dart';

@@ -2,7 +2,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/legacy.dart';
 import 'package:riverpod/riverpod.dart';  // Ensures StateNotifier & StateNotifierProvider are available
 import 'package:flutter/material.dart';
-import '../main.dart'; // for scaffoldMessengerKey
+import '../app.dart'; // for scaffoldMessengerKey
 import '../services/websocket_service.dart';
 import '../models/message.dart';
 

@@ -33,22 +33,49 @@ class DeviceRegistry:
         self,
         device: DeviceInfo,
     ) -> DeviceInfo:
-        """Register or update a device."""
-        async with self._lock:
-            existing = self._devices.get(device.id)
+        """
+        Register or update a device.
 
-            if existing is not None:
-                device.registered_at = existing.registered_at
+        Backend owns device ID generation.
+        """
+
+        async with self._lock:
+
+            # --------------------------------------------------
+            # Existing device
+            # --------------------------------------------------
+
+            if device.id:
+                existing = self._devices.get(device.id)
+
+                if existing is not None:
+                    logger.info(
+                        "Updating device: {} ({})",
+                        existing.id,
+                        device.name,
+                    )
+
+                    device.registered_at = (
+                        existing.registered_at
+                    )
+
+                    self._devices[device.id] = device
+
+                    return device
+
+            # --------------------------------------------------
+            # New device
+            # --------------------------------------------------
+
+            logger.info(
+                "Registering new device: {} ({})",
+                device.id,
+                device.name,
+            )
 
             self._devices[device.id] = device
 
-        logger.info(
-            "Device registered: {} ({})",
-            device.id,
-            device.name,
-        )
-
-        return device
+            return device
 
     async def unregister(
         self,
@@ -91,10 +118,13 @@ class DeviceRegistry:
 
         return device
 
-    async def all(self) -> List[DeviceInfo]:
+    async def all(self,user_id: Optional[str] = None) -> List[DeviceInfo]:
         """Return all registered devices."""
         async with self._lock:
+            if user_id:
+                return [device for device in self._devices.values() if device.metadata.get("user_id") == user_id]
             return list(self._devices.values())
+
 
     async def update_status(
         self,

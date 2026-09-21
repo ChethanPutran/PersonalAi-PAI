@@ -45,14 +45,22 @@ class TaskManager:
         *,
         store: Optional[TaskStore] = None,
         scheduler: Any = None,
+        executor_manager: Any = None,
         event_bus: Any = None,
     ) -> None:
         self.store = store or TaskStore()
         self.scheduler = scheduler
+        self.executor_manager = executor_manager
         self.event_bus = event_bus
 
         self._running_tasks: Dict[str, asyncio.Task] = {}
 
+
+    def get_status(self) -> Dict[str, Any]:
+        return {
+            "running_tasks": list(self._running_tasks.keys()),
+            "task_count": len(self._running_tasks),
+        }
     # ------------------------------------------------------------------
     # Task creation
     # ------------------------------------------------------------------
@@ -60,6 +68,7 @@ class TaskManager:
     async def create(
         self,
         *,
+        title: str,
         input: str,
         task_type: str,
         parameters: Optional[Dict[str, Any]] = None,
@@ -80,6 +89,7 @@ class TaskManager:
         """
 
         task = Task(
+            title=title,
             input=input,
             type=task_type,
             parameters=parameters or {},
@@ -441,6 +451,62 @@ class TaskManager:
 
         return task
 
+
+    async def pause(
+        self,
+        task_id: str,
+    ) -> Task:
+        task = await self.store.require(task_id)
+
+        if not task.can_pause:
+            raise InvalidTaskTransition(
+                f"Task {task_id} cannot be paused from "
+                f"state {task.status.value}"
+            )
+
+        self.executor_manager.pause_task(task.executor_id, task.id)
+        
+        TaskLifecycle.pause(task)
+
+        await self.store.save(task)
+
+        await self._publish(
+            "task.paused",
+            task,
+        )
+
+        return task
+
+
+    async def resume(
+        self,
+        task_id: str,
+    ) -> Task:
+        task = await self.store.require(task_id)
+
+        if not task.can_resume:
+            raise InvalidTaskTransition(
+                f"Task {task_id} cannot be resumed from "
+                f"state {task.status.value}"
+            )
+
+        self.executor_manager.resume_task(task.executor_id, task.id)
+        
+        TaskLifecycle.resume(task)
+
+        await self.store.save(task)
+
+        await self._publish(
+            "task.resumed",
+            task,
+        )
+
+        return task
+    
+    async def list_tasks(self, status: Optional[TaskStatus] = None) -> List[Task]:
+        return await self.store.list(status=status)
+
+
     # ------------------------------------------------------------------
     # Query
     # ------------------------------------------------------------------
@@ -463,6 +529,33 @@ class TaskManager:
             limit=limit,
         )
 
+    async def update_task(
+        self,
+        task_id: str,
+        *,
+        title: Optional[str] = None,
+        input: Optional[str] = None,
+        parameters: Optional[Dict[str, Any]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Task:
+        task = await self.store.require(task_id)
+
+        if title is not None:
+            task.title = title
+
+        if input is not None:
+            task.input = input
+
+        if parameters is not None:
+            task.parameters.update(parameters)
+
+        if metadata is not None:
+            task.metadata.update(metadata)
+
+        await self.store.save(task)
+
+        return task
+    
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------

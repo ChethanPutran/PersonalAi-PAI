@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional
+import uuid
 
 from pydantic import BaseModel, Field
 
@@ -71,9 +72,14 @@ class DeviceInfo(BaseModel):
     device_type: DeviceType = DeviceType.UNKNOWN
     status: DeviceStatus = DeviceStatus.UNKNOWN
 
+    # Application information.
+    app_version: str
+    runtime_version: str
+
     # Device platform information.
     platform: Optional[str] = None
     platform_version: Optional[str] = None
+    os_version: str
     architecture: Optional[str] = None
 
     # Network information.
@@ -105,16 +111,41 @@ class DeviceInfo(BaseModel):
         """Return capability names."""
         return [item.name for item in self.capabilities]
 
+    def generate_id(self) -> str:
+        """Generate a unique device identifier based on its properties."""
+        return f"{self.device_type}:{self.platform}:{self.architecture}:{self.name}:{uuid.uuid4()}"  # Replace 'uuid' with actual unique identifier logic if needed.
+
+class DeviceRegistrationInfo(BaseModel):
+    name: str
+    device_type: str = "unknown"
+
+    app_version: str = "1.0.0"
+    runtime_version: str = "1.0.0"
+
+    platform: Optional[str] = None
+    platform_version: Optional[str] = None
+    os_version: Optional[str] = None
+
+    architecture: Optional[str] = None
+    hostname: Optional[str] = None
+
+    capabilities: List[Dict[str, Any]] = Field(
+        default_factory=list
+    )
+
+    metadata: Dict[str, Any] = Field(
+        default_factory=dict
+    )
+
 
 class DeviceRegistration(BaseModel):
-    """Information required when registering a device."""
+    device: DeviceRegistrationInfo
 
-    device: DeviceInfo
-
-    # Optional connection configuration.
     connection_type: Optional[str] = None
-    connection_config: Dict[str, Any] = Field(default_factory=dict)
 
+    connection_config: Dict[str, Any] = Field(
+        default_factory=dict
+    )
 
 class DeviceHeartbeat(BaseModel):
     """Heartbeat sent by a device/executor."""

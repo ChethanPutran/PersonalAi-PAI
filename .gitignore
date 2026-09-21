@@ -7,3 +7,4 @@ data/*
 src/ai_personal_agent.egg-info/*
 .vscode/*
 .github/*
+__pycache__

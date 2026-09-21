@@ -6,6 +6,7 @@ from abc import ABC, abstractmethod
 from enum import Enum
 from typing import Any, Dict, Optional
 
+import httpx
 from loguru import logger
 
 
@@ -129,11 +130,54 @@ class LocalDeviceConnection(DeviceConnection):
         }
 
 
+class HTTPDeviceConnection(DeviceConnection):
+    """
+    HTTP connection to a remote PAI device.
+
+    Used as a temporary/request-response transport.
+    Persistent device communication should use WebSocket.
+    """
+
+    async def connect(self) -> None:
+        self._state = ConnectionState.CONNECTED
+
+    async def disconnect(self) -> None:
+        self._state = ConnectionState.DISCONNECTED
+
+    async def send(
+        self,
+        payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        if not self.connected:
+            raise RuntimeError(
+                f"Device {self.device_id} is not connected"
+            )
+
+        url = self.config.get("url")
+
+        if not url:
+            raise RuntimeError(
+                f"No HTTP endpoint configured for "
+                f"device {self.device_id}"
+            )
+
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                url,
+                json=payload,
+                timeout=30,
+            )
+
+            response.raise_for_status()
+
+            return response.json()
+        
 class DeviceConnectionFactory:
     """Create connections from a connection type."""
 
     _registry: Dict[str, type[DeviceConnection]] = {
         "local": LocalDeviceConnection,
+         "http": HTTPDeviceConnection,
     }
 
     @classmethod

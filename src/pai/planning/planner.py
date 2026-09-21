@@ -37,15 +37,10 @@ class Planner:
 
     def __init__(
         self,
-        kernel,
-        llm=None,
+        llm_router: Any,
+        capability_router: Any,
     ):
-        self.kernel = kernel
-
-        self.llm = (
-            llm
-            or getattr(kernel, "llm", None)
-        )
+        self.llm = llm_router
 
         if self.llm is None:
             raise ValueError(
@@ -57,7 +52,7 @@ class Planner:
         )
 
         self.verifier = PlanVerifier(
-            kernel
+            capability_router=capability_router
         )
 
         self.active_plans: Dict[str, Plan] = {}
@@ -70,6 +65,12 @@ class Planner:
 
         logger.info("Planner initialized")
 
+
+    def get_status(self) -> Dict[str, Any]:
+        return {
+            "initialized": self._initialized,
+            "active_plans": len(self.active_plans),
+        }
     async def create_plan(
         self,
         goal: str,

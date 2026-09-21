@@ -30,6 +30,21 @@ class CapabilityResolver:
         self.plugin_manager = plugin_manager
         self.capability_router = capability_router
 
+
+    def get_status(self) -> dict:
+        return {
+            "plugin_manager": getattr(
+                self.plugin_manager,
+                "get_status",
+                lambda: {}
+            )(),
+            "capability_router": getattr(
+                self.capability_router,
+                "get_status",
+                lambda: {}
+            )(),
+        }
+    
     async def resolve(
         self,
         task: Any,

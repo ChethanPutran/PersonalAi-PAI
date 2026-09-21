@@ -1,21 +1,15 @@
 """Main entry point for the Personal AI system."""
 
-import asyncio
 from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
+from pai.api.routes import chat, devices, plugins, tasks
 from pai.app_context import PAIAppContext, create_app_context, get_app_context, get_ws_app_context
 from pai.config import config
-from pai.api.routes import agent, plugins
-from api.routes import executors
 from pai.api.middleware.logging import LoggingMiddleware
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.types import ASGIApp, Receive, Scope, Send
-from time import time
-
-from api.routes import audio
+from pai.api.middleware.auth import AuthMiddleware
 
 REQUEST_COUNT = None
 REQUEST_LATENCY = None
@@ -28,11 +22,11 @@ def create_lifespan(context: PAIAppContext):
     async def lifespan(app: FastAPI):
         app.state.context = context
         logger.info("Starting Personal AI System...")
-        await context.kernel.start()
+        await context.orchestrator.initialize()
         logger.info(f"API server running on {config.api_host}:{config.api_port}")
         yield
         logger.info("Shutting down Personal AI System...")
-        await context.kernel.shutdown()
+        await context.orchestrator.shutdown()
 
     return lifespan
 
@@ -47,22 +41,37 @@ def create_app(context: PAIAppContext) -> FastAPI:
     )
     app.state.context = context
 
-    app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
     app.add_middleware(LoggingMiddleware)
 
-    app.include_router(agent.router, prefix="/api/agents", tags=["agents"])
-    app.include_router(plugins.router, prefix="/api/plugins", tags=["plugins"])
 
-    app.include_router(audio.router)
-    # File browsing endpoints (v1)
-    from api.routes import files
-    app.include_router(files.router)
-    from pai.api.routes import preferences 
-    app.include_router(preferences.router)
-    from pai.api.routes import devices 
-    app.include_router(devices.router)
-    from api.routes import builds
-    app.include_router(builds_v1.router)
+    app.include_router(
+        devices.router,
+        prefix="/api/v1",
+    )
+
+    app.include_router(
+        plugins.router,
+        prefix="/api/v1",
+    )
+
+    app.include_router(
+        tasks.router,
+        prefix="/api/v1",
+    )
+
+    app.include_router(
+        chat.router,
+        prefix="/api/v1",
+    )
 
     @app.get("/")
     async def root(context: PAIAppContext = Depends(get_app_context)):
@@ -71,16 +80,18 @@ def create_app(context: PAIAppContext) -> FastAPI:
             "name": "Personal AI System",
             "version": "1.0.0",
             "status": "running",
-            "kernel": context.kernel.get_status(),
+            "kernel": context.orchestrator.get_status(),
         }
 
-    @app.get("/health")
+    @app.get("/api/v1/health")
     async def health():
-        """Health check endpoint."""
-        return {"status": "healthy"}
+        return {
+            "status": "ok",
+            "service": "pai-backend",
+        }
 
     @app.websocket("/ws")
-    async def websocket_endpoint(websocket: WebSocket):
+    async def websocket_endpoint(websocket: WebSocket, user_id: str = None):
         await websocket.accept()
         logger.info("WebSocket client connected")
         context = get_ws_app_context(websocket)
@@ -106,30 +117,18 @@ def create_app(context: PAIAppContext) -> FastAPI:
                         if not goal:
                             await websocket.send_json({"type": "error", "message": "Missing 'goal' field"})
                             continue
-                        result = await context.kernel.process_goal(goal, data.get("context", {}))
+                        result = await context.orchestrator.run(
+                            user_id=context.user_id,
+                            session_id=context.session_id,
+                            source_device_id=context.source_device_id,
+                            goal=goal,
+                            context=data.get("context", {}))
                         await websocket.send_json({"type": "result", "data": result})
 
-                    elif msg_type == "register_device":
-                        payload = data.get("payload", {})
-                        pm = context.kernel.plugin_manager
-                        rec = await pm.register_device(
-                            user_id=payload.get("user_id"),
-                            device_id=payload.get("device_id"),
-                            device_name=payload.get("device_name"),
-                            device_type=payload.get("device_type"),
-                            platform=payload.get("platform"),
-                            capabilities=payload.get("capabilities"),
-                            config=payload.get("config"),
-                        )
-                        if rec is None:
-                            await websocket.send_json({"type": "device_registered", "status": "error"})
-                        else:
-                            device = await pm.get_device(payload.get("device_id"))
-                            await websocket.send_json({"type": "device_registered", "status": "ok", "device": device})
 
                     elif msg_type == "context_update":
                         ctx = data.get("context", {}) or {}
-                        await context.kernel.context_manager.update(ctx)
+                        await context.orchestrator.context_manager.update(ctx)
                         await websocket.send_json({"type": "context_updated", "status": "ok"})
 
                     elif msg_type == "subscribe":
@@ -144,7 +143,7 @@ def create_app(context: PAIAppContext) -> FastAPI:
                             except Exception as e:
                                 logger.error(f"Failed to send event: {e}")
 
-                        await context.kernel.event_bus.subscribe(event_type, handler)
+                        await context.orchestrator.event_bus.subscribe(event_type, handler)
                         await websocket.send_json({"type": "subscribed", "event": event_type})
 
                     else:

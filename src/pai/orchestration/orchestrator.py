@@ -39,6 +39,10 @@ from typing import Any, Dict, Optional
 
 from loguru import logger
 
+from pai.agents.manager import AgentManager
+from pai.devices.manager import DeviceManager
+from pai.devices.manager import DeviceManager
+from pai.executors.manager import ExecutorManager
 from pai.orchestration.authorization import (
     AuthorizationManager,
 )
@@ -55,6 +59,10 @@ from pai.orchestration.execution_context import (
 from pai.orchestration.task_runner import (
     TaskRunner,
 )
+from pai.planning.planner import Planner
+from pai.plugins.manager import PluginManager
+from pai.security.manager import SecurityManager
+from pai.tasks.manager import TaskManager
 
 
 class OrchestrationError(RuntimeError):
@@ -67,23 +75,25 @@ class TaskOrchestrator:
         self,
         *,
         context_manager: ContextManager,
-        planning_engine: Any,
-        task_manager: Any,
-        device_manager: Any,
-        plugin_manager: Any,
-        security_manager: Any,
-        executor_manager: Any = None,
-        executor_scheduler: Any = None,
-        capability_router: Any = None,
-        event_bus: Any = None,
-        memory_manager: Any = None,
-        dag_scheduler: Any = None,
+        planning_engine: Planner,
+        task_manager: TaskManager,
+        device_manager: DeviceManager,
+        plugin_manager: PluginManager,
+        security_manager: SecurityManager,
+        executor_manager: ExecutorManager,
+        agent_manager: AgentManager,
+        executor_scheduler: Any,
+        capability_router: Any,
+        event_bus: Any,
+        memory_manager: Any,
+        dag_scheduler: Any,
     ):
 
         self.context_manager = context_manager
         self.planner = planning_engine
 
         self.task_manager = task_manager
+        self.agent_manager = agent_manager
 
         self.device_manager = device_manager
         self.plugin_manager = plugin_manager
@@ -123,7 +133,7 @@ class TaskOrchestrator:
             task_manager=task_manager,
             capability_resolver=self.capability_resolver,
             device_selector=self.device_selector,
-            authorizer=self.authorizer,
+            authorization_manager=self.authorizer,
             executor_manager=self.executor_manager,
             event_bus=event_bus,
         )
@@ -519,7 +529,9 @@ class TaskOrchestrator:
         # ---------------------------------------------------------
 
         runtime_task = (
-            await self.task_manager.create_task(
+            await self.task_manager.create(
+                title=capability,
+                input=params,
                 user_id=user_id,
                 session_id=context.session_id,
                 task_type=capability,
@@ -602,6 +614,19 @@ class TaskOrchestrator:
                 event_type,
                 exc,
             )
+
+    def get_status(self) -> Dict[str, Any]:
+        return {
+            "initialized": self._initialized,
+            "planner": self.planner.get_status(),
+            "task_manager": self.task_manager.get_status(),
+            "device_manager": self.device_manager.get_status(),
+            "plugin_manager": self.plugin_manager.get_status(),
+            "executor_manager": self.executor_manager.get_status(),
+            "capability_resolver": self.capability_resolver.get_status(),
+            "authorizer": self.authorizer.get_status(),
+            "device_selector": self.device_selector.get_status(),
+        }
 
     # =============================================================
     # HELPERS

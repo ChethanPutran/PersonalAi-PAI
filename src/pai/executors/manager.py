@@ -51,6 +51,14 @@ class ExecutorManager:
             executor.name,
         )
 
+
+    def get_status(self) -> Dict[str, str]:
+        """Get the status of the executor manager."""
+        return {
+            name: executor.get_status()
+            for name, executor in self._executors.items()
+        }
+    
     def unregister(
         self,
         executor_name: str,

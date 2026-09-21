@@ -3,6 +3,21 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+@dataclass(frozen=True)
+class PluginInfo:
+    id: str
+    name: str
+    version: str
+
+    platforms: List[str]
+    architectures: List[str]
+
+    capabilities: List[str]
+
+    package_url: Optional[str] = None
+    checksum: Optional[str] = None
+
+    size: int = 0
 
 @dataclass(frozen=True)
 class CapabilityParameter:
@@ -48,6 +63,7 @@ class PluginManifest:
     plugin_type: str
     description: str
     runtime: PluginRuntime
+    platforms: List[str] = field(default_factory=list)
 
     permissions: List[str] = field(default_factory=list)
     dependencies: List[str] = field(default_factory=list)

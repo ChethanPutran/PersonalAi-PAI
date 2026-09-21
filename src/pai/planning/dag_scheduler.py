@@ -4,17 +4,12 @@ import asyncio
 from typing import Any, Awaitable, Callable, Dict, List
 
 
-TaskRunnerFn = Callable[
-    [Any],
-    Awaitable[Dict[str, Any]],
-]
-
-
 class DAGScheduler:
 
     def __init__(
         self,
-        task_runner: TaskRunnerFn,
+        *,
+        task_runner: Any,
         max_concurrency: int = 4,
     ):
         self.task_runner = task_runner

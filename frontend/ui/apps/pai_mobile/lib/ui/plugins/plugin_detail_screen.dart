@@ -1,6 +1,6 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
-import '../services/plugin_service.dart';
+import '../../services/plugin_service.dart';
 
 class PluginDetailScreen extends StatefulWidget {
   final String pluginId;

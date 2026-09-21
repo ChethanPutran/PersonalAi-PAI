@@ -36,6 +36,14 @@ class AuthorizationManager:
         self.plugin_manager = plugin_manager
         self.device_manager = device_manager
 
+
+    def get_status(self) -> dict:
+        return {
+            "security_manager": getattr(self.security, "get_status", lambda: {})(),
+            "plugin_manager": getattr(self.plugin_manager, "get_status", lambda: {})(),
+            "device_manager": getattr(self.device_manager, "get_status", lambda: {})(),
+        }
+    
     async def authorize(
         self,
         *,

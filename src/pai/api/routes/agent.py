@@ -1,8 +1,8 @@
 from fastapi import APIRouter, Depends
 from typing import Dict, Any
-from pai.app_context import get_kernel
+from pai.app_context import get_orchestrator
 from pai.api.middleware.auth import get_current_user
-from pai.kernel.ai_kernel import AIKernel
+from pai.orchestration.orchestrator import TaskOrchestrator
 from fastapi import APIRouter, Depends, HTTPException
 from typing import List, Optional
 from pydantic import BaseModel
@@ -36,10 +36,10 @@ class TaskExecutionRequest(BaseModel):
 
 
 @router.get("")
-async def list_agents(kernel: AIKernel = Depends(get_kernel)):
+async def list_agents(orchestrator: TaskOrchestrator = Depends(get_orchestrator)):
     """List all available agents"""
     agents = []
-    for name, agent in kernel.agent_manager._agents.items():
+    for name, agent in orchestrator.agent_manager._agents.items():
         agents.append({
             "id": name,
             "name": name.replace("_", " ").title(),
@@ -55,11 +55,11 @@ async def list_agents(kernel: AIKernel = Depends(get_kernel)):
 
 
 @router.post("/{agent_id}/execute")
-async def execute_agent(agent_id: str, request: TaskExecutionRequest, kernel: AIKernel = Depends(get_kernel)):
+async def execute_agent(agent_id: str, request: TaskExecutionRequest, orchestrator: TaskOrchestrator = Depends(get_orchestrator)):
     """Execute an agent with a goal"""
     try:
         agent_name = agent_id if agent_id.endswith("_agent") else f"{agent_id}_agent"
-        result = await kernel.agent_manager.send_goal(agent_name, request.goal, request.context or {})
+        result = await orchestrator.agent_manager.send_goal(agent_name, request.goal, request.context or {})
         return {
             "agent_id": agent_name,
             "goal": request.goal,
@@ -74,10 +74,10 @@ async def execute_agent(agent_id: str, request: TaskExecutionRequest, kernel: AI
 
 
 @router.get("/{agent_id}/status")
-async def get_agent_status(agent_id: str, kernel: AIKernel = Depends(get_kernel)):
+async def get_agent_status(agent_id: str, orchestrator: TaskOrchestrator = Depends(get_orchestrator)):
     """Get agent status"""
     agent_name = agent_id if agent_id.endswith("_agent") else f"{agent_id}_agent"
-    status = await kernel.agent_manager.get_agent_status(agent_name)
+    status = await orchestrator.agent_manager.get_agent_status(agent_name)
     if agent_name not in status:
         raise HTTPException(status_code=404, detail="Agent not found")
     return {"agent_id": agent_name, **status[agent_name]}
@@ -88,7 +88,7 @@ async def send_agent_goal(
     agent_name: str,
     goal_data: Dict[str, Any],
     user=Depends(get_current_user),
-    kernel: AIKernel = Depends(get_kernel),
+    orchestrator: TaskOrchestrator = Depends(get_orchestrator),
 ):
-    result = await kernel.agent_manager.send_goal(agent_name, goal_data.get("goal", ""), goal_data.get("context", {}))
+    result = await orchestrator.agent_manager.send_goal(agent_name, goal_data.get("goal", ""), goal_data.get("context", {}))
     return {"agent": agent_name, "result": result}

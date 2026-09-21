@@ -1,31 +1,23 @@
 from typing import Dict, Any, Optional
 from loguru import logger
-from pai.agents.base_agent import BaseAgent
-from pai.agents.research_agent import ResearchAgent
-from pai.agents.productivity_agent import ProductivityAgent
-from pai.agents.communication_agent import CommunicationAgent
-from pai.agents.travel_agent import TravelAgent
-from pai.agents.health_agent import HealthAgent
-from pai.agents.automation_agent import AutomationAgent
-from pai.agents.coding_agent import CodingAgent
-from pai.agents.finance_agent import FinanceAgent
+from pai.agents.base import BaseAgent
+from pai.agents.conversation import ConversationAgent
+from pai.agents.productivity import ProductivityAgent
 
 class AgentManager:
     """Manages lifecycle, coordination, and goal routing for all agents."""
     
-    def __init__(self, kernel):
-        self.kernel = kernel
+    def __init__(self):
         self._agents: Dict[str, BaseAgent] = {}
         self._agent_capabilities: Dict[str, str] = {}  # capability -> agent_name
     
     async def initialize(self) -> None:
         # Instantiate all agents
         agent_classes = [
-            ResearchAgent, ProductivityAgent, CommunicationAgent,
-            TravelAgent, HealthAgent, AutomationAgent, CodingAgent, FinanceAgent
+            ConversationAgent, ProductivityAgent
         ]
         for cls in agent_classes:
-            agent = cls(self.kernel)
+            agent = cls()
             await agent.initialize()
             self._agents[agent.name] = agent
             for cap in agent.get_capabilities():

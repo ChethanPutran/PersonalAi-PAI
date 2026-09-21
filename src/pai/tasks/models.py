@@ -17,6 +17,7 @@ class TaskStatus(str, Enum):
     INITIALIZED = "initialized"
     QUEUED = "queued"
     RUNNING = "running"
+    PAUSED = "paused"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -84,6 +85,7 @@ class Task(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     id: str = Field(default_factory=lambda: str(uuid4()))
+    title: str
 
     # Human-level information
     user_id: Optional[str] = None
@@ -143,6 +145,18 @@ class Task(BaseModel):
             self.status == TaskStatus.FAILED
             and self.retry_count < self.max_retries
         )
+    @property
+    def can_cancel(self) -> bool:
+        return not self.terminal
+
+
+    @property
+    def can_resume(self) -> bool:
+        return self.status == TaskStatus.PAUSED
+    
+    @property
+    def can_pause(self) -> bool:
+        return self.status == TaskStatus.RUNNING
 
     def mark_initialized(
         self,
@@ -182,6 +196,10 @@ class Task(BaseModel):
         if result is not None:
             self.result = result
 
+    def mark_paused(self) -> None:
+        self.status = TaskStatus.PAUSED
+        self.error = None
+
     def mark_failed(
         self,
         error: str,
@@ -210,3 +228,12 @@ class Task(BaseModel):
     def add_child(self, task_id: str) -> None:
         if task_id not in self.child_task_ids:
             self.child_task_ids.append(task_id)
+
+    def reset(self) -> None:
+        """Reset the task to its initial state for retrying."""
+        self.status = TaskStatus.CREATED
+        self.retry_count = 0
+        self.error = None
+        self.result = None
+        self.started_at = None
+        self.completed_at = None

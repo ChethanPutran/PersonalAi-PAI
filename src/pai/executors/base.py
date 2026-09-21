@@ -39,6 +39,15 @@ class BaseExecutor(ABC):
         self._initialized = False
         self._running = False
 
+    def get_status(self) -> str:
+        """Get the status of the executor."""
+        if self._running:
+            return "running"
+        elif self._initialized:
+            return "initialized"
+        else:
+            return "stopped"
+        
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------

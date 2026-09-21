@@ -4,245 +4,613 @@ from typing import Any, Dict, List, Optional
 
 from loguru import logger
 
-from pai.plugins.base import BasePlugin, PluginState
-from pai.plugins.models import PluginManifest
+from pai.plugins.catalog.catalog import PLUGIN_CATALOG
+from pai.plugins.models import PluginInfo
 from pai.plugins.registry import PluginRegistry
 
 
 class PluginManager:
     """
-    Manages the runtime lifecycle of plugins.
+    Backend-side plugin manager.
 
     Responsibilities:
-        - Initialize registered plugins
-        - Start plugins
-        - Stop plugins
-        - Execute plugin actions
-        - Route plugin events
-        - Expose runtime plugin information
+    - Discover and expose the server's plugin catalog
+    - Read plugin metadata
+    - Track per-user enabled/disabled state
+    - Validate plugin/capability existence
+    - Provide plugin metadata to the orchestrator
+    - NOT execute device plugins
 
-    NOT responsible for:
-        - User enable/disable state
-        - Authorization
-        - Device selection
-        - Task orchestration
-        - Database persistence
+    Actual plugin installation and execution happen on the target
+    device through the device connection / WebSocket layer.
     """
 
     def __init__(
         self,
-        registry: PluginRegistry,
-    ) -> None:
+        registry: Optional[PluginRegistry] = None,
+        user_plugin_repository=None,
+    ):
         self.registry = registry
+        self.user_plugin_repository = user_plugin_repository
 
-        self._instances: Dict[str, BasePlugin] = {}
         self._initialized = False
+        self._catalog: Dict[str, PluginInfo] = {}
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
 
     async def initialize(self) -> None:
-        """Discover plugins and initialize their runtime instances."""
+        """
+        Initialize the backend plugin catalog.
 
-        await self.registry.discover()
+        The backend does not instantiate or start device plugins.
+        """
 
-        for manifest in self.registry.get_all_manifests():
-            await self._initialize_plugin(manifest)
+        if self._initialized:
+            return
+
+        logger.info("Initializing backend plugin manager")
+
+        if self.registry is not None:
+            try:
+                await self.registry.discover()
+
+                for manifest in self.registry.get_all_manifests():
+                    plugin_id = getattr(manifest, "id", None)
+
+                    if plugin_id:
+                        self._catalog[plugin_id] = manifest
+
+            except Exception as exc:
+                logger.warning(
+                    "Plugin registry discovery failed: {}",
+                    exc,
+                )
+
+        # Also load static catalog entries.
+        for plugin in PLUGIN_CATALOG:
+            self._catalog[plugin.id] = plugin
 
         self._initialized = True
 
         logger.info(
-            f"Plugin manager initialized with "
-            f"{len(self._instances)} plugins"
+            "Backend plugin manager initialized with {} plugins",
+            len(self._catalog),
         )
-
-    async def _initialize_plugin(
-        self,
-        manifest: PluginManifest,
-    ) -> None:
-        plugin_class = self.registry.get_plugin_class(manifest.id)
-
-        if plugin_class is None:
-            raise RuntimeError(
-                f"No implementation registered for "
-                f"plugin '{manifest.id}'"
-            )
-
-        if manifest.id in self._instances:
-            logger.warning(
-                f"Plugin '{manifest.id}' is already initialized"
-            )
-            return
-
-        plugin = plugin_class(
-            plugin_id=manifest.id,
-            config=self._default_config(manifest),
-        )
-
-        try:
-            await plugin.initialize()
-            await plugin.start()
-
-            self._instances[manifest.id] = plugin
-
-            logger.info(
-                f"Started plugin '{manifest.id}'"
-            )
-
-        except Exception:
-            plugin.state = PluginState.FAILED
-
-            logger.exception(
-                f"Failed to initialize plugin "
-                f"'{manifest.id}'"
-            )
-
-            raise
-
-    @staticmethod
-    def _default_config(
-        manifest: PluginManifest,
-    ) -> Dict[str, Any]:
-        """Extract default values from the manifest config schema."""
-
-        config: Dict[str, Any] = {}
-
-        for key, schema in manifest.config_schema.items():
-            if "default" in schema:
-                config[key] = schema["default"]
-
-        return config
-
-    async def execute(
-        self,
-        plugin_id: str,
-        action: str,
-        params: Optional[Dict[str, Any]] = None,
-    ) -> Any:
-        """
-        Execute an action on a running plugin.
-
-        Authorization and device routing must happen before this method.
-        """
-
-        plugin = self._instances.get(plugin_id)
-
-        if plugin is None:
-            raise ValueError(
-                f"Plugin '{plugin_id}' is not loaded"
-            )
-
-        if not plugin.is_running:
-            raise RuntimeError(
-                f"Plugin '{plugin_id}' is not running"
-            )
-
-        manifest = self.registry.get_manifest(plugin_id)
-
-        if manifest is None:
-            raise ValueError(
-                f"Manifest for plugin '{plugin_id}' not found"
-            )
-
-        manifest.validate_capability(action)
-
-        if not plugin.supports(action):
-            raise ValueError(
-                f"Plugin '{plugin_id}' declares capability "
-                f"'{action}' but does not implement it"
-            )
-
-        return await plugin.execute(
-            action,
-            params or {},
-        )
-
-    async def shutdown_plugin(
-        self,
-        plugin_id: str,
-    ) -> None:
-        """Shutdown one plugin runtime."""
-
-        plugin = self._instances.pop(plugin_id, None)
-
-        if plugin is None:
-            return
-
-        try:
-            await plugin.shutdown()
-        except Exception:
-            logger.exception(
-                f"Error shutting down plugin '{plugin_id}'"
-            )
 
     async def shutdown(self) -> None:
-        """Shutdown all plugin runtimes."""
+        """
+        Shutdown the backend plugin manager.
 
-        for plugin_id in list(self._instances):
-            await self.shutdown_plugin(plugin_id)
+        There are no device plugin instances to stop here.
+        """
 
+        self._catalog.clear()
         self._initialized = False
 
-        logger.info("Plugin manager shutdown")
+        logger.info("Backend plugin manager shut down")
+
+    # ------------------------------------------------------------------
+    # Catalog
+    # ------------------------------------------------------------------
+
+    def get_catalog(self) -> List[PluginInfo]:
+        """Return all known plugin definitions."""
+
+        return list(self._catalog.values())
+
+    async def list_plugins(
+        self,
+        user_id: Optional[str] = None,
+        platform: Optional[str] = None,
+        architecture: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Return plugin metadata together with per-user state.
+
+        Example:
+
+        [
+            {
+                "id": "camera",
+                "name": "Camera",
+                "version": "1.0.0",
+                "is_enabled": True,
+                ...
+            }
+        ]
+        """
+
+        plugins = self.get_catalog()
+
+        if platform:
+            plugins = [
+                plugin
+                for plugin in plugins
+                if platform in plugin.platforms
+            ]
+
+        if architecture:
+            plugins = [
+                plugin
+                for plugin in plugins
+                if architecture in plugin.architectures
+            ]
+
+        result = []
+
+        for plugin in plugins:
+            is_enabled = False
+
+            if user_id and self.user_plugin_repository:
+                try:
+                    is_enabled = await self.user_plugin_repository.is_enabled(
+                        user_id=user_id,
+                        plugin_id=plugin.id,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to read state for plugin {}: {}",
+                        plugin.id,
+                        exc,
+                    )
+
+            result.append(
+                self._serialize_plugin(
+                    plugin,
+                    is_enabled=is_enabled,
+                )
+            )
+
+        return result
 
     async def get_plugin(
         self,
         plugin_id: str,
-    ) -> Optional[BasePlugin]:
-        return self._instances.get(plugin_id)
+    ) -> Optional[PluginInfo]:
+        """Return plugin metadata by ID."""
 
-    async def get_plugin_info(
+        if not self._initialized:
+            await self.initialize()
+
+        return self._catalog.get(plugin_id)
+
+    async def require_plugin(
         self,
         plugin_id: str,
-    ) -> Optional[Dict[str, Any]]:
-        manifest = self.registry.get_manifest(plugin_id)
-        plugin = self._instances.get(plugin_id)
+    ) -> PluginInfo:
+        """Return a plugin or raise ValueError."""
 
-        if manifest is None:
-            return None
+        plugin = await self.get_plugin(plugin_id)
 
-        return {
-            "id": manifest.id,
-            "name": manifest.name,
-            "version": manifest.version,
-            "type": manifest.plugin_type,
-            "description": manifest.description,
-            "permissions": manifest.permissions,
-            "dependencies": manifest.dependencies,
-            "capabilities": manifest.capability_names,
-            "config_schema": manifest.config_schema,
-            "state": (
-                plugin.state.value
-                if plugin is not None
-                else "not_loaded"
-            ),
-        }
+        if plugin is None:
+            raise ValueError(
+                f"Plugin '{plugin_id}' not found"
+            )
 
-    async def list_plugins(self) -> List[Dict[str, Any]]:
-        """Return metadata for all registered plugins."""
+        return plugin
+
+    # ------------------------------------------------------------------
+    # Platform filtering
+    # ------------------------------------------------------------------
+
+    async def get_compatible_plugins(
+        self,
+        platform: str,
+        architecture: str,
+    ) -> List[PluginInfo]:
+        """
+        Return plugins compatible with a device platform
+        and architecture.
+        """
+
+        if not self._initialized:
+            await self.initialize()
+
+        return [
+            plugin
+            for plugin in self._catalog.values()
+            if platform in plugin.platforms
+            and architecture in plugin.architectures
+        ]
+
+    async def is_compatible(
+        self,
+        plugin_id: str,
+        platform: str,
+        architecture: str,
+    ) -> bool:
+        """Check whether a plugin supports a target device."""
+
+        plugin = await self.get_plugin(plugin_id)
+
+        if plugin is None:
+            return False
+
+        return (
+            platform in plugin.platforms
+            and architecture in plugin.architectures
+        )
+
+    # ------------------------------------------------------------------
+    # Capability handling
+    # ------------------------------------------------------------------
+
+    async def supports_capability(
+        self,
+        plugin_id: str,
+        capability: str,
+    ) -> bool:
+        """
+        Check whether a plugin provides a capability.
+
+        Example:
+            browser -> browser.open
+        """
+
+        plugin = await self.get_plugin(plugin_id)
+
+        if plugin is None:
+            return False
+
+        return capability in plugin.capabilities
+
+    async def get_plugin_for_capability(
+        self,
+        capability: str,
+    ) -> Optional[PluginInfo]:
+        """
+        Find the first plugin providing a capability.
+
+        The orchestrator can use this during capability resolution.
+        """
+
+        if not self._initialized:
+            await self.initialize()
+
+        for plugin in self._catalog.values():
+            if capability in plugin.capabilities:
+                return plugin
+
+        return None
+
+    async def validate_capability(
+        self,
+        plugin_id: str,
+        capability: str,
+    ) -> None:
+        """Validate that a plugin provides a capability."""
+
+        plugin = await self.require_plugin(plugin_id)
+
+        if capability not in plugin.capabilities:
+            raise ValueError(
+                f"Plugin '{plugin_id}' does not support "
+                f"capability '{capability}'"
+            )
+
+    # ------------------------------------------------------------------
+    # User plugin state
+    # ------------------------------------------------------------------
+
+    async def is_enabled(
+        self,
+        user_id: str,
+        plugin_id: str,
+    ) -> bool:
+        """
+        Return whether the user has enabled a plugin.
+        """
+
+        if self.user_plugin_repository is None:
+            return False
+
+        await self.require_plugin(plugin_id)
+
+        return await self.user_plugin_repository.is_enabled(
+            user_id=user_id,
+            plugin_id=plugin_id,
+        )
+
+    async def enable(
+        self,
+        user_id: str,
+        plugin_id: str,
+    ) -> Any:
+        """
+        Enable a plugin for a user.
+
+        This only changes backend authorization state.
+        It does not install the plugin on a device.
+        """
+
+        await self.require_plugin(plugin_id)
+
+        if self.user_plugin_repository is None:
+            raise RuntimeError(
+                "UserPluginRepository is not configured"
+            )
+
+        record = await self.user_plugin_repository.set_enabled(
+            user_id=user_id,
+            plugin_id=plugin_id,
+            enabled=True,
+        )
+
+        logger.info(
+            "Plugin '{}' enabled for user '{}'",
+            plugin_id,
+            user_id,
+        )
+
+        return record
+
+    async def disable(
+        self,
+        user_id: str,
+        plugin_id: str,
+    ) -> Any:
+        """
+        Disable a plugin for a user.
+
+        This prevents authorization for future executions.
+        It does not uninstall the device plugin.
+        """
+
+        await self.require_plugin(plugin_id)
+
+        if self.user_plugin_repository is None:
+            raise RuntimeError(
+                "UserPluginRepository is not configured"
+            )
+
+        record = await self.user_plugin_repository.set_enabled(
+            user_id=user_id,
+            plugin_id=plugin_id,
+            enabled=False,
+        )
+
+        logger.info(
+            "Plugin '{}' disabled for user '{}'",
+            plugin_id,
+            user_id,
+        )
+
+        return record
+
+    async def get_user_plugins(
+        self,
+        user_id: str,
+    ) -> List[Dict[str, Any]]:
+        """
+        Return all plugin states for a user.
+        """
+
+        if self.user_plugin_repository is None:
+            return []
+
+        records = await self.user_plugin_repository.list_for_user(
+            user_id=user_id,
+        )
 
         result = []
 
-        for manifest in self.registry.get_all_manifests():
-            info = await self.get_plugin_info(manifest.id)
+        for record in records:
+            plugin = await self.get_plugin(record.plugin_id)
 
-            if info is not None:
-                result.append(info)
+            result.append(
+                {
+                    "plugin_id": record.plugin_id,
+                    "plugin_name": (
+                        plugin.name
+                        if plugin is not None
+                        else record.plugin_id
+                    ),
+                    "is_enabled": record.is_enabled,
+                    "metadata": getattr(
+                        record,
+                        "metadata",
+                        {},
+                    ) or {},
+                }
+            )
 
         return result
 
-    async def handle_event(
+    async def get_enabled_plugins(
         self,
-        event_type: str,
-        data: Dict[str, Any],
-    ) -> None:
-        """Broadcast an event to loaded plugins."""
+        user_id: str,
+    ) -> List[PluginInfo]:
+        """
+        Return the actual plugin definitions enabled by a user.
+        """
 
-        for plugin in self._instances.values():
-            try:
-                await plugin.handle_event(
-                    event_type,
-                    data,
-                )
-            except Exception:
-                logger.exception(
-                    f"Plugin '{plugin.plugin_id}' "
-                    f"failed to handle event '{event_type}'"
-                )
+        if self.user_plugin_repository is None:
+            return []
+
+        records = await self.user_plugin_repository.list_enabled(
+            user_id=user_id,
+        )
+
+        plugins = []
+
+        for record in records:
+            plugin = await self.get_plugin(record.plugin_id)
+
+            if plugin is not None:
+                plugins.append(plugin)
+
+        return plugins
+
+    async def set_user_plugin_config(
+        self,
+        user_id: str,
+        plugin_id: str,
+        metadata: Dict[str, Any],
+    ) -> Any:
+        """
+        Store user-specific plugin configuration.
+
+        Requires the repository to support metadata persistence.
+        """
+
+        await self.require_plugin(plugin_id)
+
+        if self.user_plugin_repository is None:
+            raise RuntimeError(
+                "UserPluginRepository is not configured"
+            )
+
+        record = await self.user_plugin_repository.get(
+            user_id=user_id,
+            plugin_id=plugin_id,
+        )
+
+        if record is None:
+            record = await self.user_plugin_repository.set_enabled(
+                user_id=user_id,
+                plugin_id=plugin_id,
+                enabled=False,
+            )
+
+        if hasattr(record, "metadata"):
+            record.metadata = metadata
+            await self.user_plugin_repository.session.flush()
+
+        return record
+
+    async def get_user_plugin_config(
+        self,
+        user_id: str,
+        plugin_id: str,
+    ) -> Dict[str, Any]:
+        """Return user-specific plugin configuration."""
+
+        await self.require_plugin(plugin_id)
+
+        if self.user_plugin_repository is None:
+            return {}
+
+        record = await self.user_plugin_repository.get(
+            user_id=user_id,
+            plugin_id=plugin_id,
+        )
+
+        if record is None:
+            return {}
+
+        return getattr(record, "metadata", {}) or {}
+
+    # ------------------------------------------------------------------
+    # Device operation metadata
+    # ------------------------------------------------------------------
+
+    async def build_install_request(
+        self,
+        plugin_id: str,
+        device_id: str,
+    ) -> Dict[str, Any]:
+        """
+        Build the command that the backend sends to a device.
+
+        This method DOES NOT install anything.
+        """
+
+        plugin = await self.require_plugin(plugin_id)
+
+        return {
+            "type": "plugin.install",
+            "request_id": f"install:{plugin_id}:{device_id}",
+            "device_id": device_id,
+            "plugin": {
+                "id": plugin.id,
+                "name": plugin.name,
+                "version": plugin.version,
+                "platforms": plugin.platforms,
+                "architectures": plugin.architectures,
+                "capabilities": plugin.capabilities,
+                "package_url": getattr(
+                    plugin,
+                    "package_url",
+                    None,
+                ),
+                "checksum": getattr(
+                    plugin,
+                    "checksum",
+                    None,
+                ),
+                "size": getattr(
+                    plugin,
+                    "size",
+                    0,
+                ),
+            },
+        }
+
+    async def build_uninstall_request(
+        self,
+        plugin_id: str,
+        device_id: str,
+    ) -> Dict[str, Any]:
+        """Build a device uninstall command."""
+
+        await self.require_plugin(plugin_id)
+
+        return {
+            "type": "plugin.uninstall",
+            "request_id": f"uninstall:{plugin_id}:{device_id}",
+            "device_id": device_id,
+            "plugin_id": plugin_id,
+        }
+
+    # ------------------------------------------------------------------
+    # Serialization
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _serialize_plugin(
+        plugin: PluginInfo,
+        is_enabled: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Convert PluginInfo into a JSON-friendly dictionary.
+        """
+
+        return {
+            "id": plugin.id,
+            "name": plugin.name,
+            "version": plugin.version,
+            "platforms": list(plugin.platforms),
+            "architectures": list(plugin.architectures),
+            "capabilities": list(plugin.capabilities),
+            "package_url": getattr(
+                plugin,
+                "package_url",
+                None,
+            ),
+            "checksum": getattr(
+                plugin,
+                "checksum",
+                None,
+            ),
+            "size": getattr(
+                plugin,
+                "size",
+                0,
+            ),
+            "is_enabled": is_enabled,
+        }
+
+    # ------------------------------------------------------------------
+    # Status
+    # ------------------------------------------------------------------
+
+    def get_status(self) -> Dict[str, Any]:
+        """Return backend plugin manager status."""
+
+        return {
+            "initialized": self._initialized,
+            "plugin_count": len(self._catalog),
+            "plugins": list(self._catalog.keys()),
+        }

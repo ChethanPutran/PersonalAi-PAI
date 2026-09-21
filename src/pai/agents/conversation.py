@@ -1,3 +1,7 @@
+
+from .base import BaseAgent
+
+
 class ConversationAgent(BaseAgent):
     async def process_goal(self, goal, context):
         # Maintain conversation history

@@ -21,17 +21,22 @@ class TaskRunner:
         task_manager: Any,
         capability_resolver: Any,
         device_selector: Any,
-        authorizer: Any,
+        authorization_manager: Any,
         executor_manager: Any = None,
         event_bus: Any = None,
     ):
         self.task_manager = task_manager
         self.capability_resolver = capability_resolver
         self.device_selector = device_selector
-        self.authorizer = authorizer
+        self.authorizer = authorization_manager
         self.executor_manager = executor_manager
         self.event_bus = event_bus
 
+    async def __call__(self, task_spec: Any, *, context: Any) -> Dict[str, Any]:
+        return await self.run(
+            task_spec=task_spec,
+            context=context,
+        )
     async def run(
         self,
         task_spec: Any,

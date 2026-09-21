@@ -29,6 +29,13 @@ class DeviceSelector:
         self.device_manager = device_manager
         self.executor_manager = executor_manager
 
+
+    def get_status(self) -> dict[str, Any]:
+        return {
+            "device_manager": str(self.device_manager),
+            "executor_manager": str(self.executor_manager),
+        }
+
     async def select(
         self,
         *,

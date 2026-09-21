@@ -148,6 +148,16 @@ class TaskLifecycle:
         return cls.transition(task, TaskStatus.RUNNING)
 
     @classmethod
+    def resume(cls, task: Task) -> Task:
+        if task.status != TaskStatus.PAUSED:
+            raise InvalidTaskTransition(
+                f"Task {task.id} cannot be resumed "
+                f"from state {task.status.value}"
+            )
+
+        return cls.transition(task, TaskStatus.RUNNING)
+    
+    @classmethod
     def complete(
         cls,
         task: Task,
@@ -196,3 +206,23 @@ class TaskLifecycle:
             )
 
         return cls.transition(task, TaskStatus.RETRYING)
+
+    @classmethod
+    def reset(cls, task: Task) -> Task:
+        if task.status not in {TaskStatus.FAILED, TaskStatus.CANCELLED}:
+            raise InvalidTaskTransition(
+                f"Task {task.id} cannot be reset from state {task.status.value}"
+            )
+
+        task.reset()
+        return task
+
+    @classmethod
+    def pause(cls, task: Task) -> Task:
+        if task.status != TaskStatus.RUNNING:
+            raise InvalidTaskTransition(
+                f"Task {task.id} cannot be paused from state {task.status.value}"
+            )
+
+        task.mark_paused()
+        return task

@@ -1,6 +1,6 @@
 from typing import Dict, Any, List
 from loguru import logger
-from pai.agents.base_agent import BaseAgent
+from pai.agents.base import BaseAgent
 
 class ProductivityAgent(BaseAgent):
     """Handles tasks, scheduling, and reminders."""

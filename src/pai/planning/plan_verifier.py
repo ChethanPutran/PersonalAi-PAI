@@ -14,8 +14,8 @@ class PlanVerifier:
     No task execution occurs here.
     """
 
-    def __init__(self, kernel=None):
-        self.kernel = kernel
+    def __init__(self, capability_router=None):
+        self.capability_router = capability_router
 
     async def verify(self, plan: Plan) -> Dict[str, Any]:
         issues: List[str] = []
@@ -23,7 +23,8 @@ class PlanVerifier:
         issues.extend(self._validate_tasks(plan.tasks))
         issues.extend(self._validate_dependencies(plan))
 
-        if self.kernel is not None:
+
+        if self.capability_router is not None:
             issues.extend(
                 await self._validate_capabilities(plan)
             )
@@ -136,12 +137,8 @@ class PlanVerifier:
     ) -> List[str]:
         issues = []
 
-        router = getattr(
-            self.kernel,
-            "capability_router",
-            None,
-        )
-
+        router = self.capability_router
+        
         if router is None:
             return issues
 
