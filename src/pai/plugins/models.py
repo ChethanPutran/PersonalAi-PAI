@@ -3,6 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+
+
+    
 @dataclass(frozen=True)
 class PluginInfo:
     id: str
@@ -44,9 +47,20 @@ class CapabilitySpec:
 @dataclass(frozen=True)
 class PluginRuntime:
     """Runtime information required to load a plugin."""
+    kind: str                      # "server" | "device" | "dart"
+    entry_point: str = ""
+    class_name: str = ""
+    native_module: str = ""
 
-    entry_point: str
-    class_name: str
+    # ---- server ----
+    @property
+    def is_server(self) -> bool:
+        return self.kind == "server"
+
+    # ---- device ----
+    @property
+    def is_device(self) -> bool:
+        return self.kind == "device"
 
 
 @dataclass(frozen=True)
@@ -99,7 +113,26 @@ class PluginManifest:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "PluginManifest":
-        runtime_data = data.get("runtime", {})
+        runtime_data = data.get("runtime", {}) or {}
+        kind = runtime_data.get("kind", "server")
+
+        if kind == "server":
+            entry_point = runtime_data.get("entry_point")
+            class_name  = runtime_data.get("class")
+            if not entry_point:
+                raise ValueError(f"Plugin '{data.get('id')}' missing runtime.entry_point")
+            if not class_name:
+                raise ValueError(f"Plugin '{data.get('id')}' missing runtime.class")
+            runtime = PluginRuntime(kind="server", entry_point=entry_point, class_name=class_name)
+
+        elif kind == "device":
+            native_module = runtime_data.get("nativeModule")
+            if not native_module:
+                raise ValueError(f"Plugin '{data.get('id')}' missing runtime.nativeModule")
+            runtime = PluginRuntime(kind="device", native_module=native_module)
+
+        else:
+            raise ValueError(f"Unknown runtime.kind: {kind}")
 
         if not runtime_data:
             raise ValueError(

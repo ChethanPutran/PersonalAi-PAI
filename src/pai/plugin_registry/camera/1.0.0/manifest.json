@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "id": "camera",
+  "name": "Camera",
+  "version": "1.0.0",
+  "description": "Capture photos and record video using the device camera.",
+  "author": "PAI",
+  "license": "MIT",
+
+  "runtime": {
+    "kind": "native",
+    "nativeModule": "pai.camera",
+    "minPaiVersion": "0.4.0"
+  },
+
+  "platforms": {
+    "linux": {
+      "artifact": "linux/libpai_camera.so",
+      "entrypoint": "pai_plugin_module_create"
+    },
+    "android": {
+      "artifact": "android/arm64-v8a/libpai_camera.so",
+      "entrypoint": "pai_plugin_module_create"
+    }
+  },
+
+  "permissions": ["camera", "microphone", "filesystem"],
+
+  "capabilities": [
+    {
+      "id": "camera.capture",
+      "description": "Take a still photo.",
+      "permissions": ["camera", "filesystem"],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "lens":       { "type": "string", "enum": ["front", "back"], "default": "back" },
+          "outputPath": { "type": "string" },
+          "format":     { "type": "string", "enum": ["jpeg"], "default": "jpeg" }
+        }
+      }
+    },
+    {
+      "id": "camera.record",
+      "description": "Record a video.",
+      "permissions": ["camera", "microphone", "filesystem"],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "durationMs": { "type": "integer", "default": 5000 },
+          "outputPath": { "type": "string" },
+          "audio":      { "type": "boolean", "default": true }
+        }
+      }
+    },
+    {
+      "id": "camera.stream",
+      "description": "Open a live preview stream.",
+      "permissions": ["camera"],
+      "parameters": { "type": "object", "properties": {} }
+    }
+  ]
+}

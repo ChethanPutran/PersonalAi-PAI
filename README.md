@@ -927,433 +927,91 @@ docker run -d \
     neo4j:latest
 ```
 
----
+## `.env.example` – Environment template
 
-## Configuration
+```ini
+# PAI Environment
+PAI_ENV=development
+PAI_DEBUG=true
+PAI_HOST=0.0.0.0
+PAI_PORT=8000
 
-Copy `.env.example` to `.env` and edit. Key settings:
+# Databases
+DATABASE_URL=sqlite+aiosqlite:///./data/pai.db
+REDIS_HOST=localhost
+REDIS_PORT=6379
+NATS_SERVERS=nats://localhost:4222
 
-| Variable | Purpose |
-|---|---|
-| `PAI_ENV`, `PAI_DEBUG` | Runtime mode |
-| `PAI_HOST`, `PAI_PORT` | Bind address |
-| `DATABASE_URL` | SQLite (dev) or Postgres (prod) URL |
-| `PAI_JWT_SECRET` | Random hex string; required for stable token validation |
-| `PAI_JWT_EXPIRES_MINUTES` | Token lifetime |
-| `PAI_ADMIN_EMAILS` | Comma-separated emails auto-promoted to admin |
-| `LLM_PROVIDER`, `LLM_MODEL`, `OPENAI_API_KEY` | LLM backend |
-| `NATS_SERVERS`, `REDIS_HOST` | Optional infrastructure |
-| `GOOGLE_MAPS_API_KEY`, `UBER_API_KEY` | External services |
-| `GOOGLE_CALENDAR_CREDENTIALS` | OAuth credentials path |
+# LLM Provider (openai or local)
+LLM_PROVIDER=openai
+LLM_MODEL=gpt-4
+OPENAI_API_KEY=your_openai_key_here
 
----
-
-## Running the System
-
-### Backend
-
-Activate the environment, source `.env` with auto-export, and start uvicorn against `pai.main:app`. The API is served at the configured host and port.
-
-### Frontend (Flutter)
-
-The Flutter app is located under `frontend/ui/apps/pai_mobile`. Run `flutter pub get` and then `flutter run -d <device>`.
-
-### Build a Device Plugin
-
-Each plugin directory contains a build script. Running it for `linux` produces `libpai_<id>.so` in that directory; running it for `android` produces `libpai_<id>.so` under each ABI subdirectory. These outputs are exactly the paths the registry endpoint serves.
+# External APIs
+GOOGLE_MAPS_API_KEY=your_google_maps_key
+UBER_API_KEY=your_uber_api_key
+GOOGLE_CALENDAR_CREDENTIALS=path/to/credentials.json
+```
 
 ---
-
-## Distributed Execution
-
-A typical deployment:
-
-```
-                         PAI SERVER
-                              │
-              ┌───────────────┼───────────────┐
-              ▼               ▼               ▼
-          Desktop           Phone          Remote PC
-          Executor          Executor        Executor
-              ▼               ▼               ▼
-          Desktop          Android          Remote
-```
-
-Devices register themselves via the register endpoint and open a persistent WebSocket at `/api/v1/devices/{id}/ws?token=<jwt>`.
-
-The device registry maintains: device identity (UUID assigned by the backend), connection state, capabilities, executor identity, and user ownership.
-
-Plugins are downloaded and loaded **on the device** — the backend never handles a plugin binary. The backend records which device has what installed in `device_plugins` and which user has authorized what in `user_plugins`.
-
----
-
-## Examples
-
-### Example: Install and Use Camera
-
-**Step 1 — App registers.** The app POSTs its device metadata. The backend mints or reuses a device id and returns it.
-
-**Step 2 — App opens WebSocket.** The app connects to the device WebSocket endpoint. The backend accepts, verifies the device exists, attaches the connection, and sends a `connected` message.
-
-**Step 3 — App reconciles installed plugins.** The app reads its local `installed.json` and posts the snapshot to the reconcile endpoint. On a fresh install, the snapshot is empty.
-
-**Step 4 — User taps Install in the app.** The app fetches the registry index (public), fetches the manifest (public), streams the artifact from the artifact endpoint (public) while verifying SHA-256, writes the manifest and binary into the plugin store, and POSTs the install report. The backend writes `device_plugins(device, camera).is_installed = true`.
-
-**Step 5 — User toggles Enable.** The app calls the native host over the plugin MethodChannel. The host `dlopen`s the artifact, checks the ABI version, and registers the module. Then the app POSTs the enable endpoint. The backend sets `user_plugins(user, camera).is_enabled = true` and `device_plugins(device, camera).enabled_on_device = true`.
-
-**Step 6 — Server invokes a capability.** Server sends a capability invocation over the device WebSocket with the capability id and parameters. The app routes it: plugin command router → plugin service → plugin runtime → MethodChannel → native PluginManager.Invoke → plugin `.so` runs. Result flows back to the server. The server never sees the plugin binary.
-
-**Step 7 — Admin panel reflects everything.** The panel's next poll shows Camera with one installation and one enabled-on-device count, the device in the Devices tab with `live` status, and the user's row with `plugins_enabled: 1`.
-
-### Example: Mobile Execution
-
-User sends: *"Open Calculator on my phone."*
-
-```
-User → Orchestrator → Planner → TaskSpec(open_app)
-     → CapabilityResolver (open_app plugin)
-     → Authorization
-     → DeviceSelector (mobile device)
-     → TaskManager → Android Executor → Calculator
-```
-
-### Example: Desktop Execution From Mobile
-
-User sends from their phone: *"Open Chrome on my desktop."*
-
-The planner sets `preferred_device = desktop`. The Device Selector chooses the desktop device. The desktop executor opens Chrome. The phone is the **source**; the desktop is the **execution target**.
-
-### Example: Disabled Plugin
-
-User disabled the calendar plugin. The planner may generate a `calendar_event` capability. Execution follows: capability → Calendar Plugin → plugin disabled → authorization denied → task failed. **No executor is called.**
-
-### Example: Offline Device
-
-User asks: *"Open Chrome on my desktop."* But the desktop is offline. The Device Selector finds the desktop offline and the execution is rejected. The system does **not** silently move the action to another device when the user explicitly specified the desktop.
-
----
-
-## Testing
-
-Run the full suite with pytest. With coverage, generate an HTML report.
-
-### Recommended Integration Tests
-
-**Planning:** goal → valid Plan.
-
-**Authorization:** enabled plugin → allowed; disabled plugin → denied; unauthorized user → denied; unauthorized device → denied.
-
-**Device Selection:** mobile requested → mobile selected; desktop requested → desktop selected; offline device → rejected; unsupported device → rejected.
-
-**Execution:** TaskSpec → Runtime Task → Executor → Result.
-
-**Distributed Execution:** phone request → desktop execution; desktop request → phone execution; remote request → remote execution.
-
-**Failure Handling:** executor unavailable; device disconnect; plugin disabled; authorization denied; task timeout; task failure; DAG dependency failure.
-
-**Plugin System:** registry index lists packages; manifest validates; SHA-256 mismatch rejected; ABI mismatch rejected; missing entry symbol rejected; enable/disable flip correct table; reconcile corrects drift.
-
-**Native plugin smoke test.** Verify the `.so` exports both `pai_plugin_module_create` and `pai_plugin_module_destroy` using `nm -D --defined-only`.
-
----
-
-## Extending PAI
-
-### Adding a Device Plugin
-
-1. Create the plugin directory under `plugin_registry/<id>/<version>/`.
-2. Write a `manifest.json` with `runtime.kind = "native"` and platform artifact paths.
-3. Implement the C ABI in the platform source directories.
-4. Build the artifact for each platform you support.
-5. Restart the backend — the registry endpoint picks up the new directory automatically.
-
-### Adding a Server Plugin
-
-1. Create the plugin directory under `plugins/<id>/`.
-2. Write a `manifest.json` with `runtime.kind = "server"` and the Python entry point.
-3. Implement a subclass of the base plugin class.
-4. Restart the backend — the plugin registry discovers it.
-
-### Adding a Capability to an Existing Plugin
-
-1. Add the capability to the plugin's `capabilities` array in the manifest.
-2. Add the corresponding branch to the plugin's invoke implementation.
-3. Rebuild the artifact.
-4. Bump the version and publish under a new version directory.
-
-### Adding a Device Capability
-
-A device advertises the capabilities it supports. Add the capability name to the device's registration payload and to the device's advertised capabilities list. The Device Selector uses these capabilities when determining execution targets.
-
-### Adding an Executor
-
-Implement the executor abstraction, register it with the Executor Manager/Scheduler, and map it to the devices it serves. The new executor becomes available for device selection immediately.
-
----
-
-## API
-
-### Auth
-
-| Method | Endpoint | Description |
-|---|---|---|
-| POST | `/api/v1/auth/register` | Create account |
-| POST | `/api/v1/auth/login` | Get JWT |
-| GET | `/api/v1/auth/me` | Current user info |
-
-### Devices
-
-| Method | Endpoint | Description |
-|---|---|---|
-| POST | `/api/v1/devices/register` | Register or refresh a device |
-| GET | `/api/v1/devices/list/{user_id}` | List devices for a user |
-| POST | `/api/v1/devices/{id}/heartbeat` | Heartbeat |
-| WS | `/api/v1/devices/{id}/ws` | Device WebSocket |
-
-### Plugins — Registry (public)
-
-| Method | Endpoint | Description |
-|---|---|---|
-| GET | `/api/v1/plugins/index.json` | Plugin catalog |
-| GET | `/api/v1/plugins/{id}/{v}/manifest.json` | Manifest |
-| GET | `/api/v1/plugins/{id}/{v}/artifact/{platform}` | Binary |
-
-### Plugins — User-Scoped (auth)
-
-| Method | Endpoint | Description |
-|---|---|---|
-| GET | `/api/v1/plugins/catalog` | Compatible plugins for a platform |
-| POST | `/api/v1/plugins/{id}/enable` | Enable for the current user |
-| POST | `/api/v1/plugins/{id}/disable` | Disable for the current user |
-| POST | `/api/v1/plugins/{id}/report-install` | Device reports install |
-| POST | `/api/v1/plugins/{id}/report-uninstall` | Device reports uninstall |
-| POST | `/api/v1/plugins/device/{device_id}/reconcile` | Sync device state |
-| GET | `/api/v1/plugins/device/{device_id}/installed` | List installed on device |
-
-### System / Admin
-
-| Method | Endpoint | Description |
-|---|---|---|
-| GET | `/api/v1/system/health` | Public health |
-| GET | `/api/v1/system/admin` | HTML panel (public shell) |
-| GET | `/api/v1/system/admin/data` | Admin data (requires admin JWT) |
-| GET | `/api/v1/system/devices` | Admin devices |
-| GET | `/api/v1/system/plugins` | Admin plugins |
-| GET | `/api/v1/system/users` | Admin users |
-
-### WebSocket
-
-The main goal-processing WebSocket is at `/ws`. Clients send `goal`, `context_update`, and `subscribe` messages. The server pushes `result`, `event`, `plan.created`, `task.completed`, `task.failed`, and `subscribed` messages.
-
----
-
-## System Design Principles
-
-### 1. Planning never executes
-
-```
-Planner → Plan
-```
-
-Not `Planner → Executor`.
-
-### 2. TaskManager owns runtime tasks
-
-```
-TaskSpec → TaskManager → Task
-```
-
-### 3. Executors perform physical actions
-
-```
-Executor → Device
-```
-
-### 4. Authorization happens before execution
-
-```
-Authorization → Device Selection → Task Execution
-```
-
-### 5. Source device does not determine execution device
-
-```
-source_device ≠ execution_device
-```
-
-### 6. Plugin availability does not imply plugin permission
-
-```
-installed plugin ≠ enabled plugin
-```
-
-### 7. A valid plan does not imply permission
-
-```
-valid plan ≠ authorized execution
-```
-
-### 8. AI Kernel composes, not executes
-
-```
-AI Kernel → Orchestrator → Everything else
-```
-
-This keeps the architecture modular and allows the same orchestration system to operate from REST, WebSocket, mobile clients, desktop clients, agents, scheduled workflows, or future interfaces.
-
----
-
-## Troubleshooting
-
-| Issue | Solution |
-|---|---|
-| `ModuleNotFoundError` | Set `PYTHONPATH=src` or install the package in editable mode |
-| NATS connection failed | Start NATS or disable distributed event transport |
-| ChromaDB errors | Check installation and `data/chroma` permissions |
-| Neo4j unavailable | Start Neo4j or disable knowledge-graph functionality |
-| Android device not found | Check ADB and USB debugging |
-| Desktop executor unavailable | Start/register the desktop executor |
-| Task says device unavailable | Check device online state and capability registration |
-| Plugin authorization denied | Check whether the plugin is enabled for the user |
-| Task authorization denied | Check SecurityManager policy |
-| Planner creates invalid DAG | Check PlanVerifier and task dependencies |
-| Executor not found | Verify executor registration and device-to-executor mapping |
-| `UnboundExecutionError` | Session not bound to an engine — check the `Database` construction |
-| `no such column: users.email` | Schema drift — wipe the dev DB or apply a migration |
-| `no such table: device_plugins` | Ensure the storage models module is imported before `create_all` runs |
-| `LOAD_FAILED, plugin missing create/destroy symbols` | Add default visibility to exported entry points |
-| `LOAD_FAILED, plugin ABI version mismatch` | Rebuild the plugin against the current ABI version |
-| `POST /api/v1/api/v1/...` 404 | Doubled prefix — the app is adding `/api/v1` to a base URL that already contains it |
-| `401 Not authenticated` on admin routes | Middleware treats the path as public via prefix match; use exact-path matching |
-| Plugin installed but panel shows nothing | The admin plugin collector still reads the server-side catalog; switch it to the on-disk registry directory |
-| Enable doesn't record in `user_plugins` | The route reads `user_id` from a query parameter instead of the JWT |
-| Camera capture fails with `no /dev/video*` | No webcam on the host; install `ffmpeg` for fallback transcoding |
-| `camera.record` returns `record_not_implemented` | Recording on Android is a stub; Linux uses ffmpeg over V4L2 |
-| Device ID changes on every app launch | The app isn't sending the stored device id in the registration payload |
-
----
-
-## Docker Infrastructure
-
-Optional infrastructure can be started using Docker Compose. Typical services:
-
-```
-Redis
-NATS
-ChromaDB
-Neo4j
-PAI API
-```
-
-The exact services depend on the active development/production configuration.
-
----
-
-## Environment
-
-Example environment variables for a development deployment:
-
-* Runtime: environment name, debug flag, bind host and port
-* Database URL (SQLite for dev, Postgres for prod)
-* JWT secret and expiry
-* Admin bootstrap emails
-* LLM provider, model, and API key
-* Redis and NATS endpoints
-* External service keys for maps, ridesharing, and calendar
-
----
-
-## Final Architecture
-
-```
-                         ┌──────────────┐
-                         │     USER     │
-                         └──────┬───────┘
-                                ▼
-                         ┌──────────────┐
-                         │   AI Kernel  │
-                         └──────┬───────┘
-                                ▼
-                       ┌──────────────────┐
-                       │   Orchestrator   │
-                       └────────┬─────────┘
-               ┌────────────────┼────────────────┐
-               ▼                ▼                ▼
-           Context           Memory           Plugins
-               │
-               ▼
-           ┌────────┐
-           │Planner │
-           └───┬────┘
-               ▼
-             Plan
-               ▼
-         ┌─────────────┐
-         │ DAG Scheduler│
-         └──────┬──────┘
-                ▼
-           TaskRunner
-        ┌───────┼────────┐
-        ▼       ▼        ▼
-     Capability Auth   Device
-     Resolver          Selector
-        └───────┼────────┘
-                ▼
-          ┌────────────┐
-          │TaskManager │
-          └─────┬──────┘
-                ▼
-         Executor Manager
-       ┌────────┼─────────┐
-       ▼        ▼         ▼
-    Server   Desktop    Android
-    Executor Executor   Executor
-       │        │         │
-       ▼        ▼         ▼
-    Server   Desktop    Mobile
-```
-
-The fundamental contract:
-
-```
-                 PLAN
-                  ▼
-             TaskSpec
-                  ▼
-             TaskManager
-                  ▼
-              Runtime Task
-                  ▼
-        Authorization + Resolution
-                  ▼
-          Device + Executor
-                  ▼
-              REAL ACTION
-```
-
-Plugin system, at a glance:
-
-```
-        REGISTRY (HTTP)                    DEVICE
-              │                              │
-              ▼                              │
-      manifest + artifact                    │
-              │                              │
-              ▼                              │
-      PluginRepository                       │
-      (Dart: download + SHA verify)          │
-              │                              │
-              ▼                              │
-      PluginInstaller                        │
-      (Dart: write to plugin store)          │
-              │                              │
-              ▼                              │
-      PluginRuntime.loadNativeModule ───────►│ dlopen
-              │                              ▼
-              │                        CAbiPluginModule
-              ▼                              │
-      MethodChannel("pai/plugin_runtime") ─► invoke
-              │                              │
-              ▼                              ▼
-        capability result              plugin binary runs
-```
+flutter run -d linux --verbose --target lib/main.dart
+
+## Final Steps
+
+1. Create the `.env` file from the example.
+2. Run `python scripts/setup_db.py` to initialize databases.
+3. Execute `./scripts/run_tests.sh` to verify everything works.
+4. Start the system with `python -m pai.main` or `docker-compose up`.
+
+The Personal AI System is now fully operational, with all components, tests, and documentation ready.
+
+# RUn backend
+source .env && PYTHONPATH=src uvicorn pai.main:app --reload --host 0.0.0.0 --port 8000
+
+# RUn frontend
+cd frontend/ui/apps/pai_mobile && flutter pub get && flutter run -d <device-id>
+
+Backend                       Dart (host)                  Native (host)              Plugin .so
+   │                             │                             │                        │
+   │── catalog (REST) ──────────▶│                             │                        │
+   │                             │                             │                        │
+   │                             │── index.json (REST) ──▶ Registry                     │
+   │                             │◀── manifest + artifact ── Registry                    │
+   │                             │                             │                        │
+   │                             │  write to disk, verify SHA  │                        │
+   │                             │                             │                        │
+   │── plugin.install (WS) ─────▶│                             │                        │
+   │                             │── loadNativeModule (MC) ──▶ dlopen ────────────────▶ │
+   │                             │◀── ok ───────────────────── │                        │
+   │◀── result (WS) ─────────────│                             │                        │
+   │                             │                             │                        │
+   │── capability.invoke (WS) ──▶│                             │                        │
+   │                             │── invoke (MC) ────────────▶ module->invoke ────────▶ │
+   │                             │◀── map ─────────────────── │                        │
+   │◀── result (WS) ─────────────│                             │                        │
+
+### Install the command-line tools
+   mkdir -p ~/Android/Sdk/cmdline-tools
+cd ~/Android/Sdk/cmdline-tools
+
+# Latest Linux command-line tools (adjust URL if a newer one exists)
+wget https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+unzip commandlinetools-linux-11076708_latest.zip
+mv cmdline-tools latest
+
+
+# Set environment variables
+export ANDROID_HOME="$HOME/Android/Sdk"
+export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
+
+
+# Install the NDK
+sdkmanager --install "ndk;26.1.10909125"
+
+
+# Verify
+ls ~/Android/Sdk/ndk
+# should print: 26.1.10909125
+
+ls ~/Android/Sdk/ndk/26.1.10909125/build/cmake/android.toolchain.cmake
+# should print the path

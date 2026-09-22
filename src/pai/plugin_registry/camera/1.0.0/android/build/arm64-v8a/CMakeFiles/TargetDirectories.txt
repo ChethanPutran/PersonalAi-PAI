@@ -1,0 +1,3 @@
+/home/chethan/Desktop/Chethan/aiml_projects/advanced_projects/personal_ai/ai_personal_agent/src/pai/plugin_registry/camera/1.0.0/android/build/arm64-v8a/CMakeFiles/pai_camera.dir
+/home/chethan/Desktop/Chethan/aiml_projects/advanced_projects/personal_ai/ai_personal_agent/src/pai/plugin_registry/camera/1.0.0/android/build/arm64-v8a/CMakeFiles/edit_cache.dir
+/home/chethan/Desktop/Chethan/aiml_projects/advanced_projects/personal_ai/ai_personal_agent/src/pai/plugin_registry/camera/1.0.0/android/build/arm64-v8a/CMakeFiles/rebuild_cache.dir

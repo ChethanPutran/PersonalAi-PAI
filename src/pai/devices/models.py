@@ -73,13 +73,13 @@ class DeviceInfo(BaseModel):
     status: DeviceStatus = DeviceStatus.UNKNOWN
 
     # Application information.
-    app_version: str
-    runtime_version: str
+    app_version: str = "1.0.0"
+    runtime_version: str = "1.0.0"
 
     # Device platform information.
     platform: Optional[str] = None
     platform_version: Optional[str] = None
-    os_version: str
+    os_version: str = ""
     architecture: Optional[str] = None
 
     # Network information.
@@ -113,9 +113,15 @@ class DeviceInfo(BaseModel):
 
     def generate_id(self) -> str:
         """Generate a unique device identifier based on its properties."""
-        return f"{self.device_type}:{self.platform}:{self.architecture}:{self.name}:{uuid.uuid4()}"  # Replace 'uuid' with actual unique identifier logic if needed.
+        return (
+            f"{self.device_type}:{self.platform}:{self.architecture}:"
+            f"{self.name}:{uuid.uuid4()}"
+        )
+
 
 class DeviceRegistrationInfo(BaseModel):
+    """Inner block of a device registration request."""
+
     name: str
     device_type: str = "unknown"
 
@@ -129,23 +135,28 @@ class DeviceRegistrationInfo(BaseModel):
     architecture: Optional[str] = None
     hostname: Optional[str] = None
 
-    capabilities: List[Dict[str, Any]] = Field(
-        default_factory=list
-    )
+    capabilities: List[Dict[str, Any]] = Field(default_factory=list)
 
-    metadata: Dict[str, Any] = Field(
-        default_factory=dict
-    )
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
 class DeviceRegistration(BaseModel):
+    """
+    Registration payload sent by the app.
+
+    device_id is optional. When the app has previously registered and
+    stored a device id, it sends that id back so the backend updates
+    the existing row instead of minting a new one on every launch.
+    """
+
     device: DeviceRegistrationInfo
+
+    device_id: Optional[str] = None
 
     connection_type: Optional[str] = None
 
-    connection_config: Dict[str, Any] = Field(
-        default_factory=dict
-    )
+    connection_config: Dict[str, Any] = Field(default_factory=dict)
+
 
 class DeviceHeartbeat(BaseModel):
     """Heartbeat sent by a device/executor."""

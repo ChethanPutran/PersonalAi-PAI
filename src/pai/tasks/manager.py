@@ -80,6 +80,9 @@ class TaskManager:
         max_retries: int = 0,
         metadata: Optional[Dict[str, Any]] = None,
         parent_task_id: Optional[str] = None,
+        device_id: Optional[str] = None,
+        executor_id: Optional[str] = None,
+        plugin: Optional[str] = None
     ) -> Task:
         """
         Create a raw task.

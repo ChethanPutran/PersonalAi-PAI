@@ -531,7 +531,7 @@ class TaskOrchestrator:
         runtime_task = (
             await self.task_manager.create(
                 title=capability,
-                input=params,
+                input="Task input for capability execution",
                 user_id=user_id,
                 session_id=context.session_id,
                 task_type=capability,

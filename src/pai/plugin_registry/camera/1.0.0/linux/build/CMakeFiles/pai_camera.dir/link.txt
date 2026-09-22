@@ -1,0 +1,1 @@
+/usr/bin/c++ -fPIC -O3 -DNDEBUG -shared -Wl,-soname,libpai_camera.so -o libpai_camera.so CMakeFiles/pai_camera.dir/src/camera_module.cpp.o CMakeFiles/pai_camera.dir/src/camera_capture.cpp.o CMakeFiles/pai_camera.dir/src/camera_record.cpp.o 

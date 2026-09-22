@@ -1,26 +1,26 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+from pathlib import Path
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
+from pai.api.dependencies import get_current_user
 from pai.app_context import PAIAppContext, get_app_context
 
 
-router = APIRouter(
-    prefix="/plugins",
-    tags=["plugins"],
-)
-
+router = APIRouter(prefix="/plugins", tags=["plugins"])
 logger = logging.getLogger(__name__)
 
 
 # ============================================================
 # Request Models
 # ============================================================
-
 
 class PluginInstallRequest(BaseModel):
     device_id: str
@@ -30,180 +30,285 @@ class PluginConfigRequest(BaseModel):
     config: Dict[str, Any]
 
 
+class PluginDeviceRequest(BaseModel):
+    """Body for enable/disable — device_id is optional but recommended."""
+    device_id: Optional[str] = None
+
+
 # ============================================================
 # Helpers
 # ============================================================
 
-
-def _get_user_id(
-    user_id: Optional[str],
-) -> str:
-    """
-    Resolve the user ID.
-
-    Authentication is not fully wired yet, so anonymous is used
-    as the temporary fallback.
-    """
-
+def _get_user_id(user_id: Optional[str]) -> str:
     return user_id or "anonymous"
+
+
+# ============================================================
+# Device plugin registry (index / manifest / artifact)
+# ============================================================
+#
+# Declared BEFORE the /{plugin_id} catch-all so /index.json
+# doesn't get swallowed by it.
+
+REGISTRY_ROOT = Path(__file__).resolve().parent.parent.parent / "plugin_registry"
+
+
+def _iter_registry() -> Dict[str, Dict[str, Any]]:
+    out: Dict[str, Dict[str, Any]] = {}
+    if not REGISTRY_ROOT.exists():
+        return out
+
+    for plugin_dir in sorted(REGISTRY_ROOT.iterdir()):
+        if not plugin_dir.is_dir() or plugin_dir.name.startswith("_"):
+            continue
+        plugin_id = plugin_dir.name
+        versions: Dict[str, Any] = {}
+
+        for version_dir in sorted(plugin_dir.iterdir()):
+            if not version_dir.is_dir():
+                continue
+            manifest_path = version_dir / "manifest.json"
+            if not manifest_path.exists():
+                continue
+            try:
+                manifest = json.loads(manifest_path.read_text())
+            except Exception as exc:
+                logger.warning("Bad manifest %s: %s", manifest_path, exc)
+                continue
+            version = manifest.get("version") or version_dir.name
+            versions[version] = {
+                "manifest": manifest,
+                "version_dir": version_dir,
+            }
+
+        if versions:
+            out[plugin_id] = versions
+
+    return out
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _artifact_for_platform(
+    version_dir: Path,
+    platform: str,
+    manifest: Dict[str, Any],
+) -> Optional[Path]:
+    spec = (manifest.get("platforms") or {}).get(platform)
+    if isinstance(spec, dict):
+        rel = spec.get("artifact")
+        if rel:
+            p = version_dir / rel
+            if p.exists():
+                return p
+
+    ext = {
+        "linux": ".so",
+        "android": ".so",
+        "windows": ".dll",
+        "macos": ".dylib",
+    }.get(platform)
+
+    if ext:
+        for candidate in version_dir.rglob(f"*{ext}"):
+            return candidate
+    return None
+
+
+@router.get("/index.json")
+async def registry_index(request: Request) -> Dict[str, Any]:
+    base = str(request.base_url).rstrip("/")
+    registry = _iter_registry()
+
+    plugins_out = []
+    for plugin_id, versions in registry.items():
+        latest = max(versions.keys())
+
+        versions_out: Dict[str, Any] = {}
+        for version, vinfo in versions.items():
+            manifest = vinfo["manifest"]
+            version_dir: Path = vinfo["version_dir"]
+
+            platforms = list((manifest.get("platforms") or {}).keys())
+            artifacts: Dict[str, str] = {}
+            sha: Dict[str, str] = {}
+            sizes: Dict[str, int] = {}
+
+            for platform in platforms:
+                artifact_path = _artifact_for_platform(version_dir, platform, manifest)
+                if artifact_path is None:
+                    continue
+                artifacts[platform] = (
+                    f"{base}/api/v1/plugins/{plugin_id}/{version}/artifact/{platform}"
+                )
+                sha[platform] = _sha256_file(artifact_path)
+                sizes[platform] = artifact_path.stat().st_size
+
+            versions_out[version] = {
+                "manifestUrl": f"{base}/api/v1/plugins/{plugin_id}/{version}/manifest.json",
+                "artifacts": artifacts,
+                "sha256": sha,
+                "sizeBytes": sizes,
+            }
+
+        plugins_out.append({
+            "id": plugin_id,
+            "name": next(iter(versions.values()))["manifest"].get("name", plugin_id),
+            "latest": latest,
+            "versions": versions_out,
+        })
+
+    return {"schemaVersion": 1, "updatedAt": None, "plugins": plugins_out}
+
+
+@router.get("/{plugin_id}/{version}/manifest.json")
+async def registry_manifest(plugin_id: str, version: str) -> JSONResponse:
+    path = REGISTRY_ROOT / plugin_id / version / "manifest.json"
+    if not path.exists():
+        raise HTTPException(404, f"manifest not found: {plugin_id}@{version}")
+    return JSONResponse(content=json.loads(path.read_text()))
+
+
+@router.get("/{plugin_id}/{version}/artifact/{platform}")
+async def registry_artifact(plugin_id: str, version: str, platform: str):
+    version_dir = REGISTRY_ROOT / plugin_id / version
+    manifest_path = version_dir / "manifest.json"
+    if not manifest_path.exists():
+        raise HTTPException(404, f"plugin not found: {plugin_id}@{version}")
+
+    manifest = json.loads(manifest_path.read_text())
+    artifact = _artifact_for_platform(version_dir, platform, manifest)
+    if artifact is None:
+        raise HTTPException(404, f"no artifact for {plugin_id}@{version} on {platform}")
+
+    return FileResponse(
+        path=artifact,
+        media_type="application/octet-stream",
+        filename=artifact.name,
+    )
+
+
+# ============================================================
+# Device reconciliation
+# ============================================================
+
+class DevicePluginReport(BaseModel):
+    id: str
+    version: str
+    enabled: bool = False
+    sha256: Optional[str] = None
+
+
+class DeviceReconcileRequest(BaseModel):
+    plugins: list[DevicePluginReport]
+
+
+@router.post("/device/{device_id}/reconcile")
+async def reconcile_device(
+    device_id: str,
+    payload: DeviceReconcileRequest,
+    context: PAIAppContext = Depends(get_app_context),
+) -> Dict[str, Any]:
+    pm = context.orchestrator.plugin_manager
+    try:
+        result = await pm.reconcile_device_plugins(
+            device_id=device_id,
+            device_plugins=[p.model_dump() for p in payload.plugins],
+        )
+    except RuntimeError as exc:
+        raise HTTPException(500, str(exc)) from exc
+    return {"ok": True, "device_id": device_id, **result}
 
 
 # ============================================================
 # Catalog
 # ============================================================
 
-
 @router.get("/catalog")
 async def get_catalog(
     platform: str,
     architecture: str,
+    request: Request,
     context: PAIAppContext = Depends(get_app_context),
 ) -> Dict[str, Any]:
-    """
-    Return plugins compatible with a platform and architecture.
+    index = await registry_index(request)
 
-    Example:
+    plugins = []
+    for entry in index["plugins"]:
+        latest = entry["latest"]
+        vinfo = entry["versions"][latest]
+        if platform not in vinfo["artifacts"]:
+            continue
 
-        GET /api/v1/plugins/catalog
-            ?platform=linux
-            &architecture=x86_64
-    """
-
-    try:
-        plugin_manager = context.orchestrator.plugin_manager
-
-        plugins = await plugin_manager.get_compatible_plugins(
-            platform=platform,
-            architecture=architecture,
+        manifest = json.loads(
+            (REGISTRY_ROOT / entry["id"] / latest / "manifest.json").read_text()
         )
 
-        return {
-            "plugins": [
-                plugin_manager._serialize_plugin(plugin)
-                for plugin in plugins
-            ]
-        }
+        plugins.append({
+            "id": entry["id"],
+            "name": entry["name"],
+            "version": latest,
+            "description": manifest.get("description", ""),
+            "platforms": list(vinfo["artifacts"].keys()),
+            "architectures": [architecture],
+            "capabilities": [c["id"] for c in manifest.get("capabilities", [])],
+            "package_url": vinfo["artifacts"][platform],
+            "checksum": vinfo["sha256"][platform],
+            "size": vinfo["sizeBytes"][platform],
+            "state": "available",
+        })
 
-    except Exception as exc:
-        logger.exception(
-            "Failed to load plugin catalog: %s",
-            exc,
-        )
-
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to load plugin catalog",
-        ) from exc
+    return {"plugins": plugins}
 
 
 # ============================================================
-# List Plugins
+# List plugins
 # ============================================================
-
 
 @router.get("")
 async def list_plugins(
-    user_id: Optional[str] = Query(
-        None,
-        description="User ID for per-user plugin state",
-    ),
+    user_id: Optional[str] = Query(None),
     platform: Optional[str] = Query(None),
     architecture: Optional[str] = Query(None),
     context: PAIAppContext = Depends(get_app_context),
 ) -> Dict[str, Any]:
-    """
-    List all plugins.
-
-    Optionally returns plugins compatible with a specific
-    platform/architecture and their user-specific enabled state.
-    """
-
-    try:
-        user_id = _get_user_id(user_id)
-
-        plugins = await context.orchestrator.plugin_manager.list_plugins(
-            user_id=user_id,
-            platform=platform,
-            architecture=architecture,
-        )
-
-        total = len(plugins)
-
-        enabled = sum(
-            1
-            for plugin in plugins
-            if plugin.get("is_enabled", False)
-        )
-
-        return {
-            "plugins": plugins,
-            "total": total,
-            "enabled": enabled,
-        }
-
-    except Exception as exc:
-        logger.exception(
-            "Failed to list plugins: %s",
-            exc,
-        )
-
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to list plugins",
-        ) from exc
+    user_id = _get_user_id(user_id)
+    plugins = await context.orchestrator.plugin_manager.list_plugins(
+        user_id=user_id,
+        platform=platform,
+        architecture=architecture,
+    )
+    return {
+        "plugins": plugins,
+        "total": len(plugins),
+        "enabled": sum(1 for p in plugins if p.get("is_enabled", False)),
+    }
 
 
 # ============================================================
-# Get Plugin
+# Get plugin
 # ============================================================
-
 
 @router.get("/{plugin_id}")
 async def get_plugin(
     plugin_id: str,
     context: PAIAppContext = Depends(get_app_context),
 ) -> Dict[str, Any]:
-    """
-    Get metadata for a specific plugin.
-    """
-
-    try:
-        plugin_manager = context.orchestrator.plugin_manager
-
-        plugin = await plugin_manager.get_plugin(
-            plugin_id
-        )
-
-        if plugin is None:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Plugin '{plugin_id}' not found",
-            )
-
-        return plugin_manager._serialize_plugin(
-            plugin
-        )
-
-    except HTTPException:
-        raise
-
-    except Exception as exc:
-        logger.exception(
-            "Failed to get plugin %s: %s",
-            plugin_id,
-            exc,
-        )
-
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to get plugin",
-        ) from exc
+    plugin = await context.orchestrator.plugin_manager.get_plugin(plugin_id)
+    if plugin is None:
+        raise HTTPException(404, f"Plugin '{plugin_id}' not found")
+    return context.orchestrator.plugin_manager._serialize_plugin(plugin)
 
 
 # ============================================================
-# Install Plugin On Device
+# Install on device
 # ============================================================
-
 
 @router.post("/{plugin_id}/install")
 async def install_plugin(
@@ -211,418 +316,233 @@ async def install_plugin(
     payload: PluginInstallRequest,
     context: PAIAppContext = Depends(get_app_context),
 ) -> Dict[str, Any]:
-    """
-    Request installation of a plugin on a device.
-
-    IMPORTANT:
-    The backend does NOT install the plugin.
-
-    It sends a plugin.install command through the active
-    WebSocket connection to the target device.
-
-    The device is responsible for:
-        - downloading the package
-        - validating checksum
-        - installing/loading the plugin
-        - reporting success/failure
-    """
-
     plugin_manager = context.orchestrator.plugin_manager
     device_manager = context.orchestrator.device_manager
 
-    logger.info(
-        "Plugin install request: plugin=%s device=%s",
-        plugin_id,
-        payload.device_id,
-    )
-
-    logger.info(
-        "Registered devices: %s",
-        await device_manager.registry.all(),
-    )
-
-    device = await context.orchestrator.device_manager.get(
-    payload.device_id,
-    )
-
-    logger.info(
-        "Plugin installation device lookup: device_id={}, found={}",
-        payload.device_id,
-        device is not None,
-    )
-
-   
-
-    # --------------------------------------------------------
-    # 1. Verify plugin
-    # --------------------------------------------------------
-
     try:
-        plugin = await plugin_manager.require_plugin(
-            plugin_id
-        )
-
+        plugin = await plugin_manager.require_plugin(plugin_id)
     except ValueError as exc:
-        raise HTTPException(
-            status_code=404,
-            detail=str(exc),
-        ) from exc
+        raise HTTPException(404, str(exc)) from exc
 
-    # --------------------------------------------------------
-    # 2. Verify device exists
-    # --------------------------------------------------------
-
-    device = await device_manager.get(
-        payload.device_id
-    )
-
+    device = await device_manager.get(payload.device_id)
     if device is None:
-        raise HTTPException(
-            status_code=404,
-            detail=(
-                f"Device '{payload.device_id}' "
-                "not found"
-            ),
-        )
+        raise HTTPException(404, f"Device '{payload.device_id}' not found")
 
-    # --------------------------------------------------------
-    # 3. Verify device connection
-    # --------------------------------------------------------
+    if not await device_manager.is_connected(payload.device_id):
+        raise HTTPException(409, f"Device '{payload.device_id}' is not connected")
 
-    connected = await device_manager.is_connected(
-        payload.device_id
-    )
+    device_platform = getattr(device, "platform", None)
+    device_architecture = getattr(device, "architecture", None)
 
-    if not connected:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"Device '{payload.device_id}' "
-                "is not connected"
-            ),
-        )
-
-    # --------------------------------------------------------
-    # 4. Verify platform compatibility
-    # --------------------------------------------------------
-
-    device_platform = getattr(
-        device,
-        "platform",
-        None,
-    )
-
-    device_architecture = getattr(
-        device,
-        "architecture",
-        None,
-    )
-
-    if (
-        device_platform
-        and device_architecture
-        and not await plugin_manager.is_compatible(
+    if device_platform and device_architecture:
+        if not await plugin_manager.is_compatible(
             plugin_id=plugin_id,
             platform=device_platform,
             architecture=device_architecture,
-        )
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Plugin '{plugin_id}' is not compatible "
-                f"with device '{payload.device_id}' "
-                f"({device_platform}/{device_architecture})"
-            ),
-        )
-
-    # --------------------------------------------------------
-    # 5. Build device command
-    # --------------------------------------------------------
+        ):
+            raise HTTPException(
+                400,
+                f"Plugin '{plugin_id}' not compatible with "
+                f"{device_platform}/{device_architecture}",
+            )
 
     command = await plugin_manager.build_install_request(
         plugin_id=plugin_id,
         device_id=payload.device_id,
     )
 
-    # --------------------------------------------------------
-    # 6. Send command through WebSocket
-    # --------------------------------------------------------
-
     try:
-        await device_manager.send(
-            payload.device_id,
-            command,
-        )
-
+        await device_manager.send(payload.device_id, command)
     except RuntimeError as exc:
-        raise HTTPException(
-            status_code=409,
-            detail=str(exc),
-        ) from exc
+        raise HTTPException(409, str(exc)) from exc
 
-    except Exception as exc:
-        logger.exception(
-            "Failed to send install command for %s: %s",
-            plugin_id,
-            exc,
-        )
-
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to send installation command",
-        ) from exc
-
-    # --------------------------------------------------------
-    # 7. Return acknowledgement
-    # --------------------------------------------------------
+    await plugin_manager.record_device_error(
+        device_id=payload.device_id,
+        plugin_id=plugin_id,
+        error="install_requested",
+    )
 
     return {
         "success": True,
         "plugin_id": plugin_id,
         "device_id": payload.device_id,
+        "version": plugin.version,
         "status": "install_requested",
-        "message": (
-            "Installation request sent to device"
-        ),
     }
 
 
 # ============================================================
-# Enable Plugin
+# Install / uninstall reports
 # ============================================================
 
+class PluginInstallReport(BaseModel):
+    device_id: str
+    version: str
+    success: bool
+    artifact_sha256: Optional[str] = None
+    error: Optional[str] = None
+
+
+class PluginUninstallReport(BaseModel):
+    device_id: str
+    success: bool
+    error: Optional[str] = None
+
+
+@router.post("/{plugin_id}/report-install")
+async def report_install(
+    plugin_id: str,
+    payload: PluginInstallReport,
+    context: PAIAppContext = Depends(get_app_context),
+) -> Dict[str, Any]:
+    pm = context.orchestrator.plugin_manager
+
+    if payload.success:
+        await pm.mark_installed_on_device(
+            device_id=payload.device_id,
+            plugin_id=plugin_id,
+            version=payload.version,
+            artifact_sha256=payload.artifact_sha256,
+        )
+    else:
+        await pm.record_device_error(
+            device_id=payload.device_id,
+            plugin_id=plugin_id,
+            error=payload.error or "install_failed",
+        )
+
+    return {"ok": True, "plugin_id": plugin_id, "device_id": payload.device_id}
+
+
+@router.post("/{plugin_id}/report-uninstall")
+async def report_uninstall(
+    plugin_id: str,
+    payload: PluginUninstallReport,
+    context: PAIAppContext = Depends(get_app_context),
+) -> Dict[str, Any]:
+    pm = context.orchestrator.plugin_manager
+    if payload.success:
+        await pm.mark_uninstalled_on_device(payload.device_id, plugin_id)
+    return {"ok": True}
+
+
+@router.get("/device/{device_id}/installed")
+async def list_installed_on_device(
+    device_id: str,
+    context: PAIAppContext = Depends(get_app_context),
+) -> Dict[str, Any]:
+    pm = context.orchestrator.plugin_manager
+    return {"device_id": device_id, "plugins": await pm.list_device_plugins(device_id)}
+
+
+# ============================================================
+# Enable — reads user from JWT, updates both user_plugins and device_plugins
+# ============================================================
 
 @router.post("/{plugin_id}/enable")
 async def enable_plugin(
     plugin_id: str,
-    user_id: Optional[str] = Query(None),
+    payload: PluginDeviceRequest = PluginDeviceRequest(),
+    user_id: str = Depends(get_current_user),
     context: PAIAppContext = Depends(get_app_context),
 ) -> Dict[str, Any]:
-    """
-    Enable a plugin for a user.
-
-    This changes backend authorization state.
-
-    It does NOT install the plugin on a device.
-    """
-
-    user_id = _get_user_id(user_id)
-
-    plugin_manager = context.orchestrator.plugin_manager
+    pm = context.orchestrator.plugin_manager
 
     try:
-        await plugin_manager.enable(
-            user_id=user_id,
-            plugin_id=plugin_id,
-        )
-
+        await pm.enable(user_id=user_id, plugin_id=plugin_id)
     except ValueError as exc:
-        raise HTTPException(
-            status_code=404,
-            detail=str(exc),
-        ) from exc
-
+        raise HTTPException(404, str(exc)) from exc
     except RuntimeError as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=str(exc),
-        ) from exc
+        raise HTTPException(500, str(exc)) from exc
 
-    except Exception as exc:
-        logger.exception(
-            "Failed to enable plugin %s: %s",
-            plugin_id,
-            exc,
-        )
+    if payload.device_id:
+        try:
+            await pm.set_device_enabled(
+                device_id=payload.device_id,
+                plugin_id=plugin_id,
+                enabled=True,
+            )
+        except Exception as exc:
+            logger.warning("failed to set device enabled flag: %s", exc)
 
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to enable plugin",
-        ) from exc
-
-    return {
-        "plugin_id": plugin_id,
-        "user_id": user_id,
-        "status": "enabled",
-    }
+    return {"plugin_id": plugin_id, "user_id": user_id, "status": "enabled"}
 
 
 # ============================================================
-# Disable Plugin
+# Disable — same pattern
 # ============================================================
-
 
 @router.post("/{plugin_id}/disable")
 async def disable_plugin(
     plugin_id: str,
-    user_id: Optional[str] = Query(None),
+    payload: PluginDeviceRequest = PluginDeviceRequest(),
+    user_id: str = Depends(get_current_user),
     context: PAIAppContext = Depends(get_app_context),
 ) -> Dict[str, Any]:
-    """
-    Disable a plugin for a user.
-
-    This changes backend authorization state.
-
-    It does NOT uninstall the plugin from a device.
-    """
-
-    user_id = _get_user_id(user_id)
-
-    plugin_manager = context.orchestrator.plugin_manager
+    pm = context.orchestrator.plugin_manager
 
     try:
-        await plugin_manager.disable(
-            user_id=user_id,
-            plugin_id=plugin_id,
-        )
-
+        await pm.disable(user_id=user_id, plugin_id=plugin_id)
     except ValueError as exc:
-        raise HTTPException(
-            status_code=404,
-            detail=str(exc),
-        ) from exc
-
+        raise HTTPException(404, str(exc)) from exc
     except RuntimeError as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=str(exc),
-        ) from exc
+        raise HTTPException(500, str(exc)) from exc
 
-    except Exception as exc:
-        logger.exception(
-            "Failed to disable plugin %s: %s",
-            plugin_id,
-            exc,
-        )
+    if payload.device_id:
+        try:
+            await pm.set_device_enabled(
+                device_id=payload.device_id,
+                plugin_id=plugin_id,
+                enabled=False,
+            )
+        except Exception as exc:
+            logger.warning("failed to clear device enabled flag: %s", exc)
 
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to disable plugin",
-        ) from exc
-
-    return {
-        "plugin_id": plugin_id,
-        "user_id": user_id,
-        "status": "disabled",
-    }
+    return {"plugin_id": plugin_id, "user_id": user_id, "status": "disabled"}
 
 
 # ============================================================
-# Plugin Configuration
+# Config — reads user from JWT
 # ============================================================
-
 
 @router.get("/{plugin_id}/config")
 async def get_plugin_config(
     plugin_id: str,
-    user_id: Optional[str] = Query(None),
+    user_id: str = Depends(get_current_user),
     context: PAIAppContext = Depends(get_app_context),
 ) -> Dict[str, Any]:
-    """
-    Get user-specific plugin configuration.
-    """
-
-    user_id = _get_user_id(user_id)
-
-    plugin_manager = context.orchestrator.plugin_manager
-
     try:
-        config = await plugin_manager.get_user_plugin_config(
-            user_id=user_id,
-            plugin_id=plugin_id,
+        config = await context.orchestrator.plugin_manager.get_user_plugin_config(
+            user_id=user_id, plugin_id=plugin_id,
         )
-
-        return {
-            "plugin_id": plugin_id,
-            "user_id": user_id,
-            "config": config,
-        }
-
     except ValueError as exc:
-        raise HTTPException(
-            status_code=404,
-            detail=str(exc),
-        ) from exc
-
-    except Exception as exc:
-        logger.exception(
-            "Failed to get config for plugin %s: %s",
-            plugin_id,
-            exc,
-        )
-
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to get plugin configuration",
-        ) from exc
+        raise HTTPException(404, str(exc)) from exc
+    return {"plugin_id": plugin_id, "user_id": user_id, "config": config}
 
 
 @router.post("/{plugin_id}/config")
 async def set_plugin_config(
     plugin_id: str,
     payload: PluginConfigRequest,
-    user_id: Optional[str] = Query(None),
+    user_id: str = Depends(get_current_user),
     context: PAIAppContext = Depends(get_app_context),
 ) -> Dict[str, Any]:
-    """
-    Store user-specific plugin configuration.
-    """
-
-    user_id = _get_user_id(user_id)
-
-    plugin_manager = context.orchestrator.plugin_manager
-
     try:
-        await plugin_manager.set_user_plugin_config(
-            user_id=user_id,
-            plugin_id=plugin_id,
-            metadata=payload.config,
+        await context.orchestrator.plugin_manager.set_user_plugin_config(
+            user_id=user_id, plugin_id=plugin_id, metadata=payload.config,
         )
-
-        return {
-            "plugin_id": plugin_id,
-            "user_id": user_id,
-            "status": "saved",
-            "config": payload.config,
-        }
-
     except ValueError as exc:
-        raise HTTPException(
-            status_code=404,
-            detail=str(exc),
-        ) from exc
-
-    except RuntimeError as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=str(exc),
-        ) from exc
-
-    except Exception as exc:
-        logger.exception(
-            "Failed to save config for plugin %s: %s",
-            plugin_id,
-            exc,
-        )
-
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to save plugin configuration",
-        ) from exc
-
-
-# ============================================================
-# Plugin Status
-# ============================================================
+        raise HTTPException(404, str(exc)) from exc
+    return {
+        "plugin_id": plugin_id,
+        "user_id": user_id,
+        "status": "saved",
+        "config": payload.config,
+    }
 
 
 @router.get("/system/status")
 async def plugin_manager_status(
     context: PAIAppContext = Depends(get_app_context),
 ) -> Dict[str, Any]:
-    """
-    Return backend plugin manager status.
-    """
-
     return context.orchestrator.plugin_manager.get_status()

@@ -1,0 +1,548 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PAI Admin</title>
+<style>
+  :root {
+    --bg: #0f172a;
+    --surface: #1e293b;
+    --surface-2: #293548;
+    --text: #e2e8f0;
+    --muted: #94a3b8;
+    --accent: #38bdf8;
+    --green: #22c55e;
+    --red: #ef4444;
+    --yellow: #eab308;
+    --border: #334155;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg); color: var(--text); font-size: 14px;
+  }
+
+  /* ---------- Login overlay ---------- */
+  #login-overlay {
+    position: fixed; inset: 0; z-index: 1000;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(15, 23, 42, .95); backdrop-filter: blur(8px);
+  }
+  #login-overlay.hidden { display: none; }
+  .login-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 32px; width: 360px;
+    box-shadow: 0 24px 48px rgba(0,0,0,.5);
+  }
+  .login-card h2 { margin: 0 0 8px; font-size: 20px; }
+  .login-card p.sub {
+    margin: 0 0 24px; color: var(--muted); font-size: 13px;
+  }
+  .login-card input {
+    width: 100%; padding: 10px 12px; margin-bottom: 12px;
+    background: var(--bg); border: 1px solid var(--border);
+    color: var(--text); border-radius: 6px; font-size: 14px;
+  }
+  .login-card input:focus {
+    outline: none; border-color: var(--accent);
+  }
+  .login-card button {
+    width: 100%; padding: 10px; margin-top: 8px;
+    background: var(--accent); color: var(--bg);
+    border: none; border-radius: 6px;
+    font-weight: 700; font-size: 14px; cursor: pointer;
+  }
+  .login-card button:disabled {
+    opacity: .6; cursor: default;
+  }
+  #login-error {
+    color: var(--red); font-size: 13px; margin-top: 12px;
+    min-height: 18px; text-align: center;
+  }
+
+  /* ---------- Layout ---------- */
+  header {
+    padding: 20px 32px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between;
+    background: var(--surface);
+  }
+  header h1 { margin: 0; font-size: 20px; font-weight: 600; }
+  header .status {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 12px; color: var(--muted);
+  }
+  header .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--green); animation: pulse 2s infinite;
+  }
+  header .dot.offline { background: var(--red); animation: none; }
+  @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .4 } }
+
+  header .user-info {
+    display: flex; align-items: center; gap: 12px;
+    font-size: 12px; color: var(--muted); margin-right: 16px;
+  }
+  header .user-info strong { color: var(--text); }
+  header .logout-btn {
+    padding: 6px 12px; background: transparent;
+    border: 1px solid var(--border); color: var(--muted);
+    border-radius: 6px; cursor: pointer; font-size: 12px;
+  }
+  header .logout-btn:hover { color: var(--text); border-color: var(--text); }
+  header .right { display: flex; align-items: center; }
+
+  main { padding: 24px 32px; max-width: 1400px; margin: 0 auto; }
+
+  .cards {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 16px; margin-bottom: 32px;
+  }
+  .card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 20px;
+  }
+  .card .label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
+  .card .value { font-size: 28px; font-weight: 700; margin-top: 6px; }
+  .card .sub { font-size: 12px; color: var(--muted); margin-top: 4px; }
+
+  .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 24px; }
+  .tab {
+    padding: 10px 16px; cursor: pointer; color: var(--muted);
+    border-bottom: 2px solid transparent; user-select: none;
+  }
+  .tab:hover { color: var(--text); }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .panel { display: none; }
+  .panel.active { display: block; }
+
+  table { width: 100%; border-collapse: collapse; }
+  th, td {
+    text-align: left; padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  th {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .5px;
+    color: var(--muted); font-weight: 600;
+  }
+  tr:hover { background: var(--surface); }
+  code { font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--accent); }
+
+  .badge {
+    display: inline-block; padding: 2px 8px; border-radius: 999px;
+    font-size: 11px; font-weight: 600;
+  }
+  .badge.online { background: rgba(34,197,94,.15); color: var(--green); }
+  .badge.offline { background: rgba(148,163,184,.15); color: var(--muted); }
+  .badge.enabled { background: rgba(56,189,248,.15); color: var(--accent); }
+  .badge.disabled { background: rgba(148,163,184,.15); color: var(--muted); }
+  .badge.error { background: rgba(239,68,68,.15); color: var(--red); }
+  .badge.admin { background: rgba(234,179,8,.15); color: var(--yellow); }
+
+  .empty { padding: 40px; text-align: center; color: var(--muted); }
+  .error { padding: 40px; text-align: center; color: var(--red); }
+  details summary { cursor: pointer; color: var(--muted); }
+  details[open] summary { color: var(--accent); }
+  details ul { margin: 8px 0 0 20px; padding: 0; }
+  details li { margin: 4px 0; color: var(--muted); }
+</style>
+</head>
+<body>
+
+<!-- ============================================================ -->
+<!-- Login overlay                                                -->
+<!-- ============================================================ -->
+<div id="login-overlay" class="hidden">
+  <div class="login-card">
+    <h2>PAI Admin</h2>
+    <p class="sub">Sign in with an admin account.</p>
+    <input id="login-email" type="email" placeholder="Email" autocomplete="username">
+    <input id="login-password" type="password" placeholder="Password" autocomplete="current-password">
+    <button id="login-btn">Sign in</button>
+    <div id="login-error"></div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- Header                                                       -->
+<!-- ============================================================ -->
+<header>
+  <h1>PAI Admin</h1>
+  <div class="right">
+    <div class="user-info">
+      <span id="admin-email"></span>
+      <span class="dot" id="live-dot"></span>
+      <span id="live-text">connecting…</span>
+    </div>
+    <button class="logout-btn" id="logout-btn">Sign out</button>
+  </div>
+</header>
+
+<main>
+  <div class="cards" id="cards"></div>
+
+  <div class="tabs">
+    <div class="tab active" data-tab="devices">Devices</div>
+    <div class="tab" data-tab="plugins">Plugins</div>
+    <div class="tab" data-tab="users">Users</div>
+    <div class="tab" data-tab="raw">Raw JSON</div>
+  </div>
+
+  <div class="panel active" id="panel-devices"></div>
+  <div class="panel" id="panel-plugins"></div>
+  <div class="panel" id="panel-users"></div>
+  <div class="panel" id="panel-raw">
+    <pre id="raw-pre" style="white-space:pre-wrap;word-break:break-all;color:var(--muted)"></pre>
+  </div>
+</main>
+
+<script>
+// ============================================================
+// Constants
+// ============================================================
+const API_DATA    = '/api/v1/system/admin/data';
+const API_LOGIN   = '/api/v1/auth/login';
+const API_ME      = '/api/v1/auth/me';
+const TOKEN_KEY   = 'pai_admin_token';
+const EMAIL_KEY   = 'pai_admin_email';
+const REFRESH_MS  = 5000;
+
+// ============================================================
+// State
+// ============================================================
+let token = localStorage.getItem(TOKEN_KEY);
+let adminEmail = localStorage.getItem(EMAIL_KEY);
+let refreshTimer = null;
+
+// ============================================================
+// DOM refs
+// ============================================================
+const overlay    = document.getElementById('login-overlay');
+const emailInput = document.getElementById('login-email');
+const passInput  = document.getElementById('login-password');
+const loginBtn   = document.getElementById('login-btn');
+const loginError = document.getElementById('login-error');
+const logoutBtn  = document.getElementById('logout-btn');
+const adminEmailEl = document.getElementById('admin-email');
+
+// ============================================================
+// Tabs
+// ============================================================
+document.querySelectorAll('.tab').forEach(t => {
+  t.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+    document.querySelectorAll('.panel').forEach(x => x.classList.remove('active'));
+    t.classList.add('active');
+    document.getElementById('panel-' + t.dataset.tab).classList.add('active');
+  });
+});
+
+// ============================================================
+// Helpers
+// ============================================================
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+const badge = (text, cls) => `<span class="badge ${cls}">${esc(text)}</span>`;
+
+function humanDuration(seconds) {
+  if (seconds < 60) return seconds + 's';
+  const m = Math.floor(seconds / 60), s = seconds % 60;
+  if (m < 60) return m + 'm ' + s + 's';
+  const h = Math.floor(m / 60);
+  return h + 'h ' + (m % 60) + 'm';
+}
+
+function showLogin() {
+  overlay.classList.remove('hidden');
+  emailInput.focus();
+}
+
+function hideLogin() {
+  overlay.classList.add('hidden');
+}
+
+function setAdminEmail(email) {
+  adminEmail = email;
+  adminEmailEl.textContent = email || '';
+  if (email) localStorage.setItem(EMAIL_KEY, email);
+  else localStorage.removeItem(EMAIL_KEY);
+}
+
+// ============================================================
+// Login / logout
+// ============================================================
+async function doLogin() {
+  loginError.textContent = '';
+  loginBtn.disabled = true;
+  loginBtn.textContent = 'Signing in…';
+
+  try {
+    const r = await fetch(API_LOGIN, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: emailInput.value.trim(),
+        password: passInput.value,
+      }),
+    });
+
+    const body = await r.json().catch(() => ({}));
+
+    if (!r.ok) {
+      throw new Error(body.detail || `HTTP ${r.status}`);
+    }
+
+    if (!body.is_admin) {
+      throw new Error('This account does not have admin access.');
+    }
+
+    token = body.access_token;
+    localStorage.setItem(TOKEN_KEY, token);
+    setAdminEmail(body.email);
+
+    passInput.value = '';
+    loginError.textContent = '';
+    hideLogin();
+    startRefreshLoop();
+  } catch (e) {
+    loginError.textContent = e.message || String(e);
+  } finally {
+    loginBtn.disabled = false;
+    loginBtn.textContent = 'Sign in';
+  }
+}
+
+function doLogout() {
+  token = null;
+  localStorage.removeItem(TOKEN_KEY);
+  setAdminEmail('');
+  stopRefreshLoop();
+  document.getElementById('cards').innerHTML = '';
+  document.getElementById('panel-devices').innerHTML = '';
+  document.getElementById('panel-plugins').innerHTML = '';
+  document.getElementById('panel-users').innerHTML = '';
+  document.getElementById('raw-pre').textContent = '';
+  showLogin();
+}
+
+loginBtn.addEventListener('click', doLogin);
+passInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter') doLogin();
+});
+emailInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter') passInput.focus();
+});
+logoutBtn.addEventListener('click', doLogout);
+
+// ============================================================
+// Renderers
+// ============================================================
+function renderCards(s) {
+  const cards = [
+    { label: 'Devices online', value: s.devices_online, sub: `of ${s.devices_total} registered` },
+    { label: 'Plugins catalog', value: s.plugins_catalog, sub: 'available to install' },
+    { label: 'Plugin installs', value: s.plugin_installations, sub: 'across all devices' },
+    { label: 'Users', value: s.users_total, sub: 'in the database' },
+    { label: 'Uptime', value: humanDuration(s.uptime_seconds), sub: 'since boot' },
+  ];
+  document.getElementById('cards').innerHTML = cards.map(c => `
+    <div class="card">
+      <div class="label">${esc(c.label)}</div>
+      <div class="value">${esc(c.value)}</div>
+      <div class="sub">${esc(c.sub)}</div>
+    </div>
+  `).join('');
+}
+
+function renderDevices(devices) {
+  const el = document.getElementById('panel-devices');
+  if (!devices.length) {
+    el.innerHTML = '<div class="empty">No devices registered yet.</div>';
+    return;
+  }
+  el.innerHTML = `
+    <table>
+      <thead><tr>
+        <th>Name</th><th>ID</th><th>Platform</th><th>Status</th>
+        <th>Connected</th><th>Last seen</th>
+      </tr></thead>
+      <tbody>
+        ${devices.map(d => `
+          <tr>
+            <td><strong>${esc(d.name)}</strong>${d.hostname ? `<br><small style="color:var(--muted)">${esc(d.hostname)}</small>` : ''}</td>
+            <td><code>${esc(d.id)}</code></td>
+            <td>${esc(d.platform)}/${esc(d.architecture)}</td>
+            <td>${badge(d.status, d.status === 'online' ? 'online' : 'offline')}</td>
+            <td>${d.connected ? badge('live', 'online') : badge('—', 'offline')}</td>
+            <td>${esc(d.last_seen || '—')}</td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+  `;
+}
+
+function renderPlugins(plugins) {
+  const el = document.getElementById('panel-plugins');
+  if (!plugins.length) {
+    el.innerHTML = '<div class="empty">No plugins in catalog.</div>';
+    return;
+  }
+  el.innerHTML = `
+    <table>
+      <thead><tr>
+        <th>Plugin</th><th>Version</th><th>Platforms</th>
+        <th>Installations</th><th>Enabled</th><th>Details</th>
+      </tr></thead>
+      <tbody>
+        ${plugins.map(p => `
+          <tr>
+            <td><strong>${esc(p.name)}</strong><br><code>${esc(p.id)}</code></td>
+            <td>${esc(p.version)}</td>
+            <td>${esc((p.platforms || []).join(', '))}</td>
+            <td>${p.installations}</td>
+            <td>${p.enabled_on_devices}</td>
+            <td>
+              <details>
+                <summary>${p.devices.length} device(s)</summary>
+                <ul>${p.devices.map(d => `
+                  <li>
+                    <code>${esc(d.device_id)}</code> @ ${esc(d.version)}
+                    ${d.is_installed ? badge('installed', 'online') : badge('not installed', 'offline')}
+                    ${d.enabled_on_device ? badge('enabled', 'enabled') : ''}
+                    ${d.last_error ? badge(d.last_error, 'error') : ''}
+                  </li>
+                `).join('')}</ul>
+              </details>
+            </td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+  `;
+}
+
+function renderUsers(users) {
+  const el = document.getElementById('panel-users');
+  if (!users.length) {
+    el.innerHTML = '<div class="empty">No users yet.</div>';
+    return;
+  }
+  el.innerHTML = `
+    <table>
+      <thead><tr>
+        <th>User</th><th>Created</th>
+        <th>Plugins enabled</th><th>Plugins total</th><th>Details</th>
+      </tr></thead>
+      <tbody>
+        ${users.map(u => `
+          <tr>
+            <td>
+              <strong>${esc(u.email || u.id)}</strong>
+              ${u.is_admin ? badge('admin', 'admin') : ''}
+              <br><code>${esc(u.id)}</code>
+            </td>
+            <td>${esc(u.created_at || '—')}</td>
+            <td>${u.plugins_enabled}</td>
+            <td>${u.plugins_total}</td>
+            <td>
+              <details>
+                <summary>view</summary>
+                <ul>${u.plugins.map(p => `
+                  <li>
+                    <code>${esc(p.plugin_id)}</code>
+                    ${p.is_enabled ? badge('enabled', 'enabled') : badge('disabled', 'disabled')}
+                    ${Object.keys(p.metadata || {}).length ? `<br><small>${esc(JSON.stringify(p.metadata))}</small>` : ''}
+                  </li>
+                `).join('')}</ul>
+              </details>
+            </td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+  `;
+}
+
+// ============================================================
+// Refresh loop
+// ============================================================
+async function refreshOnce() {
+  const dot = document.getElementById('live-dot');
+  const text = document.getElementById('live-text');
+
+  if (!token) return;
+
+  try {
+    const res = await fetch(API_DATA, {
+      cache: 'no-store',
+      headers: { 'Authorization': `Bearer ${token}` },
+    });
+
+    if (res.status === 401 || res.status === 403) {
+      // Token expired, invalid, or user is no longer admin.
+      doLogout();
+      return;
+    }
+
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+
+    const data = await res.json();
+
+    dot.classList.remove('offline');
+    text.textContent = 'live · ' + new Date().toLocaleTimeString();
+
+    renderCards(data.summary);
+    renderDevices(data.devices);
+    renderPlugins(data.plugins);
+    renderUsers(data.users);
+    document.getElementById('raw-pre').textContent = JSON.stringify(data, null, 2);
+  } catch (e) {
+    dot.classList.add('offline');
+    text.textContent = 'offline · ' + e.message;
+  }
+}
+
+function startRefreshLoop() {
+  stopRefreshLoop();
+  refreshOnce();
+  refreshTimer = setInterval(refreshOnce, REFRESH_MS);
+}
+
+function stopRefreshLoop() {
+  if (refreshTimer) {
+    clearInterval(refreshTimer);
+    refreshTimer = null;
+  }
+}
+
+// ============================================================
+// Boot
+// ============================================================
+async function boot() {
+  if (!token) {
+    showLogin();
+    return;
+  }
+
+  // Verify the cached token is still valid and the user is still admin.
+  try {
+    const r = await fetch(API_ME, {
+      headers: { 'Authorization': `Bearer ${token}` },
+    });
+    if (!r.ok) throw new Error('not authenticated');
+    const me = await r.json();
+    if (!me.is_admin) throw new Error('not admin');
+
+    setAdminEmail(me.email);
+    hideLogin();
+    startRefreshLoop();
+  } catch (_) {
+    doLogout();
+  }
+}
+
+boot();
+</script>
+</body>
+</html>

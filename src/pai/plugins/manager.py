@@ -1,104 +1,158 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar
 
 from loguru import logger
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from pai.plugins.catalog.catalog import PLUGIN_CATALOG
 from pai.plugins.models import PluginInfo
 from pai.plugins.registry import PluginRegistry
+from pai.storage.repositories.plugin import UserPluginRepository
+from pai.storage.repositories.device_plugin import DevicePluginRepository
 
+T = TypeVar("T")
 
 class PluginManager:
-    """
-    Backend-side plugin manager.
-
-    Responsibilities:
-    - Discover and expose the server's plugin catalog
-    - Read plugin metadata
-    - Track per-user enabled/disabled state
-    - Validate plugin/capability existence
-    - Provide plugin metadata to the orchestrator
-    - NOT execute device plugins
-
-    Actual plugin installation and execution happen on the target
-    device through the device connection / WebSocket layer.
-    """
-
     def __init__(
         self,
         registry: Optional[PluginRegistry] = None,
-        user_plugin_repository=None,
+        session_factory: Optional[Callable[[], AsyncSession]] = None,
     ):
         self.registry = registry
-        self.user_plugin_repository = user_plugin_repository
+        self._session_factory = session_factory
 
         self._initialized = False
         self._catalog: Dict[str, PluginInfo] = {}
 
     # ------------------------------------------------------------------
-    # Lifecycle
+    # Internal: open a scoped session, run [fn], commit, close.
+    # ------------------------------------------------------------------
+
+    
+
+    async def _with_session(
+        self,
+        fn: Callable[[AsyncSession], Awaitable[T]],
+    ) -> T:
+        if self._session_factory is None:
+            raise RuntimeError("PluginManager has no session_factory")
+
+        session = self._session_factory()
+        try:
+            result = await fn(session)
+            await session.commit()
+            return result
+        except Exception:
+            await session.rollback()
+            raise
+        finally:
+            await session.close()
+
+    # ------------------------------------------------------------------
+    # Lifecycle (unchanged)
     # ------------------------------------------------------------------
 
     async def initialize(self) -> None:
-        """
-        Initialize the backend plugin catalog.
-
-        The backend does not instantiate or start device plugins.
-        """
-
         if self._initialized:
             return
-
         logger.info("Initializing backend plugin manager")
 
         if self.registry is not None:
             try:
                 await self.registry.discover()
-
                 for manifest in self.registry.get_all_manifests():
-                    plugin_id = getattr(manifest, "id", None)
-
-                    if plugin_id:
-                        self._catalog[plugin_id] = manifest
-
+                    if getattr(manifest, "id", None):
+                        self._catalog[manifest.id] = manifest
             except Exception as exc:
-                logger.warning(
-                    "Plugin registry discovery failed: {}",
-                    exc,
-                )
+                logger.warning("Plugin registry discovery failed: {}", exc)
 
-        # Also load static catalog entries.
         for plugin in PLUGIN_CATALOG:
             self._catalog[plugin.id] = plugin
 
         self._initialized = True
-
         logger.info(
             "Backend plugin manager initialized with {} plugins",
             len(self._catalog),
         )
 
     async def shutdown(self) -> None:
-        """
-        Shutdown the backend plugin manager.
-
-        There are no device plugin instances to stop here.
-        """
-
         self._catalog.clear()
         self._initialized = False
 
-        logger.info("Backend plugin manager shut down")
+    async def set_device_enabled(
+        self,
+        device_id: str,
+        plugin_id: str,
+        enabled: bool,
+    ) -> None:
+        """
+        Flip the `enabled_on_device` flag on a device_plugins row.
+
+        Called by /plugins/{id}/enable and /disable after the user
+        toggles the switch in the app. The user_plugins table
+        records the *authorization*; this table records the
+        *device runtime state* (whether the .so is currently loaded).
+        """
+        async def _do(session: AsyncSession):
+            repo = DevicePluginRepository(session)
+            await repo.set_device_enabled(device_id, plugin_id, enabled)
+
+        await self._with_session(_do)
+        logger.info(
+            "Set device enabled: device={} plugin={} enabled={}",
+            device_id, plugin_id, enabled,
+        )
 
     # ------------------------------------------------------------------
-    # Catalog
+    # Catalog (no DB) — unchanged
     # ------------------------------------------------------------------
 
     def get_catalog(self) -> List[PluginInfo]:
-        """Return all known plugin definitions."""
-
         return list(self._catalog.values())
+
+    async def get_plugin(self, plugin_id: str) -> Optional[PluginInfo]:
+        if not self._initialized:
+            await self.initialize()
+        return self._catalog.get(plugin_id)
+
+    async def require_plugin(self, plugin_id: str) -> PluginInfo:
+        plugin = await self.get_plugin(plugin_id)
+        if plugin is None:
+            raise ValueError(f"Plugin '{plugin_id}' not found")
+        return plugin
+
+    async def get_compatible_plugins(
+        self, platform: str, architecture: str,
+    ) -> List[PluginInfo]:
+        if not self._initialized:
+            await self.initialize()
+        return [
+            p for p in self._catalog.values()
+            if platform in p.platforms and architecture in p.architectures
+        ]
+
+    async def is_compatible(
+        self, plugin_id: str, platform: str, architecture: str,
+    ) -> bool:
+        plugin = await self.get_plugin(plugin_id)
+        if plugin is None:
+            return False
+        return platform in plugin.platforms and architecture in plugin.architectures
+
+    async def get_plugin_for_capability(
+        self, capability: str,
+    ) -> Optional[PluginInfo]:
+        if not self._initialized:
+            await self.initialize()
+        for p in self._catalog.values():
+            if capability in p.capabilities:
+                return p
+        return None
+
+    # ------------------------------------------------------------------
+    # User plugin state — each method opens a session
+    # ------------------------------------------------------------------
 
     async def list_plugins(
         self,
@@ -106,419 +160,154 @@ class PluginManager:
         platform: Optional[str] = None,
         architecture: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """
-        Return plugin metadata together with per-user state.
-
-        Example:
-
-        [
-            {
-                "id": "camera",
-                "name": "Camera",
-                "version": "1.0.0",
-                "is_enabled": True,
-                ...
-            }
-        ]
-        """
-
         plugins = self.get_catalog()
 
         if platform:
-            plugins = [
-                plugin
-                for plugin in plugins
-                if platform in plugin.platforms
-            ]
-
+            plugins = [p for p in plugins if platform in p.platforms]
         if architecture:
-            plugins = [
-                plugin
-                for plugin in plugins
-                if architecture in plugin.architectures
-            ]
+            plugins = [p for p in plugins if architecture in p.architectures]
 
-        result = []
+        if not user_id or self._session_factory is None:
+            return [self._serialize_plugin(p) for p in plugins]
 
-        for plugin in plugins:
-            is_enabled = False
+        async def _load(session: AsyncSession):
+            repo = UserPluginRepository(session)
+            records = await repo.list_for_user(user_id)
+            return {r.plugin_id: r.is_enabled for r in records}
 
-            if user_id and self.user_plugin_repository:
-                try:
-                    is_enabled = await self.user_plugin_repository.is_enabled(
-                        user_id=user_id,
-                        plugin_id=plugin.id,
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "Failed to read state for plugin {}: {}",
-                        plugin.id,
-                        exc,
-                    )
-
-            result.append(
-                self._serialize_plugin(
-                    plugin,
-                    is_enabled=is_enabled,
-                )
-            )
-
-        return result
-
-    async def get_plugin(
-        self,
-        plugin_id: str,
-    ) -> Optional[PluginInfo]:
-        """Return plugin metadata by ID."""
-
-        if not self._initialized:
-            await self.initialize()
-
-        return self._catalog.get(plugin_id)
-
-    async def require_plugin(
-        self,
-        plugin_id: str,
-    ) -> PluginInfo:
-        """Return a plugin or raise ValueError."""
-
-        plugin = await self.get_plugin(plugin_id)
-
-        if plugin is None:
-            raise ValueError(
-                f"Plugin '{plugin_id}' not found"
-            )
-
-        return plugin
-
-    # ------------------------------------------------------------------
-    # Platform filtering
-    # ------------------------------------------------------------------
-
-    async def get_compatible_plugins(
-        self,
-        platform: str,
-        architecture: str,
-    ) -> List[PluginInfo]:
-        """
-        Return plugins compatible with a device platform
-        and architecture.
-        """
-
-        if not self._initialized:
-            await self.initialize()
+        enabled_map = await self._with_session(_load)
 
         return [
-            plugin
-            for plugin in self._catalog.values()
-            if platform in plugin.platforms
-            and architecture in plugin.architectures
+            self._serialize_plugin(
+                p,
+                is_enabled=enabled_map.get(p.id, False),
+            )
+            for p in plugins
         ]
 
-    async def is_compatible(
-        self,
-        plugin_id: str,
-        platform: str,
-        architecture: str,
-    ) -> bool:
-        """Check whether a plugin supports a target device."""
-
-        plugin = await self.get_plugin(plugin_id)
-
-        if plugin is None:
-            return False
-
-        return (
-            platform in plugin.platforms
-            and architecture in plugin.architectures
-        )
-
-    # ------------------------------------------------------------------
-    # Capability handling
-    # ------------------------------------------------------------------
-
-    async def supports_capability(
-        self,
-        plugin_id: str,
-        capability: str,
-    ) -> bool:
-        """
-        Check whether a plugin provides a capability.
-
-        Example:
-            browser -> browser.open
-        """
-
-        plugin = await self.get_plugin(plugin_id)
-
-        if plugin is None:
-            return False
-
-        return capability in plugin.capabilities
-
-    async def get_plugin_for_capability(
-        self,
-        capability: str,
-    ) -> Optional[PluginInfo]:
-        """
-        Find the first plugin providing a capability.
-
-        The orchestrator can use this during capability resolution.
-        """
-
-        if not self._initialized:
-            await self.initialize()
-
-        for plugin in self._catalog.values():
-            if capability in plugin.capabilities:
-                return plugin
-
-        return None
-
-    async def validate_capability(
-        self,
-        plugin_id: str,
-        capability: str,
-    ) -> None:
-        """Validate that a plugin provides a capability."""
-
-        plugin = await self.require_plugin(plugin_id)
-
-        if capability not in plugin.capabilities:
-            raise ValueError(
-                f"Plugin '{plugin_id}' does not support "
-                f"capability '{capability}'"
-            )
-
-    # ------------------------------------------------------------------
-    # User plugin state
-    # ------------------------------------------------------------------
-
-    async def is_enabled(
-        self,
-        user_id: str,
-        plugin_id: str,
-    ) -> bool:
-        """
-        Return whether the user has enabled a plugin.
-        """
-
-        if self.user_plugin_repository is None:
-            return False
-
+    async def enable(self, user_id: str, plugin_id: str) -> None:
         await self.require_plugin(plugin_id)
 
-        return await self.user_plugin_repository.is_enabled(
-            user_id=user_id,
-            plugin_id=plugin_id,
-        )
+        async def _do(session: AsyncSession):
+            repo = UserPluginRepository(session)
+            await repo.set_enabled(user_id, plugin_id, True)
 
-    async def enable(
-        self,
-        user_id: str,
-        plugin_id: str,
-    ) -> Any:
-        """
-        Enable a plugin for a user.
+        await self._with_session(_do)
+        logger.info("Plugin '{}' enabled for user '{}'", plugin_id, user_id)
 
-        This only changes backend authorization state.
-        It does not install the plugin on a device.
-        """
-
+    async def disable(self, user_id: str, plugin_id: str) -> None:
         await self.require_plugin(plugin_id)
 
-        if self.user_plugin_repository is None:
-            raise RuntimeError(
-                "UserPluginRepository is not configured"
-            )
+        async def _do(session: AsyncSession):
+            repo = UserPluginRepository(session)
+            await repo.set_enabled(user_id, plugin_id, False)
 
-        record = await self.user_plugin_repository.set_enabled(
-            user_id=user_id,
-            plugin_id=plugin_id,
-            enabled=True,
-        )
-
-        logger.info(
-            "Plugin '{}' enabled for user '{}'",
-            plugin_id,
-            user_id,
-        )
-
-        return record
-
-    async def disable(
-        self,
-        user_id: str,
-        plugin_id: str,
-    ) -> Any:
-        """
-        Disable a plugin for a user.
-
-        This prevents authorization for future executions.
-        It does not uninstall the device plugin.
-        """
-
-        await self.require_plugin(plugin_id)
-
-        if self.user_plugin_repository is None:
-            raise RuntimeError(
-                "UserPluginRepository is not configured"
-            )
-
-        record = await self.user_plugin_repository.set_enabled(
-            user_id=user_id,
-            plugin_id=plugin_id,
-            enabled=False,
-        )
-
-        logger.info(
-            "Plugin '{}' disabled for user '{}'",
-            plugin_id,
-            user_id,
-        )
-
-        return record
-
-    async def get_user_plugins(
-        self,
-        user_id: str,
-    ) -> List[Dict[str, Any]]:
-        """
-        Return all plugin states for a user.
-        """
-
-        if self.user_plugin_repository is None:
-            return []
-
-        records = await self.user_plugin_repository.list_for_user(
-            user_id=user_id,
-        )
-
-        result = []
-
-        for record in records:
-            plugin = await self.get_plugin(record.plugin_id)
-
-            result.append(
-                {
-                    "plugin_id": record.plugin_id,
-                    "plugin_name": (
-                        plugin.name
-                        if plugin is not None
-                        else record.plugin_id
-                    ),
-                    "is_enabled": record.is_enabled,
-                    "metadata": getattr(
-                        record,
-                        "metadata",
-                        {},
-                    ) or {},
-                }
-            )
-
-        return result
-
-    async def get_enabled_plugins(
-        self,
-        user_id: str,
-    ) -> List[PluginInfo]:
-        """
-        Return the actual plugin definitions enabled by a user.
-        """
-
-        if self.user_plugin_repository is None:
-            return []
-
-        records = await self.user_plugin_repository.list_enabled(
-            user_id=user_id,
-        )
-
-        plugins = []
-
-        for record in records:
-            plugin = await self.get_plugin(record.plugin_id)
-
-            if plugin is not None:
-                plugins.append(plugin)
-
-        return plugins
-
-    async def set_user_plugin_config(
-        self,
-        user_id: str,
-        plugin_id: str,
-        metadata: Dict[str, Any],
-    ) -> Any:
-        """
-        Store user-specific plugin configuration.
-
-        Requires the repository to support metadata persistence.
-        """
-
-        await self.require_plugin(plugin_id)
-
-        if self.user_plugin_repository is None:
-            raise RuntimeError(
-                "UserPluginRepository is not configured"
-            )
-
-        record = await self.user_plugin_repository.get(
-            user_id=user_id,
-            plugin_id=plugin_id,
-        )
-
-        if record is None:
-            record = await self.user_plugin_repository.set_enabled(
-                user_id=user_id,
-                plugin_id=plugin_id,
-                enabled=False,
-            )
-
-        if hasattr(record, "metadata"):
-            record.metadata = metadata
-            await self.user_plugin_repository.session.flush()
-
-        return record
+        await self._with_session(_do)
+        logger.info("Plugin '{}' disabled for user '{}'", plugin_id, user_id)
 
     async def get_user_plugin_config(
-        self,
-        user_id: str,
-        plugin_id: str,
+        self, user_id: str, plugin_id: str,
     ) -> Dict[str, Any]:
-        """Return user-specific plugin configuration."""
+        await self.require_plugin(plugin_id)
+        if self._session_factory is None:
+            return {}
 
+        async def _do(session: AsyncSession):
+            repo = UserPluginRepository(session)
+            return await repo.get_config(user_id, plugin_id)
+
+        return await self._with_session(_do)
+
+    async def set_user_plugin_config(
+        self, user_id: str, plugin_id: str, metadata: Dict[str, Any],
+    ) -> None:
         await self.require_plugin(plugin_id)
 
-        if self.user_plugin_repository is None:
-            return {}
+        async def _do(session: AsyncSession):
+            repo = UserPluginRepository(session)
+            await repo.set_config(user_id, plugin_id, metadata)
 
-        record = await self.user_plugin_repository.get(
-            user_id=user_id,
-            plugin_id=plugin_id,
-        )
-
-        if record is None:
-            return {}
-
-        return getattr(record, "metadata", {}) or {}
+        await self._with_session(_do)
 
     # ------------------------------------------------------------------
-    # Device operation metadata
+    # Device plugin state — same pattern
+    # ------------------------------------------------------------------
+
+    async def mark_installed_on_device(
+        self,
+        device_id: str,
+        plugin_id: str,
+        version: str,
+        artifact_sha256: str | None = None,
+    ) -> None:
+        async def _do(session: AsyncSession):
+            repo = DevicePluginRepository(session)
+            await repo.mark_installed(
+                device_id, plugin_id, version, artifact_sha256,
+            )
+
+        await self._with_session(_do)
+        logger.info(
+            "Marked {}@{} installed on device {}",
+            plugin_id, version, device_id,
+        )
+
+    async def mark_uninstalled_on_device(
+        self, device_id: str, plugin_id: str,
+    ) -> None:
+        async def _do(session: AsyncSession):
+            repo = DevicePluginRepository(session)
+            await repo.mark_uninstalled(device_id, plugin_id)
+
+        await self._with_session(_do)
+
+    async def record_device_error(
+        self, device_id: str, plugin_id: str, error: str,
+    ) -> None:
+        async def _do(session: AsyncSession):
+            repo = DevicePluginRepository(session)
+            await repo.record_error(device_id, plugin_id, error)
+
+        await self._with_session(_do)
+
+    async def reconcile_device_plugins(
+        self, device_id: str, device_plugins: list[dict],
+    ) -> dict:
+        async def _do(session: AsyncSession):
+            repo = DevicePluginRepository(session)
+            return await repo.reconcile(device_id, device_plugins)
+
+        return await self._with_session(_do)
+
+    async def list_device_plugins(self, device_id: str) -> list[dict]:
+        if self._session_factory is None:
+            return []
+
+        async def _do(session: AsyncSession):
+            repo = DevicePluginRepository(session)
+            return await repo.list_for_device(device_id)
+
+        records = await self._with_session(_do)
+        return [
+            {
+                "plugin_id": r.plugin_id,
+                "version": r.version,
+                "is_installed": r.is_installed,
+                "enabled_on_device": r.enabled_on_device,
+                "installed_at": r.installed_at.isoformat() if r.installed_at else None,
+                "last_error": r.last_error,
+            }
+            for r in records
+        ]
+
+    # ------------------------------------------------------------------
+    # Install request builder (no DB)
     # ------------------------------------------------------------------
 
     async def build_install_request(
-        self,
-        plugin_id: str,
-        device_id: str,
+        self, plugin_id: str, device_id: str,
     ) -> Dict[str, Any]:
-        """
-        Build the command that the backend sends to a device.
-
-        This method DOES NOT install anything.
-        """
-
         plugin = await self.require_plugin(plugin_id)
-
         return {
             "type": "plugin.install",
             "request_id": f"install:{plugin_id}:{device_id}",
@@ -530,38 +319,7 @@ class PluginManager:
                 "platforms": plugin.platforms,
                 "architectures": plugin.architectures,
                 "capabilities": plugin.capabilities,
-                "package_url": getattr(
-                    plugin,
-                    "package_url",
-                    None,
-                ),
-                "checksum": getattr(
-                    plugin,
-                    "checksum",
-                    None,
-                ),
-                "size": getattr(
-                    plugin,
-                    "size",
-                    0,
-                ),
             },
-        }
-
-    async def build_uninstall_request(
-        self,
-        plugin_id: str,
-        device_id: str,
-    ) -> Dict[str, Any]:
-        """Build a device uninstall command."""
-
-        await self.require_plugin(plugin_id)
-
-        return {
-            "type": "plugin.uninstall",
-            "request_id": f"uninstall:{plugin_id}:{device_id}",
-            "device_id": device_id,
-            "plugin_id": plugin_id,
         }
 
     # ------------------------------------------------------------------
@@ -570,13 +328,8 @@ class PluginManager:
 
     @staticmethod
     def _serialize_plugin(
-        plugin: PluginInfo,
-        is_enabled: bool = False,
+        plugin: PluginInfo, is_enabled: bool = False,
     ) -> Dict[str, Any]:
-        """
-        Convert PluginInfo into a JSON-friendly dictionary.
-        """
-
         return {
             "id": plugin.id,
             "name": plugin.name,
@@ -584,31 +337,13 @@ class PluginManager:
             "platforms": list(plugin.platforms),
             "architectures": list(plugin.architectures),
             "capabilities": list(plugin.capabilities),
-            "package_url": getattr(
-                plugin,
-                "package_url",
-                None,
-            ),
-            "checksum": getattr(
-                plugin,
-                "checksum",
-                None,
-            ),
-            "size": getattr(
-                plugin,
-                "size",
-                0,
-            ),
+            "package_url": getattr(plugin, "package_url", None),
+            "checksum": getattr(plugin, "checksum", None),
+            "size": getattr(plugin, "size", 0),
             "is_enabled": is_enabled,
         }
 
-    # ------------------------------------------------------------------
-    # Status
-    # ------------------------------------------------------------------
-
     def get_status(self) -> Dict[str, Any]:
-        """Return backend plugin manager status."""
-
         return {
             "initialized": self._initialized,
             "plugin_count": len(self._catalog),

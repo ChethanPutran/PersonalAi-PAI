@@ -65,6 +65,7 @@ class PluginRegistry:
 
             manifest_path = plugin_dir / "manifest.json"
 
+
             if not manifest_path.exists():
                 logger.warning(
                     f"Skipping '{plugin_dir.name}': "
@@ -74,6 +75,14 @@ class PluginRegistry:
 
             try:
                 manifest = self._load_manifest(manifest_path)
+
+                if manifest.runtime.kind != "server":
+                    logger.debug(
+                        "Skipping '%s' in server plugin dir: kind=%s",
+                        manifest.id, manifest.runtime.kind,
+                    )
+                    continue
+
                 plugin_class = self._load_plugin_class(
                     plugin_dir,
                     manifest,

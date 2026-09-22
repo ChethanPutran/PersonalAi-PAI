@@ -1,11 +1,11 @@
 {
-  "id": "planner",
+ "id": "planner",
   "name": "Planner Plugin",
   "version": "1.0.0",
   "type": "action",
   "description": "Goal planning and daily schedule optimization",
-
   "runtime": {
+    "kind": "server",
     "entry_point": "planner_plugin.py",
     "class": "PlannerPlugin"
   },

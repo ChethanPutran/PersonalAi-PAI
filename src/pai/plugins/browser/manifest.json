@@ -4,8 +4,8 @@
   "version": "1.0.0",
   "type": "action",
   "description": "Web browser automation using Playwright",
-
   "runtime": {
+    "kind": "server",
     "entry_point": "browser_plugin.py",
     "class": "BrowserPlugin"
   },
