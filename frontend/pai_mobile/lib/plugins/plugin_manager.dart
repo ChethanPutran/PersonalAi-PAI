@@ -14,6 +14,10 @@ class PluginManager extends ChangeNotifier {
   final Map<String, PluginInfo> _plugins = {};
   bool _loading = false;
 
+  /// Per-plugin capability config cache.
+  /// Shape: { pluginId: { capabilityId: { 'enabled': bool, 'params': {...} } } }
+  final Map<String, Map<String, Map<String, dynamic>>> _capConfigCache = {};
+
   PluginManager({
     required this.service,
     required this.api,
@@ -129,23 +133,41 @@ class PluginManager extends ChangeNotifier {
     }
   }
 
-  Future<void> uninstall(String pluginId) async {
-    try {
-      await service.uninstall(pluginId);
 
-      try {
-        await api.post(
-          '/plugins/$pluginId/report-uninstall',
-          {'device_id': deviceId, 'success': true},
-        );
-      } catch (e) {
-        debugPrint('[PluginManager] report-uninstall failed: $e');
-      }
-    } finally {
-      _plugins.remove(pluginId);
-      notifyListeners();
+  Future<void> uninstall(String pluginId) async {
+  final plugin = _plugins[pluginId];   // capture before we touch state
+
+  try {
+    // 1. Local: remove files from disk, drop from installed.json
+    await service.uninstall(pluginId);
+
+    // 2. Remote: report (best-effort)
+    try {
+      await api.post(
+        '/plugins/$pluginId/report-uninstall',
+        {'device_id': deviceId, 'success': true},
+      );
+    } catch (e) {
+      debugPrint('[PluginManager] report-uninstall failed: $e');
     }
+
+    // 3. Keep the catalog entry, just flip the state back
+    if (plugin != null) {
+      plugin.state = PluginState.available;
+      plugin.error = null;
+    }
+    debugPrint('[PluginManager] uninstall($pluginId) → available');
+  } catch (e) {
+    if (plugin != null) {
+      plugin.state = PluginState.error;
+      plugin.error = e.toString();
+    }
+    debugPrint('[PluginManager] uninstall($pluginId) failed: $e');
+    rethrow;
+  } finally {
+    notifyListeners();
   }
+}
 
   // ---------------------------------------------------------------
   // Enable / disable
@@ -237,6 +259,66 @@ class PluginManager extends ChangeNotifier {
     }
   }
 
+
+  // ───────────────────────────────────────────────────────────────
+  // Capability configuration
+  // ───────────────────────────────────────────────────────────────
+
+  /// Fetch the merged config for [pluginId] from the backend.
+  /// The backend stores it in `plugin_metadata["capabilities"]`.
+  Future<Map<String, Map<String, dynamic>>> loadCapabilityConfig(String pluginId) async {
+    if (_capConfigCache.containsKey(pluginId)) {
+      return _capConfigCache[pluginId]!;
+    }
+    try {
+      final res = await api.get('/plugins/$pluginId/config');
+      final cfg = res['config'];
+      final caps = <String, Map<String, dynamic>>{};
+      if (cfg is Map && cfg['capabilities'] is Map) {
+        (cfg['capabilities'] as Map).forEach((k, v) {
+          if (v is Map) {
+            caps[k.toString()] = Map<String, dynamic>.from(v);
+          }
+        });
+      }
+      _capConfigCache[pluginId] = caps;
+      return caps;
+    } catch (e) {
+      debugPrint('[PluginManager] loadCapabilityConfig($pluginId) failed: $e');
+      _capConfigCache[pluginId] = {};
+      return {};
+    }
+  }
+
+  /// Persist capability config for [pluginId].
+  Future<void> saveCapabilityConfig(
+    String pluginId,
+    Map<String, Map<String, dynamic>> caps,
+  ) async {
+    // Merge into the full plugin config (other keys may already exist).
+    final existing = await _loadRawConfig(pluginId);
+    final merged = {
+      ...existing,
+      'capabilities': caps,
+    };
+    await api.post(
+      '/plugins/$pluginId/config',
+      {'config': merged},
+    );
+    _capConfigCache[pluginId] = caps;
+    debugPrint('[PluginManager] saved capability config for $pluginId');
+  }
+
+  Future<Map<String, dynamic>> _loadRawConfig(String pluginId) async {
+    try {
+      final res = await api.get('/plugins/$pluginId/config');
+      final cfg = res['config'];
+      return cfg is Map ? Map<String, dynamic>.from(cfg) : {};
+    } catch (_) {
+      return {};
+    }
+  }
+
   // ---------------------------------------------------------------
   // Command-result hooks (called by PaiApp)
   // ---------------------------------------------------------------
@@ -300,4 +382,7 @@ class PluginManager extends ChangeNotifier {
     if (p == null) throw StateError('Plugin not found: $pluginId');
     return p;
   }
+
+
+
 }

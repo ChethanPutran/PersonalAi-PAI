@@ -154,6 +154,16 @@ class PluginRuntime {
     }
   }
 
+  Future<Map<String, dynamic>> debugRegistry() async {
+  try {
+    final r = await _channel.invokeMethod<Map<dynamic, dynamic>>('debugRegistry');
+    return (r ?? const {}).cast<String, dynamic>();
+  } catch (e) {
+    debugPrint('$_tag debugRegistry error: $e');
+    return {};
+  }
+}
+
   // ---------------------------------------------------------------
   // Permissions
   // ---------------------------------------------------------------

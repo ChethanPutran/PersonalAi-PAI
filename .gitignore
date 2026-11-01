@@ -8,3 +8,47 @@ src/ai_personal_agent.egg-info/*
 .vscode/*
 .github/*
 __pycache__
+
+
+# ─── CMake / C++ build output ──────────────────────────────────────────
+# Any build directory created by cmake
+build/
+**/build/
+cmake-build-*/
+
+# CMake generated files (wherever they appear)
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.cmake
+!CMakeLists.txt
+
+# Compiled objects
+*.o
+*.o.d
+*.obj
+*.a
+*.lib
+*.lo
+*.la
+*.dSYM/
+*.so.dSYM/
+
+# ─── Python ────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ─── Flutter / Dart (for the mobile app) ───────────────────────────────
+.dart_tool/
+.packages
+build/
+*.iml
+.flutter-plugins
+.flutter-plugins-dependencies

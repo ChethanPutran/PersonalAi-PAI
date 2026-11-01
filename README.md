@@ -380,101 +380,100 @@ A request such as:
 
 can be processed as:
 
-```text
-User Goal
-    ↓
-Planner
-    ↓
-Task
-    ↓
-Capability Resolution
-    ↓
-Authorization
-    ↓
-Device Selection
-    ↓
-Desktop Executor
-    ↓
-Browser Action
-    ↓
-Result
+```
+docker run -d \
+    --name neo4j \
+    --publish 7474:7474 \
+    --publish 7687:7687 \
+    --volume=$HOME/neo4j/data:/data \
+    neo4j:latest
 ```
 
-The phone does not need to perform the action itself; it can act as the interface through which the distributed PAI runtime coordinates execution.
+## `.env.example` – Environment template
 
----
+```ini
+# PAI Environment
+PAI_ENV=development
+PAI_DEBUG=true
+PAI_HOST=0.0.0.0
+PAI_PORT=8000
 
-## Design Principles
+# Databases
+DATABASE_URL=sqlite+aiosqlite:///./data/pai.db
+REDIS_HOST=localhost
+REDIS_PORT=6379
+NATS_SERVERS=nats://localhost:4222
 
-### Separation of Planning and Execution
+# LLM Provider (openai or local)
+LLM_PROVIDER=openai
+LLM_MODEL=gpt-4
+OPENAI_API_KEY=your_openai_key_here
 
-```text
-Planner → What should happen?
-
-Executor → How should it happen?
+# External APIs
+GOOGLE_MAPS_API_KEY=your_google_maps_key
+UBER_API_KEY=your_uber_api_key
+GOOGLE_CALENDAR_CREDENTIALS=path/to/credentials.json
 ```
 
-### Capability-Based Design
-
-Tasks depend on capabilities rather than hard-coded implementations.
-
-### Device Independence
-
-Requests and execution targets are treated as separate concepts.
-
-### Explicit Authorization
-
-Actions must pass authorization before execution.
-
-### Modular Architecture
-
-Planning, memory, plugins, devices, executors, agents, storage, and APIs are designed as separate subsystems.
-
 ---
+flutter run -d linux --verbose --target lib/main.dart
 
-## Development Status
+## Final Steps
 
-PAI is an **actively developed engineering project**.
+1. Create the `.env` file from the example.
+2. Run `python scripts/setup_db.py` to initialize databases.
+3. Execute `./scripts/run_tests.sh` to verify everything works.
+4. Start the system with `python -m pai.main` or `docker-compose up`.
 
-The current implementation includes the core architecture for:
+The Personal AI System is now fully operational, with all components, tests, and documentation ready.
 
-* task orchestration
-* planning and task graphs
-* task lifecycle management
-* capability resolution
-* device and executor management
-* authorization
-* plugins
-* memory
-* event-driven communication
-* REST/WebSocket APIs
-* Flutter client integration
+# RUn backend
+source .env && PYTHONPATH=src uvicorn pai.main:app --reload --host 0.0.0.0 --port 8000
 
-The project is continuing toward more robust multi-device execution, richer plugins, improved memory, observability, and stronger end-to-end integration.
+# RUn frontend
+cd frontend/ui/apps/pai_mobile && flutter pub get && flutter run -d <device-id>
 
----
+Backend                       Dart (host)                  Native (host)              Plugin .so
+   │                             │                             │                        │
+   │── catalog (REST) ──────────▶│                             │                        │
+   │                             │                             │                        │
+   │                             │── index.json (REST) ──▶ Registry                     │
+   │                             │◀── manifest + artifact ── Registry                    │
+   │                             │                             │                        │
+   │                             │  write to disk, verify SHA  │                        │
+   │                             │                             │                        │
+   │── plugin.install (WS) ─────▶│                             │                        │
+   │                             │── loadNativeModule (MC) ──▶ dlopen ────────────────▶ │
+   │                             │◀── ok ───────────────────── │                        │
+   │◀── result (WS) ─────────────│                             │                        │
+   │                             │                             │                        │
+   │── capability.invoke (WS) ──▶│                             │                        │
+   │                             │── invoke (MC) ────────────▶ module->invoke ────────▶ │
+   │                             │◀── map ─────────────────── │                        │
+   │◀── result (WS) ─────────────│                             │                        │
 
-## Roadmap
+### Install the command-line tools
+   mkdir -p ~/Android/Sdk/cmdline-tools
+cd ~/Android/Sdk/cmdline-tools
 
-* Advanced planning and replanning
-* More device executors
-* Expanded plugin ecosystem
-* Improved permission management
-* Better memory consolidation and retrieval
-* Distributed execution and observability
-* Improved mobile experience
-* Deployment and infrastructure automation
+# Latest Linux command-line tools (adjust URL if a newer one exists)
+wget https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+unzip commandlinetools-linux-11076708_latest.zip
+mv cmdline-tools latest
 
----
 
-## License
+# Set environment variables
+export ANDROID_HOME="$HOME/Android/Sdk"
+export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
 
-MIT License
 
-## Author
+# Install the NDK
+sdkmanager --install "ndk;26.1.10909125"
 
-**Chethan Putran**
 
-PAI is an ongoing exploration of:
+# Verify
+ls ~/Android/Sdk/ndk
+# should print: 26.1.10909125
 
-**AI Agents · Distributed Systems · Task Orchestration · Device Automation · Plugin Architectures · Memory Systems · AI Infrastructure**
+ls ~/Android/Sdk/ndk/26.1.10909125/build/cmake/android.toolchain.cmake
+# should print the path

@@ -257,7 +257,7 @@ async def get_catalog(
             "description": manifest.get("description", ""),
             "platforms": list(vinfo["artifacts"].keys()),
             "architectures": [architecture],
-            "capabilities": [c["id"] for c in manifest.get("capabilities", [])],
+            "capabilities": manifest.get("capabilities", []),
             "package_url": vinfo["artifacts"][platform],
             "checksum": vinfo["sha256"][platform],
             "size": vinfo["sizeBytes"][platform],

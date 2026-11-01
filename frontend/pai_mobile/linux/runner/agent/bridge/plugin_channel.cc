@@ -104,19 +104,33 @@ void MethodCallHandler(FlMethodChannel* /*channel*/,
   }
 
   if (std::strcmp(method, "loadNativeModule") == 0) {
-    std::string path;
+    std::string path,name;
     if (args && fl_value_get_type(args) == FL_VALUE_TYPE_MAP) {
+      name = GetStr(fl_value_lookup_string(args, "nativeModule"));
       path = GetStr(fl_value_lookup_string(args, "artifactPath"));
+    }
+
+    if (name.empty() || path.empty()) {
+    ReplyError(call, "INVALID_ARGS",
+                "nativeModule and artifactPath are required");
+    return;
     }
     try {
       auto mod = DynamicLoader::Load(path);
-      self->registry.Register(mod);
+
+      // Register under the Flutter-provided key
+      self->registry.Register(name, std::move(mod));
       ReplyBool(call, true);
     } catch (const std::exception& e) {
       ReplyError(call, "LOAD_FAILED", e.what());
     }
     return;
   }
+
+  if (std::strcmp(method, "debugRegistry") == 0) {
+    ReplyMap(call, self->registry.DebugKeys());
+    return;
+}
 
   if (std::strcmp(method, "unloadNativeModule") == 0) {
     std::string name;

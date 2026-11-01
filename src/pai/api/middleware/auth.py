@@ -66,6 +66,7 @@ def _is_public_registry_path(path: str) -> bool:
 class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         path = request.url.path.rstrip("/") or "/"
+        print(f"AuthMiddleware: path={path}, method={request.method}")
 
         # 1. CORS preflight and exact public paths.
         if request.method == "OPTIONS" or path in _PUBLIC_PATHS:

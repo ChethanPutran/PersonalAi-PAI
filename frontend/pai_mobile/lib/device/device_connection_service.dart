@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 
@@ -231,6 +232,15 @@ class DeviceConnectionService {
           await _handleHeartbeat(message);
           break;
 
+        case 'connected':
+          // backend handshake confirmation
+          debugPrint('[DeviceConnection] Backend handshake: $message');
+          break;
+
+        case 'heartbeat_ack':
+          debugPrint('[DeviceConnection] Heartbeat ack: $message');
+          break;
+
         default:
           print('[DeviceConnection] Unknown message type: $type');
           if (_messageHandler != null) {
@@ -258,6 +268,7 @@ class DeviceConnectionService {
       'timestamp': DateTime.now().toUtc().toIso8601String(),
     });
   }
+
 
   Future<void> _handleCommand(Map<String, dynamic> message) async {
     if (_messageHandler != null) {
