@@ -14,9 +14,9 @@ from pai.security.policies import (
     RiskLevel,
 )
 from pai.storage.repositories.plugin import UserPluginRepository
+from pai.common.manager import Manager
 
-
-class SecurityManager:
+class SecurityManager(Manager):
     """
     Central authorization facade.
 
@@ -24,26 +24,26 @@ class SecurityManager:
     the DB opens a short-lived session, builds a fresh repository from
     it, queries, and closes.
     """
+    name = "security_manager"
 
     def __init__(
         self,
         *,
-        session_factory: Callable[[], AsyncSession],
-        policy_engine: PolicyEngine | None = None,
-        audit_logger: AuditLogger | None = None,
+        session_factory: Callable[[], AsyncSession]
     ) -> None:
-        # NOTE: user_plugin_repository is no longer injected — it is
-        # built per-operation from a fresh session.
-        self._session_factory = session_factory
-        self.policy_engine = policy_engine or PolicyEngine()
-        self.audit_logger = audit_logger or AuditLogger()
+        super().__init__(session_factory=session_factory)
+        self.policy_engine = PolicyEngine()
+        self.audit_logger = AuditLogger()
 
     # ------------------------------------------------------------------
     # Authorization
     # ------------------------------------------------------------------
 
     async def is_authorized(self, user_id: str, plugin_id: str) -> bool:
-        session = self._session_factory()
+        """Check if a user has enabled a plugin."""
+        session = self.get_session()
+        if session is None:
+            raise RuntimeError("No session manager available for DB access.")
         try:
             repo = UserPluginRepository(session)
             return await repo.is_enabled(user_id, plugin_id)
@@ -67,7 +67,9 @@ class SecurityManager:
         """
 
         # 1. Check user plugin state — in its own session.
-        session = self._session_factory()
+        session = self.get_session()
+        if session is None:
+            raise RuntimeError("No session manager available for DB access.")
         try:
             repo = UserPluginRepository(session)
             plugin_enabled = await repo.is_enabled(user_id, plugin_id)
