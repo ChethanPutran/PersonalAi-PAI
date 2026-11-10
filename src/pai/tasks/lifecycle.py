@@ -37,7 +37,14 @@ class TaskLifecycle:
             TaskStatus.COMPLETED,
             TaskStatus.FAILED,
             TaskStatus.CANCELLED,
+            TaskStatus.PAUSED,
         },
+        TaskStatus.PAUSED: {           
+        TaskStatus.RUNNING,        
+        TaskStatus.COMPLETED,       
+        TaskStatus.FAILED,         
+        TaskStatus.CANCELLED,      
+    },
         TaskStatus.FAILED: {
             TaskStatus.RETRYING,
             TaskStatus.CANCELLED,
@@ -95,6 +102,8 @@ class TaskLifecycle:
                 error or "Task execution failed",
                 result,
             )
+        elif target == TaskStatus.PAUSED:             
+            task.mark_paused()
 
         elif target == TaskStatus.CANCELLED:
             task.mark_cancelled(error)
@@ -219,10 +228,4 @@ class TaskLifecycle:
 
     @classmethod
     def pause(cls, task: Task) -> Task:
-        if task.status != TaskStatus.RUNNING:
-            raise InvalidTaskTransition(
-                f"Task {task.id} cannot be paused from state {task.status.value}"
-            )
-
-        task.mark_paused()
-        return task
+        return cls.transition(task, TaskStatus.PAUSED)

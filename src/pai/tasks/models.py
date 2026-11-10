@@ -11,6 +11,16 @@ from pydantic import BaseModel, Field, ConfigDict
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
+def _json_safe(value):
+    """Recursively convert datetimes (and other non-JSON types) to strings."""
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    return value
+
 
 class TaskStatus(str, Enum):
     CREATED = "created"
@@ -61,6 +71,21 @@ class TaskResult(BaseModel):
 
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
+    def to_dict(self) -> Dict[str, Any]:
+        def _iso(dt):
+            return dt.isoformat() if isinstance(dt, datetime) else dt
+
+        return {
+            "success": self.success,
+            "output": _json_safe(self.output),
+            "metadata": _json_safe(self.metadata),
+            "error": self.error,
+            "executor_id": self.executor_id,
+            "device_id": self.device_id,
+            "started_at": _iso(self.started_at),
+            "completed_at": _iso(self.completed_at)
+        }
+
 
 class Task(BaseModel):
     """
@@ -100,6 +125,7 @@ class Task(BaseModel):
     parameters: Dict[str, Any] = Field(default_factory=dict)
 
     # Execution routing
+    plugin: Optional[str] = None
     capability: Optional[str] = None
     device_id: Optional[str] = None
     executor_id: Optional[str] = None
@@ -237,3 +263,41 @@ class Task(BaseModel):
         self.result = None
         self.started_at = None
         self.completed_at = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        def _iso(dt):
+            return dt.isoformat() if isinstance(dt, datetime) else dt
+
+        def _enum(v):
+            return v.value if isinstance(v, Enum) else v
+
+        return {
+            "id": self.id,
+            "title": self.title,
+            "user_id": self.user_id,
+            "session_id": self.session_id,
+            "source": _enum(self.source),
+            "input": self.input,
+            "type": self.type,
+            "action": self.action,
+            "parameters": _json_safe(self.parameters),
+            "plugin": self.plugin,
+            "capability": self.capability,
+            "device_id": self.device_id,
+            "executor_id": self.executor_id,
+            "status": _enum(self.status),
+            "priority": _enum(self.priority),
+            "timeout": self.timeout,
+            "max_retries": self.max_retries,
+            "retry_count": self.retry_count,
+            "created_at": _iso(self.created_at),
+            "initialized_at": _iso(self.initialized_at),
+            "queued_at": _iso(self.queued_at),
+            "started_at": _iso(self.started_at),
+            "completed_at": _iso(self.completed_at),
+            "result": self.result.to_dict() if self.result else None,
+            "error": self.error,
+            "metadata": _json_safe(self.metadata),
+            "parent_task_id": self.parent_task_id,
+            "child_task_ids": list(self.child_task_ids),
+        }
