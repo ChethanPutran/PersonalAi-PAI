@@ -1,43 +1,40 @@
 """
 Task scheduler for executors.
 """
-
 from __future__ import annotations
 
+import time
 from typing import Any, Dict, Optional
 
 from loguru import logger
 
-from pai.executors.android import AndroidExecutor
-from pai.executors.desktop import DesktopExecutor
+from pai.executors.device import DeviceExecutor
 from pai.executors.manager import ExecutorManager
-from pai.executors.remote import RemoteExecutor
 from pai.executors.server import ServerExecutor
+from pai.observability.tracer import get_tracer
 
 
 class ExecutorScheduler:
     """
-    Routes tasks to registered executors.
-
-    The scheduler does not know how an executor performs a task.
-    It only selects the executor and invokes its common interface.
-    """
+        Routes tasks to registered executors.
+    
+        The scheduler does not know how an executor performs a task.
+        It only selects the executor and invokes its common interface.
+        """
 
     def __init__(
         self,
-        kernel: Any = None,
+        llm_service: Any,
+        plugin_manager: Any,
         *,
-        manager: Optional[ExecutorManager] = None,
+        manager: ExecutorManager,
+        device_manager: Any,
         register_defaults: bool = True,
     ) -> None:
-
-        self.kernel = kernel
-
-        self.manager = (
-            manager
-            or ExecutorManager()
-        )
-
+        self.llm_service = llm_service
+        self.plugin_manager = plugin_manager
+        self.manager = manager
+        self.device_manager = device_manager
         self._initialized = False
         self._running = False
 
@@ -45,236 +42,193 @@ class ExecutorScheduler:
             self._register_default_executors()
 
     # ------------------------------------------------------------------
+    # BUG FIX: normalize task inputs (TaskManager passes Task model, not dict)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _as_dict(task: Any) -> Dict[str, Any]:
+        """Accept dicts, Task models, or anything with to_dict/model_dump."""
+        if task is None:
+            return {}
+        if isinstance(task, dict):
+            return task
+        if hasattr(task, "model_dump"):
+            return task.model_dump()
+        if hasattr(task, "to_dict"):
+            return task.to_dict()
+        if hasattr(task, "__dict__"):
+            return dict(task.__dict__)
+        return {}
+
+    # ------------------------------------------------------------------
     # Registration
     # ------------------------------------------------------------------
 
     def _register_default_executors(self) -> None:
+        self._safe_register(ServerExecutor(self.device_manager,llm_service=self.llm_service))
+        self._safe_register(DeviceExecutor(device_manager=self.device_manager))
 
-        self._safe_register(
-            ServerExecutor(
-                kernel=self.kernel
-            )
-        )
-
-        self._safe_register(
-            DesktopExecutor(
-                kernel=self.kernel
-            )
-        )
-
-        self._safe_register(
-            AndroidExecutor()
-        )
-
-    def _safe_register(
-        self,
-        executor,
-    ) -> None:
-
+    def _safe_register(self, executor) -> None:
         if executor.name in self.manager:
             return
+        self.manager.register(executor)
 
-        self.manager.register(
-            executor
-        )
-
-    async def register_remote_executor(
-        self,
-        executor_id: str,
-        executor_data: Dict[str, Any],
-    ) -> RemoteExecutor:
-
-        if executor_id in self.manager:
-            existing = self.manager.require(
-                executor_id
-            )
-
-            if isinstance(
-                existing,
-                RemoteExecutor,
-            ):
-                return existing
-
-            raise ValueError(
-                f"Executor name already in use: {executor_id}"
-            )
-
-        executor = RemoteExecutor(
-            executor_id,
-            executor_data,
-        )
-
-        self.manager.register(
-            executor
-        )
-
-        if self._initialized:
-            await executor.initialize()
-
-        if self._running:
-            await executor.start()
-
-        logger.info(
-            "Remote executor registered: {}",
-            executor_id,
-        )
-
-        return executor
-
-    async def unregister_executor(
-        self,
-        executor_id: str,
-    ) -> None:
-
-        executor = self.manager.unregister(
-            executor_id
-        )
-
-        if executor:
-            await executor.shutdown()
+   
+    async def unregister_executor(self, executor_id: str) -> None:
+        tracer = get_tracer()
+        async with tracer.span(
+            "executor_scheduler.unregister",
+            executor_id=executor_id,
+        ):
+            executor = self.manager.unregister(executor_id)
+            if executor:
+                await executor.shutdown()
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     async def initialize(self) -> None:
-
         if self._initialized:
             return
+        tracer = get_tracer()
+        async with tracer.span("executor_scheduler.initialize") as span:
+            await self.manager.initialize()
+            self._initialized = True
+            span.set_attribute("executors", self.manager.names())
+            logger.info(
+                "ExecutorScheduler initialized. Executors: {}",
+                self.manager.names(),
+            )
+        await self.start()  # Start the scheduler after initialization
 
-        await self.manager.initialize_all()
-
-        self._initialized = True
-
-        logger.info(
-            "ExecutorScheduler initialized. Executors: {}",
-            self.manager.names(),
-        )
+    def is_initialized(self) -> bool:
+        return self._initialized
 
     async def start(self) -> None:
-
-        if not self._initialized:
-            await self.initialize()
-
+        if not self.is_initialized():
+            raise RuntimeError("ExecutorScheduler must be initialized before starting")
         if self._running:
             return
-
-        await self.manager.start_all()
-
-        self._running = True
-
-        logger.info(
-            "ExecutorScheduler started"
-        )
+        tracer = get_tracer()
+        async with tracer.span("executor_scheduler.start"):
+            await self.manager.start_all()
+            self._running = True
+            logger.info("ExecutorScheduler started")
 
     # ------------------------------------------------------------------
-    # Scheduling
+    # Scheduling — primary entry point
     # ------------------------------------------------------------------
 
     async def schedule_task(
         self,
-        task: Dict[str, Any],
+        task: Any,                              # ← widened from Dict to Any
         executor_name: str,
     ) -> Dict[str, Any]:
+        tracer = get_tracer()
 
-        if not self._running:
-            return {
-                "status": "failed",
-                "error": "ExecutorScheduler is not running",
-                "task_id": task.get("id"),
-            }
+        # Normalize input regardless of whether a dict or Task model is passed
+        task_dict = self._as_dict(task)
+        task_id = task_dict.get("id")
+        task_type = task_dict.get("type")
+        capability = task_dict.get("capability") or task_type
 
-        if not executor_name:
-            return {
-                "status": "failed",
-                "error": "executor_name is required",
-                "task_id": task.get("id"),
-            }
+        async with tracer.span(
+            "executor_scheduler.schedule_task",
+            task_id=task_id,
+            task_type=task_type,
+            capability=capability,
+            executor_name=executor_name,
+        ) as span:
 
-        executor = self.manager.get(
-            executor_name
-        )
+            if not self._running:
+                span.set_error("scheduler_not_running")
+                return {
+                    "status": "failed",
+                    "error": "ExecutorScheduler is not running",
+                    "task_id": task_id,
+                }
 
-        if executor is None:
-            return {
-                "status": "failed",
-                "error": f"Executor not found: {executor_name}",
-                "task_id": task.get("id"),
-            }
+            if not executor_name:
+                span.set_error("missing_executor_name")
+                return {
+                    "status": "failed",
+                    "error": "executor_name is required",
+                    "task_id": task_id,
+                }
 
-        if not executor.running:
-            return {
-                "status": "failed",
-                "error": f"Executor is not running: {executor_name}",
-                "task_id": task.get("id"),
-            }
+            executor = self.manager.get(executor_name)
+            if executor is None:
+                span.set_error(f"executor_not_found:{executor_name}")
+                return {
+                    "status": "failed",
+                    "error": f"Executor not found: {executor_name}",
+                    "task_id": task_id,
+                }
 
-        task_id = task.get("id")
+            if not executor.running:
+                span.set_error(f"executor_not_running:{executor_name}")
+                return {
+                    "status": "failed",
+                    "error": f"Executor is not running: {executor_name}",
+                    "task_id": task_id,
+                }
 
-        logger.info(
-            "Scheduling task {} ({}) -> {}",
-            task_id,
-            task.get("type"),
-            executor_name,
-        )
-
-        try:
-
-            result = await executor.execute_task(
-                task
+            logger.info(
+                "Scheduling task {} ({}) -> {}",
+                task_id, task_type, executor_name,
             )
 
-            # Executors already return a structured result.
-            # Preserve it rather than wrapping it multiple times.
-            return result
+            t0 = time.perf_counter()
+            try:
+                result = await executor.execute_task(task)
 
-        except Exception as exc:
+                # Executors already return a structured result.
+                # Preserve it rather than wrapping it multiple times.
+                duration_ms = (time.perf_counter() - t0) * 1000
 
-            logger.exception(
-                "Executor failed: {}",
-                executor_name,
-            )
+                span.set_attribute("duration_ms", round(duration_ms, 1))
+                span.set_attribute(
+                    "status",
+                    (result or {}).get("status", "completed")
+                    if isinstance(result, dict)
+                    else "completed",
+                )
+                return result
 
-            return {
-                "status": "failed",
-                "executor": executor_name,
-                "task_id": task_id,
-                "error": str(exc),
-            }
+            except Exception as exc:
+                duration_ms = (time.perf_counter() - t0) * 1000
+                logger.exception("Executor failed: {}", executor_name)
+                span.set_error(f"{type(exc).__name__}: {exc}")
+                span.set_attribute("duration_ms", round(duration_ms, 1))
+                return {
+                    "status": "failed",
+                    "executor": executor_name,
+                    "task_id": task_id,
+                    "error": str(exc),
+                }
 
     async def execute(
         self,
-        task: Dict[str, Any],
+        task: Any,
         executor_name: str,
     ) -> Dict[str, Any]:
-
         """
-        Alias for schedule_task.
-
-        Useful when orchestration code thinks in terms of execution
-        rather than scheduling.
-        """
-
-        return await self.schedule_task(
-            task,
-            executor_name,
-        )
+                Alias for schedule_task.
+        
+                Useful when orchestration code thinks in terms of execution
+                rather than scheduling.
+                """
+        return await self.schedule_task(task, executor_name)
 
     # ------------------------------------------------------------------
     # Queries
     # ------------------------------------------------------------------
 
-    def get_executor(
-        self,
-        executor_name: str,
-    ):
-
-        return self.manager.get(
-            executor_name
-        )
+    def get_executor(self, executor_name: str):
+        return self.manager.get(executor_name)
 
     def list_executors(self):
-
         return [
             {
                 "name": executor.name,
@@ -291,28 +245,21 @@ class ExecutorScheduler:
     # ------------------------------------------------------------------
 
     async def stop(self) -> None:
-
         if not self._running:
             return
-
-        await self.manager.stop_all()
-
-        self._running = False
-
-        logger.info(
-            "ExecutorScheduler stopped"
-        )
+        tracer = get_tracer()
+        async with tracer.span("executor_scheduler.stop"):
+            await self.manager.stop_all()
+            self._running = False
+            logger.info("ExecutorScheduler stopped")
 
     async def shutdown(self) -> None:
-
-        await self.manager.shutdown_all()
-
-        self._running = False
-        self._initialized = False
-
-        logger.info(
-            "ExecutorScheduler shutdown complete"
-        )
+        tracer = get_tracer()
+        async with tracer.span("executor_scheduler.shutdown"):
+            await self.manager.shutdown_all()
+            self._running = False
+            self._initialized = False
+            logger.info("ExecutorScheduler shutdown complete")
 
     @property
     def running(self) -> bool:

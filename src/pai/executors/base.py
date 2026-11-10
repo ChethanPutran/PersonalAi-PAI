@@ -29,17 +29,15 @@ class BaseExecutor(ABC):
         self,
         name: str,
         *,
-        executor_id: Optional[str] = None,
-        kernel: Any = None,
+        executor_id: str,
     ) -> None:
         self.name = name
         self.executor_id = executor_id or name
-        self.kernel = kernel
 
         self._initialized = False
         self._running = False
 
-    def get_status(self) -> str:
+    async def get_status(self) -> str:
         """Get the status of the executor."""
         if self._running:
             return "running"
@@ -78,6 +76,27 @@ class BaseExecutor(ABC):
         self._running = False
         logger.info("Executor stopped: {}", self.name)
 
+    async def pause_task(self, task_id: str) -> bool:
+        """
+        Pause a running task. Returns True if paused, False if the
+        executor cannot pause this task (atomic operation, already
+        finished, unknown task_id).
+        """
+        return False
+
+    async def resume_task(self, task_id: str) -> bool:
+        """Resume a paused task. Returns True if resumed."""
+        return False
+
+    async def cancel_task(self, task_id: str) -> bool:
+        """
+        Cancel a running task. Returns True if the task existed and
+        cancellation was forwarded. Best-effort — atomic operations
+        may still complete on the device.
+        """
+        return False
+
+    
     async def shutdown(self) -> None:
         """
         Release executor resources.
@@ -104,6 +123,15 @@ class BaseExecutor(ABC):
         """
         raise NotImplementedError
 
+    @abstractmethod
+    async def invoke(
+    self,
+    device_id: str,
+    capability: str,
+    parameters: Dict[str, Any],
+    timeout: float = 60.0,
+) -> Any:
+        pass
     # ------------------------------------------------------------------
     # Properties
     # ------------------------------------------------------------------
