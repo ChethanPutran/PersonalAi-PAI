@@ -4,9 +4,9 @@ from pai.agents.base import BaseAgent
 
 class ProductivityAgent(BaseAgent):
     """Handles tasks, scheduling, and reminders."""
-    
-    def __init__(self, kernel=None):
-        super().__init__("productivity_agent", kernel)
+    name = "productivity_agent"
+    def __init__(self):
+        super().__init__()
         self._capabilities = [
             "todo.create",
             "todo.list",

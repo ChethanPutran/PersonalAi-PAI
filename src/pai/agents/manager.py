@@ -3,15 +3,18 @@ from loguru import logger
 from pai.agents.base import BaseAgent
 from pai.agents.conversation import ConversationAgent
 from pai.agents.productivity import ProductivityAgent
+from pai.common.manager import Manager
 
-class AgentManager:
+class AgentManager(  Manager):
     """Manages lifecycle, coordination, and goal routing for all agents."""
-    
+    name = "agent_manager"
+
     def __init__(self):
+        super().__init__()
         self._agents: Dict[str, BaseAgent] = {}
         self._agent_capabilities: Dict[str, str] = {}  # capability -> agent_name
     
-    async def initialize(self) -> None:
+    async def _on_initialize(self) -> None:
         # Instantiate all agents
         agent_classes = [
             ConversationAgent, ProductivityAgent
@@ -28,7 +31,11 @@ class AgentManager:
         for agent in self._agents.values():
             await agent.start()
         logger.info("All agents started")
-    
+
+    async def _on_shutdown(self) -> None:
+        await self.stop()
+        logger.info("All agents shut down")
+
     async def stop(self) -> None:
         for agent in self._agents.values():
             await agent.stop()
