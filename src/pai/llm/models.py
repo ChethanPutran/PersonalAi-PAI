@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from pydantic import BaseModel, Field
+
 
 @dataclass
 class LLMMessage:
@@ -39,7 +41,7 @@ class LLMRequest:
 
     model: Optional[str] = None
     temperature: float = 0.7
-    max_tokens: Optional[int] = 1000
+    max_tokens: Optional[int] = 1024
 
     provider: Optional[str] = None
 
@@ -98,19 +100,15 @@ class LLMResponse:
         if not isinstance(self.content, str):
             raise TypeError("LLMResponse.content must be a string.")
 
-
-@dataclass
-class LLMProviderConfig:
-    """
-    Configuration used to construct an LLM provider.
-    """
-
-    name: str
-    api_key: Optional[str] = None
-    model: Optional[str] = None
-
-    base_url: Optional[str] = None
-
-    timeout: float = 30.0
-
-    extra: Dict[str, Any] = field(default_factory=dict)
+class LLMProviderConfig(BaseModel):
+    """LLM Provider configuration."""
+    provider: str = Field(default="gemini")  # openai, local
+    model_name: str = Field(default="gemini-3.5-flash")
+    api_key: Optional[str] = Field(default=None)
+    api_url: Optional[str] = Field(default=None)
+    base_url: Optional[str] = Field(default=None)
+    local_model_path: Optional[str] = Field(default=None)
+    temperature: float = Field(default=0.7)
+    max_tokens: int = Field(default=2048)
+    timeout: float = Field(default=30.0)
+    extra: Dict[str, Any] = Field(default_factory=dict)
