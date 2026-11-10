@@ -169,3 +169,13 @@ class BrowserPlugin:
             finally:
                 await self._save_state(ctx, user_id)
                 await ctx.close()
+
+def create_plugin(config: Dict[str, Any]) -> BrowserPlugin:
+    """Entry point for the device agent.
+
+    Called once at load time. Return any object exposing:
+
+        async def invoke(capability: str, params: dict) -> Any
+        async def shutdown() -> None      # optional
+    """
+    return BrowserPlugin(config)
