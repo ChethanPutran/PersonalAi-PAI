@@ -50,8 +50,12 @@ def _get_user_id(user_id: Optional[str]) -> str:
 # Declared BEFORE the /{plugin_id} catch-all so /index.json
 # doesn't get swallowed by it.
 
-REGISTRY_ROOT = Path(__file__).resolve().parent.parent.parent / "plugin_registry"
+REGISTRY_ROOT = Path(__file__).resolve().parent.parent.parent.parent.parent / "plugin_registry"
 
+# Check if the registry root exists, and raise error it if it doesn't
+
+if not REGISTRY_ROOT.exists():
+    raise RuntimeError(f"Plugin registry root does not exist: {REGISTRY_ROOT}")
 
 def _iter_registry() -> Dict[str, Dict[str, Any]]:
     out: Dict[str, Dict[str, Any]] = {}
@@ -283,6 +287,7 @@ async def list_plugins(
         user_id=user_id,
         platform=platform,
         architecture=architecture,
+        device_type=None, 
     )
     return {
         "plugins": plugins,
@@ -333,12 +338,14 @@ async def install_plugin(
 
     device_platform = getattr(device, "platform", None)
     device_architecture = getattr(device, "architecture", None)
+    device_type = getattr(device, "device_type", None)
 
-    if device_platform and device_architecture:
+    if device_platform and device_architecture and device_type:
         if not await plugin_manager.is_compatible(
             plugin_id=plugin_id,
             platform=device_platform,
             architecture=device_architecture,
+            device_type=device_type,
         ):
             raise HTTPException(
                 400,
@@ -370,6 +377,53 @@ async def install_plugin(
         "status": "install_requested",
     }
 
+
+class PluginUninstallRequest(BaseModel):
+    device_id: str
+
+
+@router.post("/{plugin_id}/uninstall")
+async def uninstall_plugin(
+    plugin_id: str,
+    payload: PluginUninstallRequest,
+    context: PAIAppContext = Depends(get_app_context),
+) -> Dict[str, Any]:
+    pm = context.orchestrator.plugin_manager
+    dm = context.orchestrator.device_manager
+
+    try:
+        plugin = await pm.require_plugin(plugin_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+    device = await dm.get(payload.device_id)
+    if device is None:
+        raise HTTPException(404, f"Device '{payload.device_id}' not found")
+
+    if not await dm.is_connected(payload.device_id):
+        raise HTTPException(409, f"Device '{payload.device_id}' is not connected")
+
+    # Disable first so the sync loop doesn't race-reinstall after the
+    # agent removes the files. Without this, _sync_once sees
+    # enabled_on_device=true + is_installed=false and immediately
+    # installs it back.
+    await pm.set_device_enabled(
+        device_id=payload.device_id, plugin_id=plugin_id, enabled=False,
+    )
+
+    command = await pm.build_uninstall_request(plugin_id, payload.device_id)
+    try:
+        await dm.send(payload.device_id, command)
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+    return {
+        "success": True,
+        "plugin_id": plugin_id,
+        "device_id": payload.device_id,
+        "version": plugin.version,
+        "status": "uninstall_requested",
+    }
 
 # ============================================================
 # Install / uninstall reports
@@ -500,6 +554,19 @@ async def disable_plugin(
 
     return {"plugin_id": plugin_id, "user_id": user_id, "status": "disabled"}
 
+
+# ============================================================
+# Plugin registry reload
+# ============================================================
+@router.post("/system/reload")
+async def reload_plugins(
+    context: PAIAppContext = Depends(get_app_context),
+    _admin: str = Depends(get_current_admin),
+) -> Dict[str, Any]:
+    pm = context.orchestrator.plugin_manager
+    pm._catalog.clear()
+    await pm._on_initialize()
+    return {"reloaded": True, "plugin_count": len(pm._catalog)}
 
 # ============================================================
 # Config — reads user from JWT

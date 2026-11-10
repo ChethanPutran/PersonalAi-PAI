@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/system", tags=["system"])
 
 _STARTED_AT = time.time()
-_ADMIN_HTML = Path(__file__).resolve().parent.parent / "admin" / "panel.html"
+_ADMIN_HTML = Path(__file__).resolve().parent.parent / "admin" / "admin.html"
 
 
 # ============================================================
@@ -244,15 +244,21 @@ def _device_manager_summary(kernel: Any) -> Dict[str, Any]:
     return {"connected": len(connections)}
 
 
-def _plugin_manager_summary(kernel: Any) -> Dict[str, Any]:
+async def _plugin_manager_summary(kernel: Any) -> Dict[str, Any]:
     pm = getattr(kernel, "plugin_manager", None)
     if pm is None:
         return {"available": False}
-    catalog = getattr(pm, "_catalog", None) or getattr(pm, "_plugins", {})
-    return {
-        "initialized": getattr(pm, "_initialized", False),
-        "catalog_size": len(catalog),
-    }
+    try:
+        status = await pm.get_status()
+        return {
+            "initialized": status.get("initialized", False),
+            "catalog_size": status.get("plugin_count", 0),
+            "plugins": status.get("plugins", []),
+            "registry_dir": status.get("plugin_registry_dir"),
+        }
+    except Exception as exc:
+        logger.warning("plugin manager status failed: %s", exc)
+        return {"available": False}
 
 
 def _agent_manager_summary(kernel: Any) -> Dict[str, Any]:
@@ -314,87 +320,71 @@ async def _collect_devices(kernel: Any) -> List[Dict[str, Any]]:
 
 def _collect_plugins(kernel: Any, installs: list) -> List[Dict[str, Any]]:
     """
-    Build the plugin list from the device-plugin registry on disk,
-    joined with the device_plugins table.
+    Build the admin plugin view from the plugin manager's in-memory
+    catalog, joined with the device_plugins table.
 
-    Server-side Python plugins (pai/plugins/) are not shown here —
-    they aren't installable on devices and have nothing to do with
-    the admin panel's plugin view.
+    `get_catalog()` is populated at startup from every discovered
+    manifest — server plugins (`pai/plugins/*/manifest.json`) and
+    device plugins (`plugin_registry/<id>/<version>/manifest.json`).
+    No filesystem access here; the manager is the single source of
+    truth for what the catalog contains.
     """
-    from pathlib import Path
-    import json
+    pm = getattr(kernel, "plugin_manager", None)
+    catalog_info: List[Any] = []
+    if pm is not None:
+        try:
+            catalog_info = pm.get_catalog() or []
+        except Exception as exc:
+            logger.warning("plugin catalog access failed: %s", exc)
 
-    registry_root = (
-        Path(__file__).resolve().parent.parent.parent / "plugin_registry"
-    )
-
-    # Load every (plugin_id, version) from disk.
-    catalog: Dict[str, Dict[str, Any]] = {}
-
-    if registry_root.exists():
-        for plugin_dir in sorted(registry_root.iterdir()):
-            if not plugin_dir.is_dir() or plugin_dir.name.startswith("_"):
-                continue
-
-            plugin_id = plugin_dir.name
-            latest_version = None
-            latest_manifest: Dict[str, Any] = {}
-
-            for version_dir in sorted(plugin_dir.iterdir()):
-                if not version_dir.is_dir():
-                    continue
-                manifest_path = version_dir / "manifest.json"
-                if not manifest_path.exists():
-                    continue
-                try:
-                    manifest = json.loads(manifest_path.read_text())
-                except Exception as exc:
-                    logger.warning("bad manifest %s: %s", manifest_path, exc)
-                    continue
-
-                version = manifest.get("version") or version_dir.name
-                # Highest version wins.
-                if latest_version is None or version > latest_version:
-                    latest_version = version
-                    latest_manifest = manifest
-
-            if latest_version:
-                catalog[plugin_id] = {
-                    "id": plugin_id,
-                    "name": latest_manifest.get("name", plugin_id),
-                    "version": latest_version,
-                    "description": latest_manifest.get("description", ""),
-                    "platforms": list(
-                        (latest_manifest.get("platforms") or {}).keys()
-                    ),
-                    "capabilities": [
-                        c.get("id")
-                        for c in latest_manifest.get("capabilities", [])
-                        if isinstance(c, dict)
-                    ],
-                }
-
-    # Group device_plugins rows by plugin_id.
+    # Group device_plugins rows by plugin_id (install state lives in the
+    # DB, not the manager — the manager is the catalog, the DB is truth
+    # for what's deployed where).
     per_plugin: Dict[str, list] = {}
     for row in installs:
         per_plugin.setdefault(row.plugin_id, []).append(row)
 
-    # Make sure every plugin that appears in the installs table
-    # is in the response, even if the registry directory is gone.
-    for plugin_id in per_plugin.keys():
+    # Build the catalog map from PluginInfo entries.
+    catalog: Dict[str, Dict[str, Any]] = {}
+    for info in catalog_info:
+        pid = info.id
+        if not pid:
+            continue
+        catalog[pid] = {
+            "id": pid,
+            "name": info.name,
+            "version": info.version,
+            "description": info.description or "",
+            "plugin_type": info.plugin_type or "action",
+            "platforms": list(info.platforms or []),
+            "architectures": list(info.architectures or []),
+            "capabilities": list(info.capabilities or []),
+            "package_url": info.package_url,
+            "checksum": info.checksum,
+            "size": info.size or 0,
+        }
+
+    # Include DB-only plugins (a manifest was removed while devices
+    # still have the row) so the admin view doesn't silently drop them.
+    for plugin_id in per_plugin:
         if plugin_id not in catalog:
             catalog[plugin_id] = {
                 "id": plugin_id,
                 "name": plugin_id,
                 "version": "",
-                "description": "(registry manifest missing)",
+                "description": "(not in catalog)",
+                "plugin_type": "unknown",
                 "platforms": [],
+                "architectures": [],
                 "capabilities": [],
+                "package_url": None,
+                "checksum": None,
+                "size": 0,
             }
 
     out: List[Dict[str, Any]] = []
-    for plugin_id, info in catalog.items():
-        rows = per_plugin.get(plugin_id, [])
+    for pid, info in catalog.items():
+        rows = per_plugin.get(pid, [])
         out.append({
             **info,
             "installations": sum(1 for r in rows if r.is_installed),
@@ -411,7 +401,6 @@ def _collect_plugins(kernel: Any, installs: list) -> List[Dict[str, Any]]:
             ],
         })
     return out
-
 
 def _collect_users(users: list, plugin_records: list) -> List[Dict[str, Any]]:
     per_user: Dict[str, list] = {}

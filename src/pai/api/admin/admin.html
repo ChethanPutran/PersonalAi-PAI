@@ -1,0 +1,1722 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PAI Admin</title>
+<style>
+  :root {
+    --bg: #0f172a;
+    --surface: #1e293b;
+    --surface-2: #334155;
+    --surface-3: #293548;
+    --border: #475569;
+    --text: #e2e8f0;
+    --muted: #94a3b8;
+    --accent: #38bdf8;
+    --ok: #22c55e;
+    --warn: #f59e0b;
+    --err: #ef4444;
+    --llm: #a855f7;
+    --tool: #f97316;
+    --span: #0ea5e9;
+    --trace: #fbbf24;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg); color: var(--text); font-size: 14px;
+  }
+  code, pre, .mono {
+    font-family: ui-monospace, Menlo, "Cascadia Code", monospace;
+  }
+  button { font-family: inherit; }
+
+  /* ============ Login ============ */
+  #login-overlay {
+    position: fixed; inset: 0; z-index: 1000;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(15,23,42,.95); backdrop-filter: blur(8px);
+  }
+  #login-overlay.hidden { display: none; }
+  .login-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 32px; width: 360px;
+    box-shadow: 0 24px 48px rgba(0,0,0,.5);
+  }
+  .login-card h2 { margin: 0 0 8px; font-size: 20px; }
+  .login-card p.sub { margin: 0 0 24px; color: var(--muted); font-size: 13px; }
+  .login-card input {
+    width: 100%; padding: 10px 12px; margin-bottom: 12px;
+    background: var(--bg); border: 1px solid var(--border);
+    color: var(--text); border-radius: 6px; font-size: 14px;
+  }
+  .login-card input:focus { outline: none; border-color: var(--accent); }
+  .login-card button {
+    width: 100%; padding: 10px; margin-top: 8px;
+    background: var(--accent); color: var(--bg);
+    border: none; border-radius: 6px;
+    font-weight: 700; font-size: 14px; cursor: pointer;
+  }
+  .login-card button:disabled { opacity: .6; cursor: default; }
+  #login-error {
+    color: var(--err); font-size: 13px; margin-top: 12px;
+    min-height: 18px; text-align: center;
+  }
+
+  /* ============ App shell ============ */
+  #app { display: none; height: 100vh; }
+  #app.visible { display: flex; flex-direction: column; }
+
+  header {
+    padding: 12px 24px; border-bottom: 1px solid var(--border);
+    background: var(--surface); display: flex; align-items: center;
+    justify-content: space-between; flex-shrink: 0; height: 56px;
+  }
+  header h1 { margin: 0; font-size: 17px; font-weight: 600; }
+  header .right { display: flex; align-items: center; gap: 12px; }
+  header .user-info { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+  header .user-info strong { color: var(--text); font-weight: 500; }
+  header .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--ok); animation: pulse 2s infinite; flex-shrink: 0;
+  }
+  header .dot.offline { background: var(--err); animation: none; }
+  @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .4 } }
+  header .logout-btn {
+    padding: 6px 12px; background: transparent;
+    border: 1px solid var(--border); color: var(--muted);
+    border-radius: 6px; cursor: pointer; font-size: 12px;
+  }
+  header .logout-btn:hover { color: var(--text); border-color: var(--text); }
+
+  .layout { display: flex; flex: 1; min-height: 0; }
+
+  /* ============ Sidebar ============ */
+  .sidebar {
+    width: 200px; flex-shrink: 0;
+    border-right: 1px solid var(--border);
+    background: var(--surface);
+    padding: 16px 0;
+    overflow-y: auto;
+  }
+  .nav-item {
+    display: block; padding: 10px 24px;
+    color: var(--muted); text-decoration: none;
+    cursor: pointer; font-size: 13px;
+    border-left: 3px solid transparent;
+    user-select: none;
+  }
+  .nav-item:hover { background: var(--surface-3); color: var(--text); }
+  .nav-item.active {
+    color: var(--accent);
+    border-left-color: var(--accent);
+    background: var(--surface-3);
+  }
+  .nav-item .count {
+    float: right; font-size: 11px; color: var(--muted);
+    background: var(--bg); padding: 1px 6px; border-radius: 999px;
+  }
+
+  /* ============ Content ============ */
+  .content { flex: 1; overflow-y: auto; min-width: 0; padding: 20px 24px; }
+  .view { display: none; }
+  .view.active { display: block; }
+
+  /* Overview */
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 16px; margin-bottom: 24px;
+  }
+  .card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 20px;
+  }
+  .card .label {
+    font-size: 11px; color: var(--muted);
+    text-transform: uppercase; letter-spacing: .5px;
+  }
+  .card .value { font-size: 28px; font-weight: 700; margin-top: 6px; }
+  .card .sub { font-size: 12px; color: var(--muted); margin-top: 4px; }
+
+  /* Tables */
+  table { width: 100%; border-collapse: collapse; }
+  th, td {
+    text-align: left; padding: 10px 12px;
+    border-bottom: 1px solid var(--border); vertical-align: top;
+  }
+  th {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .5px;
+    color: var(--muted); font-weight: 600;
+  }
+  tr:hover { background: var(--surface); }
+  code { font-size: 12px; color: var(--accent); }
+
+  .badge {
+    display: inline-block; padding: 2px 8px; border-radius: 999px;
+    font-size: 11px; font-weight: 600;
+  }
+  .badge.online, .badge.completed { background: rgba(34,197,94,.15); color: var(--ok); }
+  .badge.offline { background: rgba(148,163,184,.15); color: var(--muted); }
+  .badge.enabled { background: rgba(56,189,248,.15); color: var(--accent); }
+  .badge.disabled { background: rgba(148,163,184,.15); color: var(--muted); }
+  .badge.error, .badge.failed { background: rgba(239,68,68,.15); color: var(--err); }
+  .badge.admin { background: rgba(234,179,8,.15); color: var(--warn); }
+  .badge.running { background: rgba(234,179,8,.15); color: var(--warn); }
+
+  .empty { padding: 40px; text-align: center; color: var(--muted); }
+  details summary { cursor: pointer; color: var(--muted); }
+  details[open] summary { color: var(--accent); }
+  details ul { margin: 8px 0 0 16px; padding: 0; }
+  details li { margin: 4px 0; color: var(--muted); font-size: 12px; }
+
+  /* ============ Traces split view ============ */
+  #view-traces.active { display: flex; }
+  #view-traces {
+    margin: -20px -24px;
+    height: calc(100vh - 56px);
+    padding: 0;
+  }
+  .traces-list-panel {
+    width: 380px; flex-shrink: 0;
+    border-right: 1px solid var(--border);
+    display: flex; flex-direction: column;
+    overflow: hidden;
+    background: var(--surface);
+  }
+  .traces-filters {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
+  }
+  .traces-filters input,
+  .traces-filters select {
+    background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 5px 8px; font-size: 12px;
+  }
+  .traces-filters input { width: 150px; }
+  .traces-filters label {
+    font-size: 11px; color: var(--muted);
+    display: flex; align-items: center; gap: 4px;
+  }
+  .traces-filters button {
+    background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 5px 10px; font-size: 12px; cursor: pointer;
+  }
+  .traces-filters button:hover { background: var(--border); }
+
+  .trace-list { flex: 1; overflow-y: auto; }
+  .trace-row {
+    padding: 10px 16px; border-bottom: 1px solid var(--border);
+    cursor: pointer;
+  }
+  .trace-row:hover { background: var(--surface-3); }
+  .trace-row.active {
+    background: var(--surface-3);
+    border-left: 3px solid var(--accent);
+    padding-left: 13px;
+  }
+  .trace-row .top {
+    display: flex; justify-content: space-between;
+    align-items: center; margin-bottom: 4px;
+  }
+  .trace-row .goal {
+    color: var(--muted); font-size: 12px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .trace-row .meta {
+    color: var(--muted); font-size: 11px; margin-top: 4px;
+    display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
+  }
+  .trace-row .time { color: var(--muted); font-size: 11px; }
+
+  /* ============ Trace detail (LangSmith-style) ============ */
+  .trace-detail-panel {
+    flex: 1; display: flex; flex-direction: column;
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  .trace-header {
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    flex-shrink: 0;
+  }
+  .trace-header h2 {
+    margin: 0 0 6px; font-size: 16px; font-weight: 600;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .trace-header .sub {
+    color: var(--muted); font-size: 12px;
+    display: flex; flex-wrap: wrap; gap: 12px;
+    align-items: center;
+  }
+  .trace-header .sub code { font-size: 11px; }
+
+  .trace-stats {
+    padding: 10px 20px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    display: flex; gap: 20px; flex-wrap: wrap;
+    flex-shrink: 0;
+  }
+  .stat-chip {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 12px; color: var(--muted);
+  }
+  .stat-chip .stat-icon { font-size: 14px; }
+  .stat-chip .stat-value {
+    color: var(--text); font-weight: 600;
+  }
+  .stat-chip.stat-llm .stat-icon { color: var(--llm); }
+  .stat-chip.stat-tool .stat-icon { color: var(--tool); }
+  .stat-chip.stat-err .stat-icon { color: var(--err); }
+
+  .trace-body {
+    flex: 1; display: flex; min-height: 0;
+    overflow: hidden;
+  }
+
+  /* Tree pane */
+  .trace-tree-pane {
+    flex: 1; min-width: 0; display: flex; flex-direction: column;
+    border-right: 1px solid var(--border);
+    overflow: hidden;
+  }
+  .tree-toolbar {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    display: flex; gap: 8px; align-items: center;
+    flex-shrink: 0;
+  }
+  .tree-toolbar input {
+    flex: 1;
+    background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 5px 8px; font-size: 12px;
+  }
+  .tree-toolbar button {
+    background: var(--bg); color: var(--muted);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 4px 10px; font-size: 12px; cursor: pointer;
+  }
+  .tree-toolbar button:hover { color: var(--text); background: var(--border); }
+
+  .tree-container {
+    flex: 1; overflow-y: auto;
+    font-family: ui-monospace, Menlo, "Cascadia Code", monospace;
+    font-size: 12px;
+  }
+
+  .tree-row {
+    display: flex; align-items: center;
+    padding: 4px 8px;
+    cursor: pointer;
+    border-left: 2px solid transparent;
+    position: relative;
+  }
+  .tree-row:hover { background: var(--surface); }
+  .tree-row.selected {
+    background: var(--surface-3);
+    border-left-color: var(--accent);
+  }
+  .tree-row.hidden { display: none; }
+
+  .tree-row .chev {
+    width: 14px; color: var(--muted); flex-shrink: 0;
+    font-size: 10px; text-align: center;
+    user-select: none;
+  }
+  .tree-row .chev.leaf { visibility: hidden; }
+
+  .tree-row .indent {
+    display: inline-block;
+    border-left: 1px dashed rgba(148,163,184,.15);
+    height: 18px; margin-right: 4px;
+    flex-shrink: 0;
+  }
+
+  .tree-row .icon {
+    width: 18px; flex-shrink: 0;
+    text-align: center; font-size: 12px;
+  }
+  .tree-row .icon.llm  { color: var(--llm); }
+  .tree-row .icon.tool { color: var(--tool); }
+  .tree-row .icon.span { color: var(--span); }
+  .tree-row .icon.trace { color: var(--trace); }
+  .tree-row .icon.error { color: var(--err); }
+  .tree-row .icon.log  { color: var(--muted); }
+
+  .tree-row .name {
+    flex-shrink: 0;
+    max-width: 40%;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    margin-right: 8px;
+  }
+  .tree-row.error .name { color: var(--err); }
+
+  .tree-row .status-pill {
+    font-size: 9px; padding: 1px 5px; border-radius: 3px;
+    background: rgba(148,163,184,.2); color: var(--muted);
+    margin-right: 6px; text-transform: uppercase;
+  }
+  .tree-row .status-pill.error { background: rgba(239,68,68,.2); color: var(--err); }
+
+  .tree-row .bar-track {
+    flex: 1;
+    height: 12px;
+    background: rgba(148,163,184,.06);
+    border-radius: 2px;
+    position: relative;
+    min-width: 60px;
+    overflow: hidden;
+  }
+  .tree-row .bar-fill {
+    position: absolute;
+    top: 0; bottom: 0;
+    border-radius: 2px;
+  }
+  .tree-row .bar-fill.kind-llm   { background: var(--llm); opacity: .65; }
+  .tree-row .bar-fill.kind-tool  { background: var(--tool); opacity: .65; }
+  .tree-row .bar-fill.kind-span  { background: var(--span); opacity: .55; }
+  .tree-row .bar-fill.kind-trace { background: var(--trace); opacity: .75; }
+  .tree-row .bar-fill.kind-error { background: var(--err); opacity: .75; }
+  .tree-row .bar-fill.kind-log   { background: var(--muted); opacity: .55; }
+
+  .tree-row .duration {
+    width: 60px; flex-shrink: 0;
+    text-align: right; color: var(--muted);
+    font-size: 11px; margin-left: 8px;
+  }
+
+  /* Detail pane */
+  .trace-detail-pane {
+    width: 420px; flex-shrink: 0;
+    overflow-y: auto;
+    padding: 0;
+    background: var(--bg);
+  }
+  .trace-detail-pane .placeholder {
+    padding: 40px 20px; text-align: center; color: var(--muted);
+  }
+  .detail-header {
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    position: sticky; top: 0; z-index: 10;
+  }
+  .detail-header .title {
+    display: flex; align-items: center; gap: 8px;
+    font-weight: 600; font-size: 13px;
+    word-break: break-all;
+  }
+  .detail-header .title .icon { font-size: 14px; }
+  .detail-header .title .icon.llm   { color: var(--llm); }
+  .detail-header .title .icon.tool  { color: var(--tool); }
+  .detail-header .title .icon.span  { color: var(--span); }
+  .detail-header .title .icon.trace { color: var(--trace); }
+  .detail-header .title .icon.error { color: var(--err); }
+  .detail-header .title .icon.log   { color: var(--muted); }
+
+  .detail-header .meta {
+    margin-top: 8px;
+    display: grid; grid-template-columns: 80px 1fr;
+    gap: 4px 8px;
+    font-size: 11px;
+    color: var(--muted);
+  }
+  .detail-header .meta dt { color: var(--muted); }
+  .detail-header .meta dd { margin: 0; color: var(--text); word-break: break-all; }
+
+  .detail-section {
+    border-bottom: 1px solid var(--border);
+    padding: 12px 16px;
+  }
+  .detail-section .section-head {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 8px;
+  }
+  .detail-section .section-title {
+    font-size: 11px; text-transform: uppercase;
+    letter-spacing: .5px; color: var(--muted);
+    font-weight: 600;
+  }
+  .detail-section .copy-btn {
+    font-size: 10px; padding: 2px 6px;
+    background: transparent; color: var(--muted);
+    border: 1px solid var(--border); border-radius: 4px;
+    cursor: pointer;
+  }
+  .detail-section .copy-btn:hover { color: var(--text); background: var(--surface-2); }
+
+  .detail-section pre {
+    margin: 0;
+    padding: 10px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 11px;
+    color: var(--text);
+    white-space: pre-wrap;
+    word-break: break-all;
+    max-height: 400px;
+    overflow-y: auto;
+  }
+  .detail-section pre.prompt { background: rgba(168,85,247,.08); border-color: rgba(168,85,247,.25); }
+  .detail-section pre.response { background: rgba(168,85,247,.15); border-color: rgba(168,85,247,.4); }
+  .detail-section pre.error-box {
+    background: rgba(239,68,68,.12);
+    border-color: rgba(239,68,68,.35);
+    color: #fca5a5;
+  }
+
+  .kv-grid {
+    display: grid;
+    grid-template-columns: minmax(80px, max-content) 1fr;
+    gap: 4px 12px;
+    font-size: 12px;
+  }
+  .kv-grid dt { color: var(--muted); }
+  .kv-grid dd { margin: 0; color: var(--text); word-break: break-all; }
+
+  .usage-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(80px, 1fr));
+    gap: 8px;
+  }
+  .usage-chip {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 6px; padding: 8px;
+  }
+  .usage-chip .u-label { font-size: 10px; color: var(--muted); text-transform: uppercase; }
+  .usage-chip .u-value { font-size: 15px; font-weight: 600; margin-top: 2px; }
+
+  @media (max-width: 1200px) {
+    .traces-list-panel { width: 280px; }
+    .trace-detail-pane { width: 320px; }
+    .tree-row .name { max-width: 200px; }
+  }
+  @media (max-width: 900px) {
+    .sidebar { width: 60px; }
+    .nav-item { padding: 10px; text-align: center; }
+    .nav-item .count { display: none; }
+    .trace-body { flex-direction: column; }
+    .trace-tree-pane { border-right: none; border-bottom: 1px solid var(--border); }
+    .trace-detail-pane { width: 100%; max-height: 40%; }
+  }
+</style>
+</head>
+<body>
+
+<div id="login-overlay">
+  <div class="login-card">
+    <h2>PAI Admin</h2>
+    <p class="sub">Sign in with an admin account.</p>
+    <input id="login-email" type="email" placeholder="Email" autocomplete="username">
+    <input id="login-password" type="password" placeholder="Password" autocomplete="current-password">
+    <button id="login-btn">Sign in</button>
+    <div id="login-error"></div>
+  </div>
+</div>
+
+<div id="app">
+  <header>
+    <h1>PAI Admin</h1>
+    <div class="right">
+      <div class="user-info">
+        <strong id="admin-email"></strong>
+        <span class="dot" id="live-dot"></span>
+        <span id="live-text">connecting…</span>
+      </div>
+      <button class="logout-btn" id="logout-btn">Sign out</button>
+    </div>
+  </header>
+
+  <div class="layout">
+    <nav class="sidebar">
+      <a class="nav-item active" data-view="overview">Overview</a>
+      <a class="nav-item" data-view="devices">Devices <span class="count" id="count-devices"></span></a>
+      <a class="nav-item" data-view="plugins">Plugins <span class="count" id="count-plugins"></span></a>
+      <a class="nav-item" data-view="users">Users <span class="count" id="count-users"></span></a>
+      <a class="nav-item" data-view="traces">Traces <span class="count" id="count-traces"></span></a>
+      <a class="nav-item" data-view="raw">Raw JSON</a>
+    </nav>
+
+    <main class="content">
+      <section class="view active" id="view-overview">
+        <div class="cards" id="cards"></div>
+      </section>
+
+      <section class="view" id="view-devices">
+        <div id="devices-content"><div class="empty">Loading…</div></div>
+      </section>
+
+      <section class="view" id="view-plugins">
+        <div id="plugins-content"><div class="empty">Loading…</div></div>
+      </section>
+
+      <section class="view" id="view-users">
+        <div id="users-content"><div class="empty">Loading…</div></div>
+      </section>
+
+      <section class="view" id="view-traces">
+        <aside class="traces-list-panel">
+          <div class="traces-filters">
+            <input id="filter-user" placeholder="user_id" />
+            <select id="filter-status">
+              <option value="">all statuses</option>
+              <option value="running">running</option>
+              <option value="completed">completed</option>
+              <option value="failed">failed</option>
+            </select>
+            <label><input type="checkbox" id="filter-errors" /> errors</label>
+            <label><input type="checkbox" id="filter-live" checked /> live</label>
+            <button id="btn-refresh-traces">⟳</button>
+          </div>
+          <div class="trace-list" id="trace-list">
+            <div class="empty">Loading…</div>
+          </div>
+        </aside>
+
+        <article class="trace-detail-panel">
+          <div id="trace-header" class="trace-header">
+            <div class="empty">Select a trace on the left</div>
+          </div>
+          <div id="trace-stats" class="trace-stats" style="display:none"></div>
+          <div class="trace-body">
+            <div class="trace-tree-pane">
+              <div class="tree-toolbar">
+                <input id="tree-search" placeholder="Filter by name…" />
+                <button id="btn-expand-all" title="Expand all">▼</button>
+                <button id="btn-collapse-all" title="Collapse all">▲</button>
+              </div>
+              <div class="tree-container" id="tree-container">
+                <div class="empty" style="padding:20px">—</div>
+              </div>
+            </div>
+            <div class="trace-detail-pane" id="trace-detail-pane">
+              <div class="placeholder">Select a node in the tree</div>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <section class="view" id="view-raw">
+        <pre id="raw-pre" style="white-space:pre-wrap;word-break:break-all;color:var(--muted);font-size:12px"></pre>
+      </section>
+    </main>
+  </div>
+</div>
+
+<script>
+(() => {
+  // ============================================================
+  // Config
+  // ============================================================
+  const API_DATA          = '/api/v1/system/admin/data';
+  const API_LOGIN         = '/api/v1/auth/login';
+  const API_ME            = '/api/v1/auth/me';
+  const API_TRACES        = '/api/v1/system/traces';
+  const API_TRACES_STREAM = '/api/v1/system/traces/stream';
+  const TOKEN_KEY = 'pai_admin_token';
+  const EMAIL_KEY = 'pai_admin_email';
+  const REFRESH_MS = 5000;
+
+  // ============================================================
+  // State
+  // ============================================================
+  let token = localStorage.getItem(TOKEN_KEY) || '';
+  let adminEmail = localStorage.getItem(EMAIL_KEY) || '';
+  let adminTimer = null;
+  let traceStreamStop = null;
+  let selectedTraceId = null;
+  let selectedNodeId = null;
+  let expandedNodes = new Set();
+  let currentView = 'overview';
+  let currentTree = [];        // flattened tree
+  let currentEvents = [];      // raw events
+  let currentSummary = null;
+  let treeFilter = '';
+
+  // ============================================================
+  // Helpers
+  // ============================================================
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+  const badge = (text, cls) => `<span class="badge ${esc(cls)}">${esc(text)}</span>`;
+
+  const humanDuration = (s) => {
+    s = Math.max(0, Math.floor(s || 0));
+    if (s < 60) return s + 's';
+    const m = Math.floor(s / 60), sec = s % 60;
+    if (m < 60) return m + 'm ' + sec + 's';
+    return Math.floor(m / 60) + 'h ' + (m % 60) + 'm';
+  };
+
+  const humanTime = (ts) => ts ? new Date(ts * 1000).toLocaleTimeString([], {
+    hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3,
+  }) : '';
+
+  const fmtDuration = (ms) => {
+    if (ms == null) return '';
+    if (ms < 1) return ms.toFixed(2) + 'ms';
+    if (ms < 1000) return Math.round(ms) + 'ms';
+    return (ms / 1000).toFixed(2) + 's';
+  };
+
+  const authHeaders = () => token ? { 'Authorization': `Bearer ${token}` } : {};
+
+  const setLiveStatus = (ok, text) => {
+    $('live-dot').classList.toggle('offline', !ok);
+    $('live-text').textContent = text;
+  };
+
+  const ICONS = {
+    'trace.start': '▶',
+    'trace.end': '■',
+    'span.start': '⚡',
+    'span.end': '⚡',
+    'llm': '💬',
+    'tool': '🔧',
+    'error': '✖',
+    'log': '•',
+  };
+
+  function iconFor(kind) {
+    if (kind === 'trace.start' || kind === 'trace.end') return 'trace';
+    if (kind === 'llm') return 'llm';
+    if (kind === 'tool') return 'tool';
+    if (kind === 'error') return 'error';
+    if (kind === 'log') return 'log';
+    return 'span';
+  }
+
+  // ============================================================
+  // Auth
+  // ============================================================
+  const overlay = $('login-overlay');
+  const loginEmail = $('login-email');
+  const loginPass = $('login-password');
+  const loginBtn = $('login-btn');
+  const loginErr = $('login-error');
+
+  function showLogin() {
+    overlay.classList.remove('hidden');
+    $('app').classList.remove('visible');
+    loginEmail.focus();
+  }
+  function showApp() {
+    overlay.classList.add('hidden');
+    $('app').classList.add('visible');
+    $('admin-email').textContent = adminEmail;
+  }
+
+  async function doLogin() {
+    loginErr.textContent = '';
+    loginBtn.disabled = true;
+    loginBtn.textContent = 'Signing in…';
+    try {
+      const r = await fetch(API_LOGIN, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: loginEmail.value.trim(),
+          password: loginPass.value,
+        }),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(body.detail || `HTTP ${r.status}`);
+      if (!body.is_admin) throw new Error('Account does not have admin access.');
+      token = body.access_token;
+      adminEmail = body.email || '';
+      localStorage.setItem(TOKEN_KEY, token);
+      localStorage.setItem(EMAIL_KEY, adminEmail);
+      loginPass.value = '';
+      showApp();
+      startAdminPoll();
+      if (currentView === 'traces') ensureTraceStream();
+    } catch (e) {
+      loginErr.textContent = e.message || String(e);
+    } finally {
+      loginBtn.disabled = false;
+      loginBtn.textContent = 'Sign in';
+    }
+  }
+
+  function doLogout() {
+    token = ''; adminEmail = '';
+    localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(EMAIL_KEY);
+    stopAdminPoll();
+    stopTraceStream();
+    selectedTraceId = null; selectedNodeId = null;
+    expandedNodes.clear();
+    currentTree = []; currentEvents = []; currentSummary = null;
+    $('cards').innerHTML = '';
+    $('devices-content').innerHTML = '';
+    $('plugins-content').innerHTML = '';
+    $('users-content').innerHTML = '';
+    $('trace-list').innerHTML = '';
+    $('trace-header').innerHTML = '<div class="empty">Select a trace on the left</div>';
+    $('trace-stats').style.display = 'none';
+    $('tree-container').innerHTML = '<div class="empty" style="padding:20px">—</div>';
+    $('trace-detail-pane').innerHTML = '<div class="placeholder">Select a node in the tree</div>';
+    $('raw-pre').textContent = '';
+    ['count-devices','count-plugins','count-users','count-traces'].forEach(id => $(id).textContent = '');
+    showLogin();
+  }
+
+  async function boot() {
+    if (!token) { showLogin(); return; }
+    try {
+      const r = await fetch(API_ME, { headers: authHeaders() });
+      if (!r.ok) throw new Error('auth failed');
+      const me = await r.json();
+      if (!me.is_admin) throw new Error('not admin');
+      adminEmail = me.email || adminEmail;
+      $('admin-email').textContent = adminEmail;
+      showApp();
+      startAdminPoll();
+    } catch { doLogout(); }
+  }
+
+  loginBtn.addEventListener('click', doLogin);
+  loginPass.addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
+  loginEmail.addEventListener('keydown', e => { if (e.key === 'Enter') loginPass.focus(); });
+  $('logout-btn').addEventListener('click', doLogout);
+
+  // ============================================================
+  // Navigation
+  // ============================================================
+  document.querySelectorAll('.nav-item').forEach(el => {
+    el.addEventListener('click', () => switchView(el.dataset.view));
+  });
+
+  function switchView(name) {
+    currentView = name;
+    document.querySelectorAll('.nav-item').forEach(el =>
+      el.classList.toggle('active', el.dataset.view === name));
+    document.querySelectorAll('.view').forEach(el =>
+      el.classList.toggle('active', el.id === 'view-' + name));
+
+    if (name === 'traces') {
+      loadTraces();
+      if ($('filter-live').checked) ensureTraceStream();
+    } else {
+      stopTraceStream();
+    }
+  }
+
+  // ============================================================
+  // Admin data
+  // ============================================================
+  async function refreshAdmin() {
+    if (!token) return;
+    try {
+      const r = await fetch(API_DATA, { cache: 'no-store', headers: authHeaders() });
+      if (r.status === 401 || r.status === 403) { doLogout(); return; }
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const data = await r.json();
+      renderAdmin(data);
+      setLiveStatus(true, 'live · ' + new Date().toLocaleTimeString());
+    } catch (e) {
+      setLiveStatus(false, 'offline · ' + e.message);
+    }
+  }
+
+  function startAdminPoll() {
+    stopAdminPoll();
+    refreshAdmin();
+    adminTimer = setInterval(refreshAdmin, REFRESH_MS);
+  }
+  function stopAdminPoll() {
+    if (adminTimer) { clearInterval(adminTimer); adminTimer = null; }
+  }
+
+  function renderAdmin(data) {
+    const s = data.summary || {};
+    renderCards(s);
+    renderDevices(data.devices || []);
+    renderPlugins(data.plugins || []);
+    renderUsers(data.users || []);
+    $('raw-pre').textContent = JSON.stringify(data, null, 2);
+    $('count-devices').textContent = s.devices_total ?? '';
+    $('count-plugins').textContent = s.plugins_catalog ?? '';
+    $('count-users').textContent = s.users_total ?? '';
+  }
+
+  function renderCards(s) {
+    const cards = [
+      { label: 'Devices online', value: s.devices_online, sub: `of ${s.devices_total} registered` },
+      { label: 'Plugins catalog', value: s.plugins_catalog, sub: 'available to install' },
+      { label: 'Plugin installs', value: s.plugin_installations, sub: 'across all devices' },
+      { label: 'Users', value: s.users_total, sub: 'in the database' },
+      { label: 'Uptime', value: humanDuration(s.uptime_seconds), sub: 'since boot' },
+    ];
+    $('cards').innerHTML = cards.map(c => `
+      <div class="card">
+        <div class="label">${esc(c.label)}</div>
+        <div class="value">${esc(c.value ?? '—')}</div>
+        <div class="sub">${esc(c.sub)}</div>
+      </div>
+    `).join('');
+  }
+
+  function renderDevices(devices) {
+    const el = $('devices-content');
+    if (!devices.length) { el.innerHTML = '<div class="empty">No devices registered yet.</div>'; return; }
+    el.innerHTML = `
+      <table>
+        <thead><tr>
+          <th>Name</th><th>ID</th><th>Platform</th><th>Status</th>
+          <th>Connected</th><th>Last seen</th>
+        </tr></thead>
+        <tbody>
+          ${devices.map(d => `
+            <tr>
+              <td><strong>${esc(d.name)}</strong>
+                ${d.hostname ? `<br><small style="color:var(--muted)">${esc(d.hostname)}</small>` : ''}</td>
+              <td><code>${esc(d.id)}</code></td>
+              <td>${esc(d.platform || '')}/${esc(d.architecture || '')}</td>
+              <td>${badge(d.status || 'unknown', d.status === 'online' ? 'online' : 'offline')}</td>
+              <td>${d.connected ? badge('live', 'online') : badge('—', 'offline')}</td>
+              <td>${esc(d.last_seen || '—')}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>`;
+  }
+
+  function renderPlugins(plugins) {
+    const el = $('plugins-content');
+    if (!plugins.length) { el.innerHTML = '<div class="empty">No plugins in catalog.</div>'; return; }
+    el.innerHTML = `
+      <table>
+        <thead><tr>
+          <th>Plugin</th><th>Version</th><th>Platforms</th>
+          <th>Installs</th><th>Enabled</th><th>Details</th>
+        </tr></thead>
+        <tbody>
+          ${plugins.map(p => `
+            <tr>
+              <td><strong>${esc(p.name)}</strong><br><code>${esc(p.id)}</code></td>
+              <td>${esc(p.version || '')}</td>
+              <td>${esc((p.platforms || []).join(', '))}</td>
+              <td>${p.installations}</td>
+              <td>${p.enabled_on_devices}</td>
+              <td>
+                <details>
+                  <summary>${(p.devices || []).length} device(s)</summary>
+                  <ul>${(p.devices || []).map(d => `
+                    <li><code>${esc(d.device_id)}</code> @ ${esc(d.version)}
+                      ${d.is_installed ? badge('installed', 'online') : badge('not installed', 'offline')}
+                      ${d.enabled_on_device ? badge('enabled', 'enabled') : ''}
+                      ${d.last_error ? badge(d.last_error, 'error') : ''}
+                    </li>`).join('')}</ul>
+                </details>
+              </td>
+            </tr>`).join('')}
+        </tbody>
+      </table>`;
+  }
+
+  function renderUsers(users) {
+    const el = $('users-content');
+    if (!users.length) { el.innerHTML = '<div class="empty">No users yet.</div>'; return; }
+    el.innerHTML = `
+      <table>
+        <thead><tr>
+          <th>User</th><th>Created</th>
+          <th>Enabled</th><th>Total plugins</th><th>Details</th>
+        </tr></thead>
+        <tbody>
+          ${users.map(u => `
+            <tr>
+              <td><strong>${esc(u.email || u.id)}</strong>
+                ${u.is_admin ? badge('admin', 'admin') : ''}
+                <br><code>${esc(u.id)}</code></td>
+              <td>${esc(u.created_at || '—')}</td>
+              <td>${u.plugins_enabled}</td>
+              <td>${u.plugins_total}</td>
+              <td>
+                <details>
+                  <summary>view</summary>
+                  <ul>${(u.plugins || []).map(p => `
+                    <li><code>${esc(p.plugin_id)}</code>
+                      ${p.is_enabled ? badge('enabled', 'enabled') : badge('disabled', 'disabled')}
+                    </li>`).join('')}</ul>
+                </details>
+              </td>
+            </tr>`).join('')}
+        </tbody>
+      </table>`;
+  }
+
+  // ============================================================
+  // Traces
+  // ============================================================
+  $('btn-refresh-traces').addEventListener('click', loadTraces);
+  ['filter-user', 'filter-status', 'filter-errors'].forEach(id =>
+    $(id).addEventListener('change', loadTraces));
+  $('filter-live').addEventListener('change', () => {
+    $('filter-live').checked ? ensureTraceStream() : stopTraceStream();
+  });
+  $('tree-search').addEventListener('input', (e) => {
+    treeFilter = e.target.value.trim().toLowerCase();
+    applyTreeFilter();
+  });
+  $('btn-expand-all').addEventListener('click', () => {
+    currentTree.forEach(({ node }) => expandedNodes.add(node.id));
+    renderTree();
+  });
+  $('btn-collapse-all').addEventListener('click', () => {
+    expandedNodes.clear();
+    // Keep root expanded so the user still sees top-level spans
+    currentTree.filter(({ depth }) => depth === 0).forEach(({ node }) => expandedNodes.add(node.id));
+    renderTree();
+  });
+
+  async function loadTraces() {
+    if (!token) return;
+    const params = new URLSearchParams();
+    if ($('filter-user').value) params.set('user_id', $('filter-user').value);
+    if ($('filter-status').value) params.set('status', $('filter-status').value);
+    if ($('filter-errors').checked) params.set('has_error', 'true');
+    params.set('limit', '200');
+    try {
+      const r = await fetch(`${API_TRACES}?${params}`, { headers: authHeaders() });
+      if (r.status === 401 || r.status === 403) { doLogout(); return; }
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const data = await r.json();
+      renderTraces(data.traces || []);
+      $('count-traces').textContent = (data.traces || []).length;
+    } catch (e) {
+      $('trace-list').innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+    }
+  }
+
+  function renderTraces(traces) {
+    const el = $('trace-list');
+    if (!traces.length) { el.innerHTML = '<div class="empty">No traces yet</div>'; return; }
+    el.innerHTML = traces.map(t => `
+      <div class="trace-row ${selectedTraceId === t.trace_id ? 'active' : ''}"
+           data-id="${esc(t.trace_id)}">
+        <div class="top">
+          <span class="badge ${esc(t.status)}">${esc(t.status)}</span>
+          <span class="time">${humanTime(t.started_at)}</span>
+        </div>
+        <div class="goal">${esc((t.goal || t.user_id || '(anonymous)').slice(0, 80))}</div>
+        <div class="meta">
+          <span>${t.event_count} events</span>
+          ${t.error_count ? `<span style="color:var(--err)">${t.error_count} err</span>` : ''}
+          ${t.has_llm  ? `<span style="color:var(--llm)">💬</span>` : ''}
+          ${t.has_tool ? `<span style="color:var(--tool)">🔧</span>` : ''}
+          <span>${fmtDuration(t.duration_ms)}</span>
+        </div>
+      </div>
+    `).join('');
+    el.querySelectorAll('.trace-row').forEach(row => {
+      row.addEventListener('click', () => selectTrace(row.dataset.id));
+    });
+  }
+
+  async function selectTrace(id) {
+    selectedTraceId = id;
+    selectedNodeId = null;
+    $('trace-list').querySelectorAll('.trace-row').forEach(el =>
+      el.classList.toggle('active', el.dataset.id === id));
+
+    $('trace-header').innerHTML = '<div class="empty" style="padding:12px">Loading trace…</div>';
+    $('trace-stats').style.display = 'none';
+    $('tree-container').innerHTML = '<div class="empty" style="padding:20px">Loading…</div>';
+    $('trace-detail-pane').innerHTML = '<div class="placeholder">Select a node in the tree</div>';
+
+    try {
+      const r = await fetch(`${API_TRACES}/${id}`, { headers: authHeaders() });
+      if (r.status === 401 || r.status === 403) { doLogout(); return; }
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const data = await r.json();
+      currentSummary = data.summary;
+      currentEvents = data.events || [];
+      currentTree = buildFlatTree(currentEvents);
+      // Auto-expand all by default on first load
+      if (expandedNodes.size === 0) {
+        currentTree.forEach(({ node, depth }) => {
+          if (depth === 0 && node.children.length) expandedNodes.add(node.id);
+        });
+      }
+      renderTraceHeader(currentSummary);
+      renderTraceStats(currentSummary, currentEvents);
+      renderTree();
+    } catch (e) {
+      $('trace-header').innerHTML = `<div class="empty" style="padding:12px">${esc(e.message)}</div>`;
+    }
+  }
+
+  // ============================================================
+  // TREE BUILDER
+  // ============================================================
+  // Given the flat list of trace events, produce a linear array
+  // of { node, depth } items suitable for rendering. The tree is:
+  //   - one node per distinct span_id (from span.start/span.end pairs)
+  //   - children of a node = spans whose parent_span_id == node.id
+  //   - plus synthetic children: "LLM call" nodes from paired
+  //     llm.request + llm.response, "tool call" nodes from tool.call +
+  //     tool.result, and standalone error/log nodes.
+  function buildFlatTree(events) {
+    if (!events.length) return [];
+
+    // Group by span_id
+    const spans = new Map();
+    for (const ev of events) {
+      if (!spans.has(ev.span_id)) {
+        spans.set(ev.span_id, { start: null, end: null, points: [] });
+      }
+      const entry = spans.get(ev.span_id);
+      if (ev.kind === 'span.start' || ev.kind === 'trace.start') entry.start = ev;
+      else if (ev.kind === 'span.end' || ev.kind === 'trace.end') entry.end = ev;
+      else entry.points.push(ev);
+    }
+
+    // Build span nodes
+    const nodesById = new Map();
+    for (const [spanId, { start, end, points }] of spans) {
+      const startTs = start?.timestamp ?? end?.timestamp ?? 0;
+      const endTs = end?.timestamp ?? startTs;
+      const duration_ms = end?.duration_ms ?? Math.max(0, (endTs - startTs) * 1000);
+
+      const node = {
+        id: spanId,
+        name: start?.name ?? end?.name ?? 'unknown',
+        kind: start?.kind ?? end?.kind ?? 'span.start',
+        startTs,
+        endTs,
+        duration_ms,
+        attributes: { ...(start?.attributes || {}), ...(end?.attributes || {}) },
+        error: end?.error || start?.error || null,
+        parentId: start?.parent_span_id ?? end?.parent_span_id ?? null,
+        rawEvents: [start, end].filter(Boolean),
+        children: [],
+      };
+      nodesById.set(spanId, node);
+    }
+
+    // Pair up point events inside each span into synthetic children
+    for (const node of nodesById.values()) {
+      const spansOfNode = spans.get(node.id);
+      if (!spansOfNode) continue;
+      const points = [...spansOfNode.points].sort((a, b) => a.timestamp - b.timestamp);
+      const consumed = new Set();
+      let synthIdx = 0;
+
+      // Pair by (kind-pair, name): llm.request→llm.response, tool.call→tool.result
+      for (let i = 0; i < points.length; i++) {
+        if (consumed.has(i)) continue;
+        const ev = points[i];
+
+        if (ev.kind === 'llm.request' || ev.kind === 'tool.call') {
+          const isLlm = ev.kind === 'llm.request';
+          const respKind = isLlm ? 'llm.response' : 'tool.result';
+          let paired = null;
+          for (let j = i + 1; j < points.length; j++) {
+            if (consumed.has(j)) continue;
+            const ev2 = points[j];
+            if (ev2.kind === respKind && ev2.name === ev.name) {
+              paired = ev2;
+              consumed.add(i);
+              consumed.add(j);
+              break;
+            }
+          }
+          const kind = isLlm ? 'llm' : 'tool';
+          const startTs = ev.timestamp;
+          const endTs = paired?.timestamp ?? ev.timestamp;
+          const duration_ms = paired?.duration_ms ?? Math.max(0, (endTs - startTs) * 1000);
+          const attrs = isLlm
+            ? { request: ev.attributes, response: paired?.attributes || {} }
+            : { call: ev.attributes, result: paired?.attributes || {} };
+
+          node.children.push({
+            id: `${node.id}::${kind}::${synthIdx++}`,
+            name: ev.name,
+            kind,
+            startTs,
+            endTs,
+            duration_ms,
+            attributes: attrs,
+            error: paired?.error || ev.error || null,
+            parentId: node.id,
+            rawEvents: [ev, paired].filter(Boolean),
+            children: [],
+            incomplete: !paired,
+          });
+          if (!paired) consumed.add(i);
+          continue;
+        }
+
+        if (ev.kind === 'error' || ev.kind === 'log') {
+          consumed.add(i);
+          node.children.push({
+            id: `${node.id}::${ev.kind}::${synthIdx++}`,
+            name: ev.name,
+            kind: ev.kind,
+            startTs: ev.timestamp,
+            endTs: ev.timestamp,
+            duration_ms: 0,
+            attributes: ev.attributes || {},
+            error: ev.error || null,
+            parentId: node.id,
+            rawEvents: [ev],
+            children: [],
+          });
+        }
+      }
+
+      // Sort synthetic children by start
+      node.children.sort((a, b) => a.startTs - b.startTs);
+    }
+
+    // Link spans to each other via parent_span_id
+    const roots = [];
+    for (const node of nodesById.values()) {
+      if (node.parentId && nodesById.has(node.parentId)) {
+        nodesById.get(node.parentId).children.push(node);
+      } else {
+        roots.push(node);
+      }
+    }
+
+    // Sort roots & all children by start
+    const sortRec = (arr) => {
+      arr.sort((a, b) => a.startTs - b.startTs);
+      arr.forEach(n => sortRec(n.children));
+    };
+    sortRec(roots);
+
+    // Flatten
+    const out = [];
+    const walk = (nodes, depth) => {
+      for (const n of nodes) {
+        out.push({ node: n, depth });
+        walk(n.children, depth + 1);
+      }
+    };
+    walk(roots, 0);
+    return out;
+  }
+
+  // ============================================================
+  // TRACE HEADER + STATS
+  // ============================================================
+  function renderTraceHeader(summary) {
+    if (!summary) {
+      $('trace-header').innerHTML = '<div class="empty">No summary</div>';
+      return;
+    }
+    const goalText = summary.goal || '';
+    $('trace-header').innerHTML = `
+      <h2>
+        <span style="color:var(--trace)">▶</span>
+        ${esc(summary.name)}
+        <span class="badge ${esc(summary.status)}">${esc(summary.status)}</span>
+      </h2>
+      ${goalText ? `<div style="color:var(--muted);font-size:12px;margin-bottom:6px;font-style:italic">"${esc(goalText)}"</div>` : ''}
+      <div class="sub">
+        <span>trace <code>${esc(summary.trace_id)}</code></span>
+        <span>user <code>${esc(summary.user_id || '—')}</code></span>
+        <span>${humanTime(summary.started_at)}</span>
+        <span>${fmtDuration(summary.duration_ms)}</span>
+        <span>${summary.event_count} events</span>
+      </div>
+    `;
+  }
+
+  function renderTraceStats(summary, events) {
+    const statsEl = $('trace-stats');
+    // Compute LLM/tool/error aggregates from the events directly
+    let llmCount = 0, llmMs = 0;
+    let toolCount = 0, toolMs = 0;
+    let errorCount = 0;
+
+    for (let i = 0; i < events.length; i++) {
+      const ev = events[i];
+      if (ev.kind === 'llm.response') {
+        llmCount++;
+        llmMs += ev.duration_ms || 0;
+      } else if (ev.kind === 'tool.result') {
+        toolCount++;
+        toolMs += ev.duration_ms || 0;
+      } else if (ev.kind === 'error') {
+        errorCount++;
+      }
+    }
+
+    const chips = [
+      { icon: '⏱', label: 'Duration', value: fmtDuration(summary?.duration_ms), cls: '' },
+      { icon: '⚡', label: 'Spans', value: events.filter(e => e.kind === 'span.start').length, cls: '' },
+      { icon: '💬', label: 'LLM', value: `${llmCount}${llmMs ? ' · ' + fmtDuration(llmMs) : ''}`, cls: 'stat-llm' },
+      { icon: '🔧', label: 'Tools', value: `${toolCount}${toolMs ? ' · ' + fmtDuration(toolMs) : ''}`, cls: 'stat-tool' },
+    ];
+    if (errorCount) {
+      chips.push({ icon: '✖', label: 'Errors', value: errorCount, cls: 'stat-err' });
+    }
+
+    statsEl.innerHTML = chips.map(c => `
+      <div class="stat-chip ${c.cls}">
+        <span class="stat-icon">${c.icon}</span>
+        <span>${esc(c.label)}:</span>
+        <span class="stat-value">${esc(c.value)}</span>
+      </div>
+    `).join('');
+    statsEl.style.display = 'flex';
+  }
+
+  // ============================================================
+  // TREE RENDER
+  // ============================================================
+  function treeDuration() {
+    if (!currentEvents.length) return 0;
+    const start = Math.min(...currentEvents.map(e => e.timestamp));
+    const end = Math.max(...currentEvents.map(e => e.timestamp));
+    return Math.max(1, (end - start) * 1000);
+  }
+
+  function renderTree() {
+    const el = $('tree-container');
+    if (!currentTree.length) {
+      el.innerHTML = '<div class="empty" style="padding:20px">No events</div>';
+      return;
+    }
+
+    const traceStartTs = Math.min(...currentEvents.map(e => e.timestamp));
+    const totalMs = treeDuration();
+
+    // Build rows with visibility based on expandedNodes
+    const visibleRows = [];
+    const visibleSet = new Set();
+
+    // A node is visible if all its ancestors are expanded
+    // (Walk down the flat list; track which depths are visible)
+    const stack = [];  // { id, depth }
+    for (const { node, depth } of currentTree) {
+      // Pop stack entries whose depth >= this depth
+      while (stack.length && stack[stack.length - 1].depth >= depth) {
+        stack.pop();
+      }
+      const parentVisible = stack.length === 0 ||
+        (stack[stack.length - 1].id && expandedNodes.has(stack[stack.length - 1].id));
+
+      // If filter is set, show nodes whose subtree contains a match
+      // (simplified: just match the node's own name)
+      const matchesFilter = !treeFilter ||
+        node.name.toLowerCase().includes(treeFilter) ||
+        node.id.toLowerCase().includes(treeFilter);
+
+      if (parentVisible && matchesFilter) {
+        visibleRows.push({ node, depth });
+        visibleSet.add(node.id);
+      }
+      // Push this node to stack so its children can be evaluated
+      stack.push({ id: node.id, depth });
+    }
+
+    if (!visibleRows.length) {
+      el.innerHTML = '<div class="empty" style="padding:20px">No matches</div>';
+      return;
+    }
+
+    el.innerHTML = visibleRows.map(({ node, depth }) => {
+      const hasChildren = node.children.length > 0;
+      const isExpanded = expandedNodes.has(node.id);
+      const isSelected = selectedNodeId === node.id;
+      const iconClass = iconFor(node.kind === 'span.start' ? 'span.start' : node.kind);
+      const icon = ICONS[iconClass] || '•';
+
+      // Waterfall bar
+      const relStart = ((node.startTs - traceStartTs) * 1000) / totalMs;
+      const relWidth = (node.duration_ms / totalMs);
+      const leftPct = Math.max(0, Math.min(100, relStart * 100));
+      const widthPct = Math.max(0.5, Math.min(100 - leftPct, relWidth * 100));
+
+      const barClass = `kind-${node.kind === 'llm' ? 'llm' :
+        node.kind === 'tool' ? 'tool' :
+        node.kind === 'error' ? 'error' :
+        node.kind === 'log' ? 'log' :
+        node.kind === 'trace.start' || node.kind === 'trace.end' ? 'trace' : 'span'}`;
+
+      const indentLines = '<div class="indent" style="width:' + (depth * 14) + 'px"></div>';
+
+      const incompleteMark = node.incomplete
+        ? '<span class="status-pill error">incomplete</span>'
+        : '';
+
+      return `
+        <div class="tree-row ${isSelected ? 'selected' : ''} ${node.error ? 'error' : ''}"
+             data-id="${esc(node.id)}">
+          <span class="chev ${hasChildren ? '' : 'leaf'}">${hasChildren ? (isExpanded ? '▼' : '▶') : '·'}</span>
+          ${indentLines}
+          <span class="icon ${iconClass}">${icon}</span>
+          <span class="name" title="${esc(node.name)}">${esc(node.name)}</span>
+          ${incompleteMark}
+          <div class="bar-track">
+            <div class="bar-fill ${barClass}"
+                 style="left:${leftPct}%;width:${widthPct}%"></div>
+          </div>
+          <span class="duration">${fmtDuration(node.duration_ms)}</span>
+        </div>
+      `;
+    }).join('');
+
+    // Wire up interactions
+    el.querySelectorAll('.tree-row').forEach(row => {
+      const nodeId = row.dataset.id;
+      const node = currentTree.find(t => t.node.id === nodeId)?.node;
+      if (!node) return;
+
+      row.addEventListener('click', (e) => {
+        // Chevron → toggle
+        if (e.target.classList.contains('chev')) {
+          if (node.children.length) {
+            expandedNodes.has(nodeId) ? expandedNodes.delete(nodeId) : expandedNodes.add(nodeId);
+            renderTree();
+          }
+          return;
+        }
+        // Row → select
+        selectNode(nodeId);
+      });
+    });
+
+    // Auto-scroll selected into view
+    if (selectedNodeId) {
+      const sel = el.querySelector(`.tree-row[data-id="${CSS.escape(selectedNodeId)}"]`);
+      if (sel) sel.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+  }
+
+  function applyTreeFilter() {
+    renderTree();
+  }
+
+  // ============================================================
+  // SELECT NODE → DETAIL PANE
+  // ============================================================
+  function selectNode(nodeId) {
+    selectedNodeId = nodeId;
+    renderTree();
+    renderDetailPane(nodeId);
+  }
+
+  function renderDetailPane(nodeId) {
+    const entry = currentTree.find(t => t.node.id === nodeId);
+    if (!entry) {
+      $('trace-detail-pane').innerHTML = '<div class="placeholder">Node not found</div>';
+      return;
+    }
+    const node = entry.node;
+    const iconClass = iconFor(node.kind === 'span.start' ? 'span.start' : node.kind);
+    const icon = ICONS[iconClass] || '•';
+
+    let html = `
+      <div class="detail-header">
+        <div class="title">
+          <span class="icon ${iconClass}">${icon}</span>
+          ${esc(node.name)}
+        </div>
+        <dl class="meta">
+          <dt>Kind</dt><dd>${esc(node.kind)}</dd>
+          <dt>Started</dt><dd>${humanTime(node.startTs)}</dd>
+          <dt>Duration</dt><dd>${fmtDuration(node.duration_ms)}</dd>
+          <dt>Node ID</dt><dd><code style="font-size:10px">${esc(node.id)}</code></dd>
+          ${node.parentId ? `<dt>Parent</dt><dd><code style="font-size:10px">${esc(node.parentId)}</code></dd>` : ''}
+        </dl>
+      </div>
+    `;
+
+    if (node.error) {
+      html += `
+        <div class="detail-section">
+          <div class="section-head">
+            <span class="section-title" style="color:var(--err)">✖ Error</span>
+            <button class="copy-btn" data-copy="${esc(node.error)}">Copy</button>
+          </div>
+          <pre class="error-box">${esc(node.error)}</pre>
+        </div>
+      `;
+    }
+
+    if (node.kind === 'llm') {
+      html += renderLlmSections(node);
+    } else if (node.kind === 'tool') {
+      html += renderToolSections(node);
+    } else {
+      html += renderSpanSections(node);
+    }
+
+    $('trace-detail-pane').innerHTML = html;
+    wireCopyButtons();
+  }
+
+  function renderLlmSections(node) {
+    const req = node.attributes?.request || {};
+    const res = node.attributes?.response || {};
+
+    const model = req.model || res.model || '(unknown)';
+    const provider = req.provider || res.provider || '(unknown)';
+    const usage = res.usage || (res.extra && res.extra.usage) || null;
+
+    let out = `
+      <div class="detail-section">
+        <div class="kv-grid">
+          <dt>Provider</dt><dd>${esc(provider)}</dd>
+          <dt>Model</dt><dd>${esc(model)}</dd>
+        </div>
+      </div>
+    `;
+
+    if (usage) {
+      out += `
+        <div class="detail-section">
+          <div class="section-head">
+            <span class="section-title">Token usage</span>
+          </div>
+          <div class="usage-grid">
+            <div class="usage-chip">
+              <div class="u-label">Prompt</div>
+              <div class="u-value">${esc(usage.prompt_tokens ?? '—')}</div>
+            </div>
+            <div class="usage-chip">
+              <div class="u-label">Completion</div>
+              <div class="u-value">${esc(usage.completion_tokens ?? '—')}</div>
+            </div>
+            <div class="usage-chip">
+              <div class="u-label">Total</div>
+              <div class="u-value">${esc(usage.total_tokens ?? '—')}</div>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    const promptText = req.prompt || '';
+    const responseText = res.response || '';
+
+    if (promptText) {
+      out += `
+        <div class="detail-section">
+          <div class="section-head">
+            <span class="section-title">Prompt</span>
+            <button class="copy-btn" data-copy="${esc(promptText)}">Copy</button>
+          </div>
+          <pre class="prompt">${esc(promptText)}</pre>
+        </div>
+      `;
+    }
+
+    if (responseText) {
+      out += `
+        <div class="detail-section">
+          <div class="section-head">
+            <span class="section-title">Response</span>
+            <button class="copy-btn" data-copy="${esc(responseText)}">Copy</button>
+          </div>
+          <pre class="response">${esc(responseText)}</pre>
+        </div>
+      `;
+    }
+
+    // Anything else (finish_reason, extra) — dump remaining keys
+    const other = {};
+    for (const [k, v] of Object.entries(req)) {
+      if (k !== 'prompt' && k !== 'provider' && k !== 'model') other['req.' + k] = v;
+    }
+    for (const [k, v] of Object.entries(res)) {
+      if (k !== 'response' && k !== 'provider' && k !== 'model' && k !== 'usage') {
+        other['res.' + k] = v;
+      }
+    }
+    if (Object.keys(other).length) {
+      out += `
+        <div class="detail-section">
+          <div class="section-head">
+            <span class="section-title">Other attributes</span>
+            <button class="copy-btn" data-copy='${esc(JSON.stringify(other, null, 2))}'>Copy</button>
+          </div>
+          <pre>${esc(JSON.stringify(other, null, 2))}</pre>
+        </div>
+      `;
+    }
+
+    return out;
+  }
+
+  function renderToolSections(node) {
+    const call = node.attributes?.call || {};
+    const result = node.attributes?.result || {};
+
+    const capability = call.capability || result.capability || '(unknown)';
+    const plugin = call.plugin || result.plugin || '(unknown)';
+    const deviceId = call.device_id || result.device_id || '(unknown)';
+
+    let out = `
+      <div class="detail-section">
+        <div class="kv-grid">
+          <dt>Capability</dt><dd>${esc(capability)}</dd>
+          <dt>Plugin</dt><dd>${esc(plugin)}</dd>
+          <dt>Device</dt><dd><code style="font-size:10px">${esc(deviceId)}</code></dd>
+        </div>
+      </div>
+    `;
+
+    const params = call.parameters || {};
+    if (Object.keys(params).length) {
+      out += `
+        <div class="detail-section">
+          <div class="section-head">
+            <span class="section-title">Parameters (input)</span>
+            <button class="copy-btn" data-copy='${esc(JSON.stringify(params, null, 2))}'>Copy</button>
+          </div>
+          <pre>${esc(JSON.stringify(params, null, 2))}</pre>
+        </div>
+      `;
+    }
+
+    const res = result.result || {};
+    if (Object.keys(res).length) {
+      out += `
+        <div class="detail-section">
+          <div class="section-head">
+            <span class="section-title">Result (output)</span>
+            <button class="copy-btn" data-copy='${esc(JSON.stringify(res, null, 2))}'>Copy</button>
+          </div>
+          <pre>${esc(JSON.stringify(res, null, 2))}</pre>
+        </div>
+      `;
+    }
+
+    return out;
+  }
+
+  function renderSpanSections(node) {
+    const attrs = node.attributes || {};
+    if (!Object.keys(attrs).length) {
+      return '<div class="detail-section"><div class="placeholder" style="padding:16px">No attributes</div></div>';
+    }
+    return `
+      <div class="detail-section">
+        <div class="section-head">
+          <span class="section-title">Attributes</span>
+          <button class="copy-btn" data-copy='${esc(JSON.stringify(attrs, null, 2))}'>Copy</button>
+        </div>
+        <pre>${esc(JSON.stringify(attrs, null, 2))}</pre>
+      </div>
+    `;
+  }
+
+  function wireCopyButtons() {
+    $('trace-detail-pane').querySelectorAll('.copy-btn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const text = btn.dataset.copy || '';
+        try {
+          await navigator.clipboard.writeText(text);
+          const orig = btn.textContent;
+          btn.textContent = 'Copied';
+          setTimeout(() => { btn.textContent = orig; }, 1200);
+        } catch {
+          btn.textContent = 'Failed';
+          setTimeout(() => { btn.textContent = 'Copy'; }, 1200);
+        }
+      });
+    });
+  }
+
+  // ============================================================
+  // LIVE STREAM
+  // ============================================================
+  function ensureTraceStream() {
+    if (traceStreamStop) return;
+    let stopped = false;
+    traceStreamStop = () => { stopped = true; };
+
+    (async () => {
+      try {
+        const r = await fetch(API_TRACES_STREAM, { headers: authHeaders() });
+        if (r.status === 401 || r.status === 403) { doLogout(); return; }
+        if (!r.ok) return;
+
+        const reader = r.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = '';
+
+        while (!stopped) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          const parts = buf.split('\n\n');
+          buf = parts.pop();
+          for (const chunk of parts) {
+            const line = chunk.split('\n').find(l => l.startsWith('data: '));
+            if (!line) continue;
+            try {
+              const ev = JSON.parse(line.slice(6));
+              // Refresh trace list on every event
+              loadTraces();
+              // If the selected trace received a new event, refresh its content
+              if (selectedTraceId && ev.trace_id === selectedTraceId) {
+                // Small debounce so a burst of events doesn't thrash the DOM
+                scheduleTraceRefresh(selectedTraceId);
+              }
+            } catch {}
+          }
+        }
+      } catch {}
+    })();
+  }
+
+  function stopTraceStream() {
+    if (traceStreamStop) { traceStreamStop(); traceStreamStop = null; }
+  }
+
+  // Debounced refresh of the currently selected trace
+  let refreshTimer = null;
+  function scheduleTraceRefresh(traceId) {
+    if (refreshTimer) clearTimeout(refreshTimer);
+    refreshTimer = setTimeout(async () => {
+      // Preserve user's expanded/selected state across refresh
+      const prevExpanded = new Set(expandedNodes);
+      const prevSelected = selectedNodeId;
+      try {
+        const r = await fetch(`${API_TRACES}/${traceId}`, { headers: authHeaders() });
+        if (!r.ok) return;
+        const data = await r.json();
+        currentSummary = data.summary;
+        currentEvents = data.events || [];
+        currentTree = buildFlatTree(currentEvents);
+        // Restore expanded state (new nodes default to collapsed)
+        expandedNodes = prevExpanded;
+        renderTraceHeader(currentSummary);
+        renderTraceStats(currentSummary, currentEvents);
+        renderTree();
+        if (prevSelected) {
+          renderDetailPane(prevSelected);
+        }
+      } catch {}
+    }, 300);
+  }
+
+  // ============================================================
+  // Boot
+  // ============================================================
+  boot();
+})();
+</script>
+</body>
+</html>

@@ -37,7 +37,7 @@ async def list_tasks(status: Optional[str] = None, priority: Optional[int] = Non
 @router.post("/{task_id}/pause")
 async def pause_task(task_id: str,orchestrator: TaskOrchestrator = Depends(get_orchestrator)):
     """Pause a task"""
-    task = orchestrator.task_manager.pause(task_id)
+    task = await orchestrator.task_manager.pause(task_id)
 
     if not task:
         raise HTTPException(404, "Task not found")
@@ -47,13 +47,12 @@ async def pause_task(task_id: str,orchestrator: TaskOrchestrator = Depends(get_o
 @router.post("/{task_id}/resume")
 async def resume_task(task_id: str,orchestrator: TaskOrchestrator = Depends(get_orchestrator)):
     """Resume a task"""
-    task = orchestrator.task_manager.resume(task_id)
+    task = await orchestrator.task_manager.resume(task_id)
 
     if not task:
         raise HTTPException(404, "Task not found")
 
     return task
-
 
 
 @router.post("/{task_id}/cancel")
@@ -71,8 +70,7 @@ async def cancel_task(task_id: str,orchestrator: TaskOrchestrator = Depends(get_
 @router.get("/{task_id}")
 async def get_task(task_id: str, orchestrator: TaskOrchestrator = Depends(get_orchestrator)):
     """Get task details"""
-    tasks = await list_tasks(orchestrator=orchestrator)
-    task = next((item for item in tasks["tasks"] if str(item.get("id")) == task_id), None)
+    task = await orchestrator.task_manager.get(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    return task
+    return {"task": task.to_dict()}
