@@ -7,6 +7,7 @@ from sqlalchemy import (
     Boolean,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     JSON,
     String,
@@ -21,6 +22,80 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# ===========================================================
+# Chat
+# ==========================================================
+from sqlalchemy import Text
+
+class ChatSessionModel(Base):
+    __tablename__ = "chat_sessions"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    user_id: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    title: Mapped[str] = mapped_column(
+        String(256), default="New chat", nullable=False,
+    )
+    message_count: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False,
+    )
+    last_message_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(
+        "metadata", JSON, default=dict, nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False,
+    )
+
+    messages: Mapped[list["ChatMessageModel"]] = relationship(
+        back_populates="session",
+        cascade="all, delete-orphan",
+        order_by="ChatMessageModel.created_at",
+    )
+
+    __table_args__ = (
+        Index("ix_chat_sessions_user_last", "user_id", "last_message_at"),
+    )
+
+
+class ChatMessageModel(Base):
+    __tablename__ = "chat_messages"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    session_id: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("chat_sessions.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    role: Mapped[str] = mapped_column(
+        String(16), nullable=False,   # 'user' | 'assistant' | 'system'
+    )
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+
+    # Populated only on assistant messages that ran a plan.
+    plan_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    task_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    status: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(
+        "metadata", JSON, default=dict, nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False, index=True,
+    )
+
+    session: Mapped["ChatSessionModel"] = relationship(
+        back_populates="messages",
+    )
+    
 # ============================================================
 # Users
 # ============================================================
@@ -92,7 +167,7 @@ class DeviceModel(Base):
     user_id: Mapped[Optional[str]] = mapped_column(
         String(128),
         ForeignKey("users.id", ondelete="SET NULL"),
-        nullable=True,
+        nullable=False,
         index=True,
     )
 
