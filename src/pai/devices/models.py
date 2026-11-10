@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from enum import Enum
+from enum import Enum, StrEnum
 from typing import Any, Dict, List, Optional
 import uuid
 
@@ -14,7 +14,19 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-class DeviceType(str, Enum):
+class DevicePlatform(StrEnum):
+    """Supported device platforms."""
+
+    WINDOWS = "windows"
+    MACOS = "macos"
+    LINUX = "linux"
+    ANDROID = "android"
+    IOS = "ios"
+    PYTHON = "python" 
+    UNKNOWN = "unknown"
+
+
+class DeviceType(StrEnum):
     """Supported device categories."""
 
     DESKTOP = "desktop"
@@ -26,9 +38,17 @@ class DeviceType(str, Enum):
     UNKNOWN = "unknown"
 
 
-class DeviceStatus(str, Enum):
-    """Current device availability."""
+class DeviceStatus(StrEnum):
+    """
+    Device lifecycle state.
 
+    StrEnum (not Enum) is critical: it makes
+        str(DeviceStatus.ONLINE) == "online"
+        DeviceStatus.ONLINE == "online"
+    so accidental `str(status)` calls produce the correct value instead
+    of "DeviceStatus.ONLINE". This eliminates the class of bug where
+    enum reprs leak into DB columns.
+    """
     ONLINE = "online"
     OFFLINE = "offline"
     CONNECTING = "connecting"
@@ -68,6 +88,10 @@ class DeviceInfo(BaseModel):
 
     id: str
     name: str
+    description: Optional[str] = None
+
+    # Device owner.
+    user_id: str
 
     device_type: DeviceType = DeviceType.UNKNOWN
     status: DeviceStatus = DeviceStatus.UNKNOWN
@@ -77,7 +101,7 @@ class DeviceInfo(BaseModel):
     runtime_version: str = "1.0.0"
 
     # Device platform information.
-    platform: Optional[str] = None
+    platform: Optional[DevicePlatform] = None
     platform_version: Optional[str] = None
     os_version: str = ""
     architecture: Optional[str] = None
@@ -123,12 +147,12 @@ class DeviceRegistrationInfo(BaseModel):
     """Inner block of a device registration request."""
 
     name: str
-    device_type: str = "unknown"
+    device_type: DeviceType = DeviceType.UNKNOWN
 
     app_version: str = "1.0.0"
     runtime_version: str = "1.0.0"
 
-    platform: Optional[str] = None
+    platform: Optional[DevicePlatform] = None
     platform_version: Optional[str] = None
     os_version: Optional[str] = None
 

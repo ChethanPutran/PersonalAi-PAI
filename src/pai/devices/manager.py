@@ -1,149 +1,205 @@
 """Device manager."""
-
 from __future__ import annotations
 
+import time
 from typing import Any, Callable, Dict, List, Optional
 
 from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
-from uuid_utils import uuid4
+from uuid import uuid4
 
 from pai.devices.connection import DeviceConnection
 from pai.devices.models import (
     DeviceFilter,
     DeviceInfo,
+    DevicePlatform,
     DeviceRegistration,
     DeviceStatus,
+    DeviceType,
 )
 from pai.devices.registry import DeviceRegistry
+from pai.devices.utils import _normalize_status, _device_summary
+from pai.observability.tracer import get_tracer
 from pai.storage.repositories.device import DeviceRepository
+from pai.common.manager import Manager
+
+# ============================================================================
+# Helpers
+# ============================================================================
 
 
-class DeviceManager:
+
+
+# ============================================================================
+# DeviceManager
+# ============================================================================
+
+class DeviceManager(Manager):
     """
     High-level device management facade.
 
-    Responsibilities:
-    - Register/unregister devices
-    - Persist device metadata to the DB (when session_factory is set)
-    - Track device metadata/state
-    - Track live device connections
-    - Find devices by capabilities
-    - Send messages through active connections
-
-    The registry (in-memory) is the runtime view; the DB is the
-    durable view. On initialize() the DB is loaded into the registry.
-    On register/status changes the DB is updated alongside the registry.
+    The registry (in-memory) is the runtime view; the DB is the durable
+    view. On `initialize()` the DB is loaded into the registry. Every
+    state change is mirrored to both.
     """
+    name = "device_manager"
 
     def __init__(
         self,
-        registry: Optional[DeviceRegistry] = None,
-        session_factory: Optional[Callable[[], AsyncSession]] = None,
+        session_factory: Optional[Callable[[], AsyncSession]],
     ) -> None:
-        self.registry = registry or DeviceRegistry()
-        self._session_factory = session_factory
-
-        # Active transport connections.
+        super().__init__(session_factory=session_factory)
+        self.registry = DeviceRegistry()
         self._connections: Dict[str, DeviceConnection] = {}
-
-        self._initialized = False
+        self._capability_router: Any = None
 
     # ------------------------------------------------------------------
-    # Internal session helper
+    # Router wiring
     # ------------------------------------------------------------------
 
-    async def _with_session(self, fn):
-        """
-        Open a scoped session, run [fn], commit, close.
+    def set_capability_router(self, router: Any) -> None:
+        self._capability_router = router
 
-        If no session_factory is configured, this is a no-op that
-        silently skips persistence — useful for tests that don't
-        have a DB.
-        """
-        if self._session_factory is None:
-            return None
-
-        session = self._session_factory()
+    def _invalidate_router(self, user_id: Optional[str] = None) -> None:
+        if self._capability_router is None:
+            logger.warning(
+                "Capability router not set — cannot invalidate for user {}", user_id,
+            )
+            return
         try:
-            result = await fn(session)
-            await session.commit()
-            return result
-        except Exception:
-            await session.rollback()
-            raise
-        finally:
-            await session.close()
+            self._capability_router.invalidate(user_id)
+        except Exception as exc:
+            logger.warning("Router invalidation failed: {}", exc)
+
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
-    async def initialize(self) -> None:
-        """Initialize device management and load persisted devices."""
+    async def _on_initialize(self):
+        tracer = get_tracer()
+        async with tracer.span("device_manager.initialize") as span:
+            await self.registry.initialize()
 
-        await self.registry.initialize()
+            if self._session_factory is not None:
+                try:
+                    await self._load_from_db()
+                except Exception as exc:
+                    logger.warning("Failed to load devices from DB: {}", exc)
+                    span.set_error(str(exc))
 
-        if self._session_factory is not None:
-            try:
-                await self._load_from_db()
-            except Exception as exc:
-                logger.warning("Failed to load devices from DB: {}", exc)
+            devices = await self.registry.all()
+            span.set_attribute("device_count", len(devices))
+            span.set_attribute(
+                "devices",
+                [
+                    _device_summary(d, connected=d.id in self._connections)
+                    for d in devices
+                ],
+            )
 
-        self._initialized = True
+            status_breakdown: Dict[str, int] = {}
+            for d in devices:
+                key = _normalize_status(getattr(d, "status", None))
+                status_breakdown[key] = status_breakdown.get(key, 0) + 1
+            span.set_attribute("status_breakdown", status_breakdown)
 
-        logger.info(
-            "Device manager initialized ({} devices in registry)",
-            len(await self.registry.all()),
-        )
+            logger.info(
+                "Device manager initialized ({} devices: {})",
+                len(devices), status_breakdown,
+            )
 
     async def _load_from_db(self) -> None:
-        """Load every DeviceModel row into the in-memory registry."""
+        """
+        Load every DeviceModel row into the registry.
 
-        async def _do(session: AsyncSession):
-            repo = DeviceRepository(session)
-            return await repo.list_all()
+        Per-row try/except — one bad row is skipped with a warning, the
+        rest load normally. The span records both loaded and failed rows
+        so the trace shows exactly what happened at startup.
+        """
+        tracer = get_tracer()
+        async with tracer.span("device_manager.load_from_db") as span:
+            async def _do(session: AsyncSession):
+                repo = DeviceRepository(session)
+                return await repo.list_all()
 
-        records = await self._with_session(_do) or []
+            records = await self._with_session(_do) or []
+            span.set_attribute("row_count", len(records))
 
-        for r in records:
-            info = DeviceInfo(
-                id=r.id,
-                name=r.name or "",
-                device_type=r.device_type or "unknown",
-                status=r.status or "offline",
-                app_version=r.app_version or "",
-                runtime_version=r.runtime_version or "",
-                platform=r.platform or "unknown",
-                platform_version=r.platform_version or "",
-                os_version=r.os_version or "",
-                architecture=r.architecture or "",
-                hostname=r.hostname or "",
-                capabilities=r.capabilities or [],
+            loaded: List[Dict[str, Any]] = []
+            failed: List[Dict[str, str]] = []
+
+            if not records:
+                logger.info("No devices found in DB")
+                return
+
+            for r in records:
+                try:
+                    if (r.user_id is None):
+                        raise ValueError(
+                            f"Device {r.id} not owned by user {r.user_id}"
+                        )
+                    info = DeviceInfo(
+                        id=r.id,
+                        name=r.name or "",
+                        user_id=r.user_id,
+                        device_type= DeviceType(r.device_type) if r.device_type else DeviceType.UNKNOWN,
+                        status=_normalize_status(r.status),
+                        app_version=r.app_version or "",
+                        runtime_version=r.runtime_version or "",
+                        platform= DevicePlatform(r.platform) if r.platform else DevicePlatform.UNKNOWN,
+                        platform_version=r.platform_version or "",
+                        os_version=r.os_version or "",
+                        architecture=r.architecture or "",
+                        hostname=r.hostname or "",
+                        capabilities=r.capabilities or [],
+                    )
+                    await self.registry.register(info)
+                    loaded.append({
+                        "id":       r.id,
+                        "name":     info.name,
+                        "status":   info.status,
+                        "user_id":  r.user_id,
+                        "raw_status_in_db": str(r.status),
+                    })
+                except Exception as exc:
+                    logger.warning(
+                        "Skipping bad device row {}: {}", r.id, exc,
+                    )
+                    failed.append({
+                        "device_id": str(r.id),
+                        "error": str(exc)[:200],
+                    })
+
+            span.set_attribute("loaded", loaded)
+            span.set_attribute("failed", failed)
+
+            logger.info(
+                "Loaded {} of {} devices from DB ({} skipped)",
+                len(loaded), len(records), len(failed),
             )
-            try:
-                await self.registry.register(info)
-            except Exception as exc:
-                logger.warning(
-                    "Failed to restore device {} from DB: {}",
-                    r.id, exc,
-                )
 
-        logger.info("Loaded {} devices from DB", len(records))
+    async def get_status(self, *, user_id: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Return a compact status summary for a user.
 
-    async def get_status(self, user_id: str) -> Dict[str, Any]:
-        """Get the status of the device manager."""
-
+        Uses `registry.all()` (unfiltered) plus a Python filter so a
+        registry bug in `all(user_id)` can't hide devices from callers
+        that rely on this method for health checks.
+        """
         try:
-            registered = await self.registry.all(user_id)
-        except TypeError:
-            # Some registries ignore user_id.
-            registered = await self.registry.all()
+            all_devices = await self.registry.all()
+            registered = [
+                d for d in all_devices
+                if getattr(d, "user_id", None) == user_id
+            ]
+        except Exception:
+            registered = []
 
         return {
-            "initialized": self._initialized,
+            "initialized":        self._initialized,
             "registered_devices": len(registered),
-            "connected_devices": len(self._connections),
+            "connected_devices":  len(self._connections),
         }
 
     # ------------------------------------------------------------------
@@ -154,69 +210,68 @@ class DeviceManager:
         self,
         registration: DeviceRegistration | DeviceInfo,
         *,
+        user_id: str,
         connection_type: Optional[str] = None,
         connection_config: Optional[Dict[str, Any]] = None,
     ) -> DeviceInfo:
         """
-        Register a device.
-
-        Registration does NOT establish a network connection.
-
-        The actual WebSocket connection is established later by:
-
-            WS /devices/{device_id}/ws
+        Register a device. Does NOT establish a network connection —
+        the WebSocket endpoint does that later via `attach_connection`.
         """
+        tracer = get_tracer()
+        async with tracer.span(
+            "device_manager.register",
+            user_id=user_id,
+            connection_type=connection_type,
+        ) as span:
 
-        if isinstance(registration, DeviceRegistration):
+            if isinstance(registration, DeviceRegistration):
+                data = registration.device.model_dump()
+                device = DeviceInfo(
+                    id=str(uuid4()),
+                    user_id=user_id,
+                    **data,
+                )
+                connection_type = registration.connection_type or connection_type
+                connection_config = (
+                    registration.connection_config or connection_config
+                )
+            else:
+                device = registration
+                if not device.id:
+                    device.id = str(uuid4())
+                device.user_id = user_id
 
-            data = registration.device.model_dump()
+            device.status = _normalize_status(getattr(device, "status", None))
 
-            device = DeviceInfo(
-                id=str(uuid4()),
-                **data,
-            )
+            span.set_attribute("device_id", device.id)
+            span.set_attribute("device_type", device.device_type)
+            span.set_attribute("platform", device.platform)
+            span.set_attribute("status", device.status)
 
-            connection_type = (
-                registration.connection_type or connection_type
-            )
-            connection_config = (
-                registration.connection_config or connection_config
-            )
+            # 1. Persist first
+            try:
+                await self._persist_upsert(device)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to persist device {} to DB: {}", device.id, exc,
+                )
+                span.set_attribute("persist_failed", True)
 
-        else:
-            device = registration
+            # 2. Mirror in memory
+            await self.registry.register(device)
+            self._invalidate_router(user_id)
 
-            if not device.id:
-                device.id = str(uuid4())
+            logger.info("Device registered: {} ({})", device.id, device.name)
+            return device
 
-        # 1. Persist to DB first so that if the process crashes we still
-        #    have a record. If persistence fails we don't block registration.
-        try:
-            await self._persist_upsert(device)
-        except Exception as exc:
-            logger.warning(
-                "Failed to persist device {} to DB: {}",
-                device.id, exc,
-            )
-
-        # 2. Mirror in memory.
-        await self.registry.register(device)
-
-        if connection_type:
-            logger.debug(
-                "Device {} requested connection type '{}'",
-                device.id,
-                connection_type,
-            )
-
-        return device
-
-    async def _persist_upsert(self, device: DeviceInfo) -> None:
-        async def _do(session: AsyncSession):
+    async def _persist_upsert(self, device) -> None:
+        async def _do(session):
             repo = DeviceRepository(session)
             await repo.upsert(
                 device_id=device.id,
                 name=getattr(device, "name", "") or "",
+                user_id=getattr(device, "user_id", None),
                 device_type=getattr(device, "device_type", "unknown") or "unknown",
                 platform=getattr(device, "platform", "unknown") or "unknown",
                 platform_version=getattr(device, "platform_version", "") or "",
@@ -225,37 +280,39 @@ class DeviceManager:
                 hostname=getattr(device, "hostname", "") or "",
                 app_version=getattr(device, "app_version", "") or "",
                 runtime_version=getattr(device, "runtime_version", "") or "",
-                status=getattr(device, "status", "offline") or "offline",
+                status=_normalize_status(getattr(device, "status", None)),
                 capabilities=getattr(device, "capabilities", []) or [],
             )
-
         await self._with_session(_do)
 
-    async def unregister(
-        self,
-        device_id: str,
-    ) -> bool:
-        """Disconnect and unregister a device."""
+    async def unregister(self, device_id: str) -> bool:
+        tracer = get_tracer()
+        async with tracer.span(
+            "device_manager.unregister", device_id=device_id,
+        ) as span:
+            existing = await self.registry.get(device_id)
+            user_id = getattr(existing, "user_id", None) if existing else None
 
-        await self.disconnect(device_id)
+            await self.disconnect(device_id)
 
-        # Remove from DB first.
-        try:
-            async def _do(session: AsyncSession):
-                repo = DeviceRepository(session)
-                await repo.delete(device_id)
+            try:
+                async def _do(session: AsyncSession):
+                    repo = DeviceRepository(session)
+                    await repo.delete(device_id)
+                await self._with_session(_do)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to delete device {} from DB: {}", device_id, exc,
+                )
+                span.set_attribute("db_delete_failed", True)
 
-            await self._with_session(_do)
-        except Exception as exc:
-            logger.warning(
-                "Failed to delete device {} from DB: {}",
-                device_id, exc,
-            )
-
-        return await self.registry.unregister(device_id)
+            removed = await self.registry.unregister(device_id)
+            span.set_attribute("removed", removed)
+            self._invalidate_router(user_id)
+            return removed
 
     # ------------------------------------------------------------------
-    # Device lookup
+    # Lookup
     # ------------------------------------------------------------------
 
     async def get(self, device_id: str) -> Optional[DeviceInfo]:
@@ -265,194 +322,281 @@ class DeviceManager:
         return await self.registry.require(device_id)
 
     async def list_devices(self, user_id: str) -> List[DeviceInfo]:
-        return await self.registry.all(user_id)
+        """
+        Return the devices owned by `user_id`.
+
+        If the registry has no devices for this user but the DB might,
+        reload once. Defense against registry drift — if a device was
+        persisted to DB but the registry lost it (e.g. process restarted
+        after a failed `_load_from_db`), we still return correct data.
+        """
+        tracer = get_tracer()
+        async with tracer.span(
+            "device_manager.list_devices", user_id=user_id,
+        ) as span:
+            devices = await self.registry.all(user_id)
+
+            if not devices and self._session_factory is not None:
+                logger.info(
+                    "Registry empty for user {} — reloading from DB", user_id,
+                )
+                try:
+                    await self._load_from_db()
+                    devices = await self.registry.all(user_id)
+                    span.set_attribute("reloaded_from_db", True)
+                except Exception as exc:
+                    logger.warning("Fallback reload failed: {}", exc)
+                    span.set_attribute("reload_failed", str(exc)[:200])
+
+            span.set_attribute("count", len(devices))
+            span.set_attribute(
+                "devices",
+                [
+                    _device_summary(d, connected=d.id in self._connections)
+                    for d in devices
+                ],
+            )
+            return devices
 
     async def find(self, device_filter: DeviceFilter) -> List[DeviceInfo]:
         return await self.registry.find(device_filter)
 
     # ------------------------------------------------------------------
-    # Device state
+    # State
     # ------------------------------------------------------------------
 
-    async def update_status(
-        self,
-        device_id: str,
-        status: DeviceStatus,
-    ) -> bool:
-        try:
-            await self.registry.update_status(device_id, status)
+    async def update_status(self, device_id: str, status) -> bool:
+        tracer = get_tracer()
+        status_value = _normalize_status(status)
 
-            # Persist alongside the in-memory update.
+        async with tracer.span(
+            "device_manager.update_status",
+            device_id=device_id,
+            status=status_value,
+        ) as span:
             try:
-                async def _do(session: AsyncSession):
-                    repo = DeviceRepository(session)
-                    await repo.update_status(device_id, str(status))
+                await self.registry.update_status(device_id, status_value)
 
-                await self._with_session(_do)
+                try:
+                    async def _do(session: AsyncSession):
+                        repo = DeviceRepository(session)
+                        await repo.update_status(device_id, status_value)
+                    await self._with_session(_do)
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to persist status for device {}: {}",
+                        device_id, exc,
+                    )
+                    span.set_attribute("persist_failed", True)
+
+                if status_value in (
+                    DeviceStatus.ONLINE.value,
+                    DeviceStatus.OFFLINE.value,
+                ):
+                    self._invalidate_router()
+
+                return True
+
             except Exception as exc:
-                logger.warning(
-                    "Failed to persist status for device {}: {}",
+                logger.error(
+                    "Failed to update status for device {}: {}",
                     device_id, exc,
                 )
-
-            return True
-
-        except Exception as exc:
-            logger.error(
-                "Failed to update status for device {}: {}",
-                device_id, exc,
-            )
-            return False
+                span.set_error(str(exc))
+                return False
 
     async def _touch_device(self, device_id: str) -> None:
-        """Update last_seen in the DB. Best-effort; never raises."""
         if self._session_factory is None:
             return
         try:
             async def _do(session: AsyncSession):
                 repo = DeviceRepository(session)
                 await repo.touch(device_id)
-
             await self._with_session(_do)
         except Exception as exc:
-            logger.debug(
-                "Failed to touch device {}: {}", device_id, exc,
-            )
+            logger.debug("Failed to touch device {}: {}", device_id, exc)
 
     # ------------------------------------------------------------------
-    # Live connection management
+    # Live connections
     # ------------------------------------------------------------------
 
     async def attach_connection(
-        self,
-        device_id: str,
-        connection: DeviceConnection,
+        self, device_id: str, connection: DeviceConnection,
     ) -> None:
-        """
-        Attach an already-established connection to a device.
+        tracer = get_tracer()
+        async with tracer.span(
+            "device_manager.attach_connection", device_id=device_id,
+        ) as span:
 
-        The WebSocket endpoint should call this after accepting
-        the WebSocket connection.
-        """
+            device = await self._resolve_device_or_reload(device_id, span)
+            span.set_attribute("user_id", getattr(device, "user_id", None))
+            span.set_attribute(
+                "device_type", getattr(device, "device_type", None),
+            )
 
-        await self.require(device_id)
+            existing = self._connections.get(device_id)
+            if existing is not None:
+                try:
+                    await existing.disconnect()
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to close existing connection for {}: {}",
+                        device_id, exc,
+                    )
 
-        # Close an existing connection if one exists.
-        existing = self._connections.get(device_id)
+            self._connections[device_id] = connection
 
-        if existing is not None:
+            status_value = DeviceStatus.ONLINE.value
+            await self.registry.update_status(device_id, status_value)
+            await self.registry.heartbeat(device_id)
+
             try:
-                await existing.disconnect()
+                async def _do(session: AsyncSession):
+                    repo = DeviceRepository(session)
+                    await repo.update_status(device_id, status_value)
+                await self._with_session(_do)
             except Exception as exc:
                 logger.warning(
-                    "Failed to close existing connection for {}: {}",
+                    "Failed to persist ONLINE status for {}: {}",
+                    device_id, exc,
+                )
+                span.set_attribute("persist_failed", True)
+
+            self._invalidate_router(getattr(device, "user_id", None))
+            logger.info("Connection attached to device {}", device_id)
+
+    async def _resolve_device_or_reload(self, device_id: str, span) -> DeviceInfo:
+        """
+        Return the DeviceInfo for `device_id`.
+
+        Tries the registry first. On miss, reloads from DB. If both fail,
+        raises KeyError so the WebSocket can close cleanly.
+        """
+        try:
+            return await self.require(device_id)
+        except KeyError:
+            pass
+
+        logger.info("Registry miss for {} — reloading from DB", device_id)
+        if self._session_factory is None:
+            span.set_error("device_not_found")
+            raise KeyError(f"Device not found: {device_id}")
+
+        async def _do(session: AsyncSession):
+            repo = DeviceRepository(session)
+            return await repo.get(device_id)
+
+        row = await self._with_session(_do)
+        if row is None:
+            span.set_error("device_not_found")
+            raise KeyError(f"Device not found: {device_id}")
+
+        if (row.user_id is None):
+            span.set_error("device_not_owned")
+            raise KeyError(f"Device {device_id} not owned by any user")
+        
+        info = DeviceInfo(
+            id=row.id,
+            name=row.name or "",
+            user_id=row.user_id,
+            device_type=DeviceType(row.device_type) if row.device_type else DeviceType.UNKNOWN,
+            status=DeviceStatus(row.status) if row.status else DeviceStatus.UNKNOWN,
+            platform= DevicePlatform(row.platform) if row.platform else DevicePlatform.UNKNOWN,
+            platform_version=row.platform_version or "",
+            os_version=row.os_version or "",
+            architecture=row.architecture or "",
+            hostname=row.hostname or "",
+            app_version=row.app_version or "",
+            runtime_version=row.runtime_version or "",
+            capabilities=row.capabilities or [],
+        )
+        await self.registry.register(info)
+        logger.info("Restored device {} from DB", device_id)
+        span.set_attribute("restored_from_db", True)
+        return info
+
+    async def detach_connection(self, device_id: str) -> None:
+        tracer = get_tracer()
+        async with tracer.span(
+            "device_manager.detach_connection", device_id=device_id,
+        ) as span:
+
+            device = await self.registry.get(device_id)
+            user_id = getattr(device, "user_id", None) if device else None
+
+            connection = self._connections.pop(device_id, None)
+            span.set_attribute("had_connection", connection is not None)
+
+            if connection is not None:
+                try:
+                    await connection.disconnect()
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to disconnect {}: {}", device_id, exc,
+                    )
+
+            status_value = DeviceStatus.OFFLINE.value
+
+            try:
+                await self.registry.update_status(device_id, status_value)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to update offline status for {}: {}",
                     device_id, exc,
                 )
 
-        self._connections[device_id] = connection
-
-        await self.registry.update_status(device_id, DeviceStatus.ONLINE)
-        await self.registry.heartbeat(device_id)
-
-        # Persist ONLINE status.
-        try:
-            async def _do(session: AsyncSession):
-                repo = DeviceRepository(session)
-                await repo.update_status(device_id, str(DeviceStatus.ONLINE))
-
-            await self._with_session(_do)
-        except Exception as exc:
-            logger.warning(
-                "Failed to persist ONLINE status for {}: {}",
-                device_id, exc,
-            )
-
-        logger.info("Connection attached to device {}", device_id)
-
-    async def detach_connection(self, device_id: str) -> None:
-        """Remove the active connection from a device."""
-
-        connection = self._connections.pop(device_id, None)
-
-        if connection is not None:
             try:
-                await connection.disconnect()
+                async def _do(session: AsyncSession):
+                    repo = DeviceRepository(session)
+                    await repo.update_status(device_id, status_value)
+                await self._with_session(_do)
             except Exception as exc:
                 logger.warning(
-                    "Failed to disconnect {}: {}", device_id, exc,
+                    "Failed to persist OFFLINE status for {}: {}",
+                    device_id, exc,
                 )
 
-        try:
-            await self.registry.update_status(device_id, DeviceStatus.OFFLINE)
-        except Exception as exc:
-            logger.warning(
-                "Failed to update offline status for {}: {}",
-                device_id, exc,
-            )
-
-        # Persist OFFLINE status.
-        try:
-            async def _do(session: AsyncSession):
-                repo = DeviceRepository(session)
-                await repo.update_status(device_id, str(DeviceStatus.OFFLINE))
-
-            await self._with_session(_do)
-        except Exception as exc:
-            logger.warning(
-                "Failed to persist OFFLINE status for {}: {}",
-                device_id, exc,
-            )
-
-        logger.info("Connection detached from device {}", device_id)
+            self._invalidate_router(user_id)
+            logger.info("Connection detached from device {}", device_id)
 
     async def connect(self, device_id: str) -> None:
-        """
-        Connect an already-configured DeviceConnection.
+        tracer = get_tracer()
+        async with tracer.span(
+            "device_manager.connect", device_id=device_id,
+        ):
+            await self.require(device_id)
+            connection = self._connections.get(device_id)
+            if connection is None:
+                raise RuntimeError(
+                    f"No connection configured for device {device_id}"
+                )
 
-        Retained for local connection implementations. WebSocket
-        devices should connect through the WebSocket endpoint and
-        attach_connection() instead.
-        """
-
-        await self.require(device_id)
-
-        connection = self._connections.get(device_id)
-
-        if connection is None:
-            raise RuntimeError(
-                f"No connection configured for device {device_id}"
-            )
-
-        await self.update_status(device_id, DeviceStatus.CONNECTING)
-
-        try:
-            await connection.connect()
-            await self.update_status(device_id, DeviceStatus.ONLINE)
-            await self.registry.heartbeat(device_id)
-        except Exception:
-            await self.update_status(device_id, DeviceStatus.ERROR)
-            raise
+            await self.update_status(device_id, DeviceStatus.CONNECTING)
+            try:
+                await connection.connect()
+                await self.update_status(device_id, DeviceStatus.ONLINE)
+                await self.registry.heartbeat(device_id)
+            except Exception:
+                await self.update_status(device_id, DeviceStatus.ERROR)
+                raise
 
     async def disconnect(self, device_id: str) -> None:
-        """Disconnect a device."""
-
-        connection = self._connections.get(device_id)
-
-        if connection is None:
-            await self.update_status(device_id, DeviceStatus.OFFLINE)
-            return
-
-        try:
-            await connection.disconnect()
-        finally:
-            self._connections.pop(device_id, None)
-            await self.update_status(device_id, DeviceStatus.OFFLINE)
+        tracer = get_tracer()
+        async with tracer.span(
+            "device_manager.disconnect", device_id=device_id,
+        ):
+            connection = self._connections.get(device_id)
+            if connection is None:
+                await self.update_status(device_id, DeviceStatus.OFFLINE)
+                return
+            try:
+                await connection.disconnect()
+            finally:
+                self._connections.pop(device_id, None)
+                await self.update_status(device_id, DeviceStatus.OFFLINE)
 
     async def is_connected(self, device_id: str) -> bool:
-        """Return whether a device has an active connection."""
-
         connection = self._connections.get(device_id)
-
         return connection is not None and connection.connected
 
     # ------------------------------------------------------------------
@@ -460,103 +604,155 @@ class DeviceManager:
     # ------------------------------------------------------------------
 
     async def send(
-        self,
-        device_id: str,
-        payload: Dict[str, Any],
+        self, device_id: str, payload: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """Send a message to a connected device."""
+        tracer = get_tracer()
 
         connection = self._connections.get(device_id)
-
-        if connection is None:
+        if connection is None or not connection.connected:
             raise RuntimeError(f"Device {device_id} is not connected")
 
-        if not connection.connected:
-            raise RuntimeError(f"Device {device_id} is not connected")
+        capability = payload.get("capability") or payload.get("type", "unknown")
+        plugin = (
+            payload.get("plugin") or payload.get("plugin_id") or "unknown"
+        )
 
-        result = await connection.send(payload)
+        tracer.log_tool_call(
+            capability=capability,
+            plugin=plugin,
+            device_id=device_id,
+            parameters=payload.get("parameters") or payload.get("payload"),
+        )
 
-        # Update last_seen in memory, then in DB (best-effort).
-        await self.registry.heartbeat(device_id)
-        await self._touch_device(device_id)
+        t0 = time.perf_counter()
+        try:
+            result = await connection.send(payload)
+            duration_ms = (time.perf_counter() - t0) * 1000
 
-        return result
+            tracer.log_tool_call(
+                capability=capability,
+                plugin=plugin,
+                device_id=device_id,
+                result=result,
+                duration_ms=duration_ms,
+            )
+
+            await self.registry.heartbeat(device_id)
+            await self._touch_device(device_id)
+            return result
+
+        except Exception as exc:
+            duration_ms = (time.perf_counter() - t0) * 1000
+            tracer.log_tool_call(
+                capability=capability,
+                plugin=plugin,
+                device_id=device_id,
+                error=str(exc),
+                duration_ms=duration_ms,
+            )
+            raise
 
     async def ping(self, device_id: str) -> bool:
-        """Ping a device."""
-
         connection = self._connections.get(device_id)
-
         if connection is None:
             return False
-
         return await connection.ping()
 
     # ------------------------------------------------------------------
     # Shutdown
     # ------------------------------------------------------------------
 
-    async def shutdown(self) -> None:
-        """Shutdown all device connections."""
-
-        for device_id in list(self._connections.keys()):
-            try:
-                await self.disconnect(device_id)
-            except Exception as exc:
-                logger.warning(
-                    "Failed to disconnect {}: {}", device_id, exc,
-                )
-
-        self._connections.clear()
-
-        await self.registry.shutdown()
-
-        self._initialized = False
-
-        logger.info("Device manager stopped")
+    async def _on_shutdown(self) -> None:
+        tracer = get_tracer()
+        async with tracer.span(
+            "device_manager.shutdown",
+            connected_count=len(self._connections),
+        ):
+            for device_id in list(self._connections.keys()):
+                try:
+                    await self.disconnect(device_id)
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to disconnect {}: {}", device_id, exc,
+                    )
+            self._connections.clear()
+            await self.registry.shutdown()
+            logger.info("Device manager stopped")
 
     async def refresh_metadata(
         self, device_id: str, update: dict, user_id: str | None = None,
     ) -> None:
-        """Update an existing device's metadata in memory and in the DB."""
-        device = await self.registry.get(device_id)
-        if device is None:
-            return
+        tracer = get_tracer()
+        async with tracer.span(
+            "device_manager.refresh_metadata",
+            device_id=device_id,
+            updated_keys=list(update.keys()),
+        ):
+            device = await self.registry.get(device_id)
+            if device is None:
+                return
 
-        for k, v in update.items():
-            if hasattr(device, k) and v is not None:
-                setattr(device, k, v)
+            if "status" in update:
+                update["status"] = _normalize_status(update["status"])
 
-        if self._session_factory is not None:
-            async def _do(session):
-                from pai.storage.repositories.device import DeviceRepository
-                repo = DeviceRepository(session)
-                await repo.upsert(
-                    device_id=device_id,
-                    name=update.get("name") or getattr(device, "name", ""),
-                    device_type=update.get("device_type") or getattr(device, "device_type", "unknown"),
-                    platform=update.get("platform") or getattr(device, "platform", "unknown"),
-                    platform_version=update.get("platform_version") or getattr(device, "platform_version", ""),
-                    os_version=update.get("os_version") or getattr(device, "os_version", ""),
-                    architecture=update.get("architecture") or getattr(device, "architecture", ""),
-                    hostname=update.get("hostname") or getattr(device, "hostname", ""),
-                    app_version=update.get("app_version") or getattr(device, "app_version", ""),
-                    runtime_version=update.get("runtime_version") or getattr(device, "runtime_version", ""),
-                    user_id=user_id,
-                )
-            await self._with_session(_do)
+            for k, v in update.items():
+                if hasattr(device, k) and v is not None:
+                    setattr(device, k, v)
 
+            if self._session_factory is not None:
+                async def _do(session):
+                    repo = DeviceRepository(session)
+                    await repo.upsert(
+                        device_id=device_id,
+                        name=update.get("name") or getattr(device, "name", ""),
+                        device_type=update.get("device_type") or getattr(device, "device_type", "unknown"),
+                        platform=update.get("platform") or getattr(device, "platform", "unknown"),
+                        platform_version=update.get("platform_version") or getattr(device, "platform_version", ""),
+                        os_version=update.get("os_version") or getattr(device, "os_version", ""),
+                        architecture=update.get("architecture") or getattr(device, "architecture", ""),
+                        hostname=update.get("hostname") or getattr(device, "hostname", ""),
+                        app_version=update.get("app_version") or getattr(device, "app_version", ""),
+                        runtime_version=update.get("runtime_version") or getattr(device, "runtime_version", ""),
+                        user_id=user_id,
+                    )
+                await self._with_session(_do)
+
+            self._invalidate_router(user_id)
 
     async def assign_user(self, device_id: str, user_id: str) -> None:
-        """Attach the owning user to a device row."""
-        if self._session_factory is None:
-            return
+        """Attach the owning user to a device in both DB and registry."""
+        tracer = get_tracer()
+        async with tracer.span(
+            "device_manager.assign_user",
+            device_id=device_id, user_id=user_id,
+        ) as span:
+            # ---- DB first ----
+            if self._session_factory is not None:
+                async def _do(session):
+                    repo = DeviceRepository(session)
+                    record = await repo.get(device_id)
+                    if record is not None:
+                        record.user_id = user_id
+                        await session.flush()
+                        return True
+                    return False
+                updated = await self._with_session(_do)
+                span.set_attribute("db_updated", bool(updated))
 
-        async def _do(session):
-            from pai.storage.repositories.device import DeviceRepository
-            repo = DeviceRepository(session)
-            record = await repo.get(device_id)
-            if record is not None:
-                record.user_id = user_id
-                await session.flush()
-        await self._with_session(_do)
+            # ---- Registry second (was missing before — caused registry
+            #      to hold stale ownership after a user reassignment) ----
+            device = await self.registry.get(device_id)
+            if device is not None:
+                device.user_id = user_id
+                span.set_attribute("registry_updated", True)
+                logger.info(
+                    "Reassigned device {} → user {}", device_id, user_id,
+                )
+            else:
+                span.set_attribute("registry_updated", False)
+                logger.warning(
+                    "assign_user: device {} not in registry — DB only",
+                    device_id,
+                )
+
+            self._invalidate_router(user_id)
