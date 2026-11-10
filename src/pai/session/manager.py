@@ -5,9 +5,11 @@ from typing import AsyncIterator, Callable
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from pai.core.lifecycle import Lifecycle
 
 
-class SessionManager:
+
+class SessionManager(Lifecycle):
     """
     Factory for per-request AsyncSessions.
 
@@ -24,6 +26,17 @@ class SessionManager:
 
     def __init__(self, session_factory: Callable[[], AsyncSession]):
         self._session_factory = session_factory
+
+    def is_initialized(self) -> bool:
+        return True
+
+    def initialize(self) -> None:
+        """No-op. SessionManager is always ready."""
+        pass
+
+    def shutdown(self) -> None:
+        """No-op. SessionManager is always ready."""
+        pass
 
     @asynccontextmanager
     async def session(self) -> AsyncIterator[AsyncSession]:
@@ -44,6 +57,16 @@ class SessionManager:
             await session.close()
 
     def factory(self) -> AsyncSession:
+        """
+        Return a raw AsyncSession. Callers are responsible for
+        commit / rollback / close.
+
+        Used by services that prefer explicit transaction control,
+        e.g. PluginManager opening a session per operation.
+        """
+        return self._session_factory()
+
+    def get_session(self) -> AsyncSession:
         """
         Return a raw AsyncSession. Callers are responsible for
         commit / rollback / close.
