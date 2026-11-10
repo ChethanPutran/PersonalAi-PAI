@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -56,6 +57,89 @@ def find_current(plugin_dir: Path) -> tuple[str, Path]:
     return versions[0][0], versions[0][1]
 
 
+def reload_backend() -> int:
+    """
+    Ask the backend to re-read the plugin_registry directory.
+
+    Requires:
+      - PAI_BACKEND_URL   e.g. http://localhost:8000
+      - PAI_ADMIN_TOKEN   a JWT with is_admin=true
+                         (or fall back to PAI_EMAIL + PAI_PASSWORD)
+
+    Returns the HTTP status code, or -1 on connection error.
+    """
+    try:
+        import httpx
+    except ImportError:
+        print(
+            "  reload skipped: httpx not installed",
+            file=sys.stderr,
+        )
+        return -1
+
+    base = os.environ.get("PAI_BACKEND_URL")
+    if not base:
+        print(
+            "  reload skipped: PAI_BACKEND_URL not set",
+            file=sys.stderr,
+        )
+        return -1
+
+    token = os.environ.get("PAI_ADMIN_TOKEN")
+    if not token:
+        # Fall back to a login round-trip using agent credentials.
+        email = os.environ.get("PAI_EMAIL") or os.environ.get("PAI_USERNAME")
+        password = os.environ.get("PAI_PASSWORD")
+        if not email or not password:
+            print(
+                "  reload skipped: set PAI_ADMIN_TOKEN, or "
+                "PAI_EMAIL + PAI_PASSWORD",
+                file=sys.stderr,
+            )
+            return -1
+        try:
+            login = httpx.post(
+                f"{base.rstrip('/')}/api/v1/auth/login",
+                json={"email": email, "password": password},
+                timeout=10,
+            )
+            login.raise_for_status()
+            body = login.json()
+            if not body.get("is_admin"):
+                print(
+                    "  reload skipped: login user is not admin",
+                    file=sys.stderr,
+                )
+                return -1
+            token = body["access_token"]
+        except httpx.HTTPError as exc:
+            print(f"  reload failed: login error: {exc}", file=sys.stderr)
+            return -1
+
+    try:
+        r = httpx.post(
+            f"{base.rstrip('/')}/api/v1/plugins/system/reload",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10,
+        )
+    except httpx.HTTPError as exc:
+        print(f"  reload failed: {exc}", file=sys.stderr)
+        return -1
+
+    if r.is_success:
+        try:
+            count = r.json().get("plugin_count", "?")
+        except Exception:
+            count = "?"
+        print(f"  backend reloaded ({r.status_code}, {count} plugins)")
+    else:
+        print(
+            f"  reload failed: HTTP {r.status_code}: {r.text[:200]}",
+            file=sys.stderr,
+        )
+    return r.status_code
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("plugin", nargs="?", help="plugin id, e.g. browser")
@@ -78,6 +162,12 @@ def main() -> int:
     p.add_argument(
         "--commit", action="store_true",
         help="git add + commit the bump (requires git repo)",
+    )
+    p.add_argument(
+        "--reload-backend", action="store_true",
+        help="call POST /plugins/system/reload after bumping "
+             "(needs PAI_BACKEND_URL + PAI_ADMIN_TOKEN, or "
+             "PAI_EMAIL + PAI_PASSWORD)",
     )
     p.add_argument(
         "--list", action="store_true",
@@ -181,20 +271,18 @@ def main() -> int:
         subprocess.run(["git", "commit", "-m", msg], check=True)
         print("  committed")
 
-
+    # 5. Optionally reload the backend's catalog cache
     if args.reload_backend:
-        import httpx
-        import os
-        url = os.environ.get("PAI_BACKEND_URL")
-        token = os.environ.get("PAI_ADMIN_TOKEN")  # or log in via PAI_EMAIL/PASSWORD
-        r = httpx.post(
-            f"{url}/api/v1/plugins/system/reload",
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=10,
-        )
-        print(f"  backend reloaded ({r.status_code})")
+        rc = reload_backend()
+        if rc < 0 or rc >= 400:
+            print(
+                "  note: backend reload did not succeed; "
+                "the device will still pick up the new version via "
+                "/index.json on its next _sync_once (≤60s)",
+                file=sys.stderr,
+            )
 
-
+    print(f"\nnext steps:")
     print(f"  server-cli install {args.plugin} --watch")
     return 0
 
