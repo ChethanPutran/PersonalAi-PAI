@@ -52,3 +52,5 @@ build/
 *.iml
 .flutter-plugins
 .flutter-plugins-dependencies
+
+artifacts

@@ -477,3 +477,65 @@ ls ~/Android/Sdk/ndk
 
 ls ~/Android/Sdk/ndk/26.1.10909125/build/cmake/android.toolchain.cmake
 # should print the path
+
+### Device task flow
+
+```text
+Backend                                              Device (Flutter)
+─────────────────────────────────────────────        ─────────────────────────────
+1. Orchestrator decides camera.capture
+2. Router: target = (device_executor, device=63c755b3)
+3. TaskManager._execute → scheduler.schedule_task
+4. ExecutorScheduler → DeviceExecutor.execute_task
+5. DeviceExecutor:
+     request_id = uuid()
+     pending[request_id] = Future
+     device_manager.send(device_id, {
+         type: "invoke",
+         request_id: "abc",
+         capability: "camera.capture",
+         parameters: { lens: "back" }
+     })
+                                           ─────────────────────────────────────►
+                                                 6. DeviceConnection receives
+                                                    { type: "invoke", ... }
+                                                 7. Looks up capability → nativeModule
+                                                    (from manifest.json)
+                                                 8. PluginRuntime.invoke(
+                                                      nativeModule: "pai.camera",
+                                                      capability: "camera.capture",
+                                                      parameters: {...}
+                                                    )
+                                                 9. Method channel → native Linux
+                                                    PluginChannel → .so
+                                                 10. .so captures JPEG, returns
+                                                     { ok: true, path: "/tmp/..." }
+                                                 11. PluginRuntime returns result
+                                                 12. DeviceConnection sends:
+                                                     {
+                                                       type: "result",
+                                                       request_id: "abc",
+                                                       result: { ok: true, path: ... }
+                                                     }
+6. Backend WS route receives ◄─────────────────────────────────────────────────
+   { type: "result", request_id, result }
+7. Routes to DeviceExecutor.deliver_result
+8. pending["abc"].set_result(result)
+9. await fut returns → execute_task returns
+10. TaskManager marks COMPLETED
+11. DAG next task (chat.reply) runs with the camera output
+```
+
+
+### Server task flow
+```text
+Orchestrator → scheduler → ServerExecutor.execute_task
+    ↓
+ServerExecutor._browser_navigate → plugin.execute()
+    ↓
+BrowserPlugin.navigate(url)   ← in-process, no WebSocket
+    ↓
+Returns result synchronously
+    ↓
+TaskManager marks COMPLETED
+```

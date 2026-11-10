@@ -76,6 +76,7 @@ class EventBus:
         max_queue_size: int = 1000,
         source: str = "pai",
         enable_nats: bool = True,
+        num_workers: int = 1,
     ):
         self.nats_url = nats_url
         self.source = source

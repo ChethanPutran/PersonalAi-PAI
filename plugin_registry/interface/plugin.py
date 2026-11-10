@@ -1,0 +1,9 @@
+from abc import ABC, abstractmethod
+class Plugin(ABC):
+    def __init__(self, config: dict): ...
+
+    @abstractmethod
+    def invoke(self, capability: str, parameters: dict) -> dict: ...
+
+    @abstractmethod
+    def shutdown(self) -> None: ...

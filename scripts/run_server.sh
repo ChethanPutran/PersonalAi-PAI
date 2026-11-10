@@ -1,4 +1,1 @@
-set -a
-source .env
-set +a
-PYTHONPATH=src uvicorn pai.main:app --reload --host 0.0.0.0 --port 8000
+fuser -k 8000/tcp 2>/dev/null; sleep 1; set -a; source .env; set +a; PYTHONPATH=src uv run uvicorn pai.main:app --reload --reload-dir src --host 0.0.0.0 --port 8000
