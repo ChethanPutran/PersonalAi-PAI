@@ -20,6 +20,12 @@ class TaskService {
         .toList();
   }
 
+  Future<Task> getTask(String id) async {
+  final result = await api.get('/tasks/$id');
+  final data = result['task'] ?? result;
+  return Task.fromJson(Map<String, dynamic>.from(data));
+}
+
 
   Future<void> pause(String id) async {
     await api.post('/tasks/$id/pause', {});
