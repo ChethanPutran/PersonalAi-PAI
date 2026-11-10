@@ -1,0 +1,107 @@
+{
+  "schemaVersion": 2,
+  "id": "browser",
+  "name": "Browser",
+  "version": "1.0.1",
+  "description": "Browse web, fill forms, automate bookings.",
+  "runtime": {
+    "kind": "device",
+    "nativeModule": "pai.browser.server"
+  },
+  "platforms": {
+    "linux": {
+      "artifact": "server/browser_plugin.py"
+    }
+  },
+  "architectures": [
+    "x86_64"
+  ],
+  "dependencies": [
+    "playwright>=1.48,<2.0",
+    "httpx>=0.27,<1.0"
+  ],
+  "post_install": [
+    [
+      "python",
+      "-m",
+      "playwright",
+      "install",
+      "chromium",
+      "--with-deps"
+    ]
+  ],
+  "device_types": [
+    "server"
+  ],
+  "capabilities": [
+    {
+      "id": "browser.navigate",
+      "description": "Open a URL and return the rendered text/title.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string"
+          },
+          "wait_until": {
+            "type": "string",
+            "enum": [
+              "load",
+              "domcontentloaded",
+              "networkidle"
+            ],
+            "default": "domcontentloaded"
+          }
+        },
+        "required": [
+          "url"
+        ]
+      }
+    },
+    {
+      "id": "browser.fill_form",
+      "description": "Fill fields and optionally submit a form.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string"
+          },
+          "fields": {
+            "type": "object"
+          },
+          "submit_selector": {
+            "type": "string"
+          },
+          "screenshot": {
+            "type": "boolean",
+            "default": false
+          }
+        },
+        "required": [
+          "url",
+          "fields"
+        ]
+      }
+    },
+    {
+      "id": "browser.book",
+      "description": "High-level booking flow: navigate, fill, submit, capture confirmation.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "start_url": {
+            "type": "string"
+          },
+          "steps": {
+            "type": "array"
+          }
+        },
+        "required": [
+          "start_url",
+          "steps"
+        ]
+      }
+    }
+  ]
+}
