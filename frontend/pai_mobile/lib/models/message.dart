@@ -20,3 +20,4 @@ class AIMessage {
         result: (json['result'] ?? json['data']) as Map<String, dynamic>?,
       );
 }
+

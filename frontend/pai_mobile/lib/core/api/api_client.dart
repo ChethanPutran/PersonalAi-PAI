@@ -103,6 +103,13 @@ class ApiClient {
     return _handle(response);
   }
 
+Future<dynamic> patch(String path, Map<String, dynamic> body) async {
+  final response = await http.patch(
+    _uri(path), headers: _headers, body: jsonEncode(body),
+  );
+  return _handle(response);
+}
+
   Future<dynamic> delete(String path) async {
     final response = await http.delete(_uri(path), headers: _headers);
     return _handle(response);

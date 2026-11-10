@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:pai_mobile/protocol/device_enums.dart';
 
 import 'auth/auth_service.dart';
 import 'config/app_config.dart';
@@ -22,6 +23,8 @@ import 'plugins/plugin_command_handler.dart';
 import 'plugins/plugin_command_router.dart';
 import 'plugins/runtime/plugin_runtime.dart';
 
+import 'plugins/capability_dispatcher.dart';
+
 import 'tasks/task_service.dart';
 
 import 'ui/auth/login_screen.dart';
@@ -29,6 +32,9 @@ import 'ui/chat/chat_screen.dart';
 import 'ui/plugins/plugins_screen.dart';
 import 'ui/tasks/tasks_screen.dart';
 
+
+import 'tasks/local_task_runner.dart';             // NEW
+import 'ui/tasks/test_task_screen.dart';           // NEW
 
 class PaiApp extends StatefulWidget {
   const PaiApp({super.key});
@@ -40,6 +46,8 @@ class PaiApp extends StatefulWidget {
 class _PaiAppState extends State<PaiApp> {
   late final AuthService auth;
   late final ApiClient api;
+  ChatService? _chatService;
+  TaskService? _taskService;
 
   String? deviceId;
   DeviceInfo? _device;
@@ -47,6 +55,13 @@ class _PaiAppState extends State<PaiApp> {
   PluginService? pluginService;
   PluginCommandHandler? pluginCommandHandler;
   DeviceConnectionService? connectionService;
+  CapabilityDispatcher? _dispatcher;    
+  LocalTaskRunner? _testTaskRunner; 
+
+  /// Broadcast stream of `task.*` / `plan.*` events received over the WS.
+  /// Fed by [_handleDeviceMessage]; consumed by TasksScreen for auto-refresh.
+  final _taskEventsController =
+      StreamController<Map<String, dynamic>>.broadcast();   // NEW
 
   bool _booting = true;
   bool _initializing = false;
@@ -78,8 +93,7 @@ class _PaiAppState extends State<PaiApp> {
   }
 
   // ----------------------------------------------------------------
-  // Called from LoginScreen on success, or from _bootstrap if a token
-  // is already on disk.
+  // Initialize (after login or from restored token)
   // ----------------------------------------------------------------
 
   Future<void> _initialize() async {
@@ -119,6 +133,9 @@ class _PaiAppState extends State<PaiApp> {
 
       await service.restoreInstalled();
 
+      final chat = _chatService ??= ChatService(api);
+      await chat.restoreSession();
+
       // --------------------------------------------------------
       // 3. UI-facing manager.
       // --------------------------------------------------------
@@ -133,25 +150,44 @@ class _PaiAppState extends State<PaiApp> {
         architecture: device.architecture,
       );
 
-      // --------------------------------------------------------
       // 4. Command router + handler.
-      // --------------------------------------------------------
       final commandRouter = PluginCommandRouter(service: service);
       service.attachRouter(commandRouter);
       final commandHandler = PluginCommandHandler(router: commandRouter);
 
-      // --------------------------------------------------------
-      // 5. WebSocket — with the JWT.
-      // --------------------------------------------------------
+      // 5. Capability dispatcher (NEW) — drives PluginRuntime when the
+      //    backend sends an `invoke` frame from DeviceExecutor.
+      final dispatcher = CapabilityDispatcher(
+        pluginManager: manager,
+        installer: installer,
+        runtime: runtime,
+      );
+
+      final testRunner = LocalTaskRunner(dispatcher: dispatcher);   // NEW
+
+      // 6. WebSocket.
       final connection = DeviceConnectionService(
         baseUrl: api.baseUrl,
         deviceId: id,
         token: auth.token,
       );
 
+      // Add the message handler to the connection service so that when a message is received,
+      // it will be dispatched to [_handleDeviceMessage].
       connection.setMessageHandler((message) async {
         await _handleDeviceMessage(message, commandHandler);
       });
+
+      connection.setControlHandler(({required op, required requestId}) async {
+        return await _handleDeviceControl(op: op, requestId: requestId);
+      });
+
+      // Add the invoke handler to the connection service so that when an 'invoke' message is received, 
+      // it will be dispatched to the CapabilityDispatcher.
+      connection.setInvokeHandler(
+      ({required capability, required parameters}) =>
+          dispatcher.invoke(capability: capability, parameters: parameters),
+    );
 
       if (!mounted) {
         connection.dispose();
@@ -164,6 +200,8 @@ class _PaiAppState extends State<PaiApp> {
         pluginService = service;
         pluginCommandHandler = commandHandler;
         connectionService = connection;
+        _dispatcher = dispatcher;   
+         _testTaskRunner = testRunner;             
         _initializing = false;
       });
 
@@ -201,7 +239,35 @@ class _PaiAppState extends State<PaiApp> {
       architecture: device.architecture,
     );
     debugPrint('[PaiApp] Plugin state reconciled + catalog refreshed');
+
+    // Any installs / uninstalls may have changed which plugin owns a
+    // capability — drop the dispatcher cache so the next invoke re-reads
+    // manifests from disk.
+    _dispatcher?.invalidateCache();
   }
+
+  // ------------------------------------------------
+  // Device control messages (NEW) — invoked from [_handleDeviceMessage].
+  // ------------------------------------------------
+  Future<bool> _handleDeviceControl({
+    required DeviceControlOp op,
+    required String requestId,
+  }) async {
+    switch (op) {
+    case DeviceControlOp.cancel:
+        // `DeviceConnectionService._handleControl` already tracks the
+        // cancellation internally and will discard the eventual result.
+        // We have no atomic-op work to unwind here, so just acknowledge.
+        return true;
+
+    case DeviceControlOp.pause:
+    case DeviceControlOp.resume:
+      // No capability currently supports real pause/resume. Return
+        // false so the backend knows to fall back to its wrapper-level
+        // checkpoint. When a plugin (e.g. camera.record) starts
+        // supporting pause, this handler forwards to it.
+        return false;
+  }}
 
   // ----------------------------------------------------------------
   // Device messages
@@ -214,6 +280,32 @@ class _PaiAppState extends State<PaiApp> {
     final type = message['type']?.toString();
 
     switch (type) {
+      // ---- NEW: DeviceExecutor invoke ----
+      case 'invoke':
+        await _handleInvoke(message);
+        return;
+
+      // ---- NEW: backend asks for plugin reconciliation ----
+      case 'sync_plugins_request':
+        await _handlePluginSyncRequest(message);
+        return;
+
+      // ---- NEW: task / plan events → broadcast for TasksScreen ----
+      case 'task.created':
+      case 'task.updated':
+      case 'task.started':
+      case 'task.completed':
+      case 'task.failed':
+      case 'task.paused':
+      case 'task.resumed':
+      case 'task.cancelled':
+      case 'plan.created':
+      case 'plan.completed':
+      case 'plan.failed':
+        _taskEventsController.add(message);
+        return;
+
+      // ---- Existing plugin-command protocol ----
       case 'plugin.install':
       case 'plugin.enable':
       case 'plugin.disable':
@@ -241,6 +333,92 @@ class _PaiAppState extends State<PaiApp> {
         debugPrint('[PaiApp] Unknown message type: $type');
     }
   }
+
+  // ----------------------------------------------------------------
+  // DeviceExecutor invoke (NEW)
+  // ----------------------------------------------------------------
+
+  Future<void> _handleInvoke(Map<String, dynamic> message) async {
+    final requestId = message['request_id']?.toString() ?? '';
+    final capability = message['capability']?.toString() ?? '';
+    final parameters =
+        (message['parameters'] as Map?)?.cast<String, dynamic>() ?? {};
+
+    final dispatcher = _dispatcher;
+    final connection = connectionService;
+
+    if (dispatcher == null || connection == null) {
+      debugPrint('[PaiApp] invoke dropped: dispatcher/connection null');
+      return;
+    }
+    if (requestId.isEmpty || capability.isEmpty) {
+      debugPrint('[PaiApp] invoke: missing request_id or capability');
+      return;
+    }
+
+    debugPrint('[PaiApp] invoke: $capability (req=$requestId)');
+
+    try {
+      final result = await dispatcher.invoke(
+        capability: capability,
+        parameters: parameters,
+      );
+
+      await connection.sendResult(
+        requestId: requestId,
+        success: true,
+        result: result,
+      );
+      debugPrint('[PaiApp] → result for $requestId');
+    } catch (e, st) {
+      debugPrint('[PaiApp] invoke failed: $e\n$st');
+      await connection.sendResult(
+        requestId: requestId,
+        success: false,
+        error: e.toString(),
+      );
+    }
+  }
+
+  // ----------------------------------------------------------------
+  // Plugin sync (NEW)
+  // ----------------------------------------------------------------
+
+  Future<void> _handlePluginSyncRequest(Map<String, dynamic> message) async {
+    final manager = pluginManager;
+    final connection = connectionService;
+    if (manager == null || connection == null) return;
+
+    try {
+      final plugins = manager.plugins
+          .where((p) => p.isInstalled)
+          .map((p) => {
+                'id': p.id,
+                'version': p.version,
+                'enabled': p.isEnabled,
+                'capabilities': p.capabilityDetails
+                    .map((c) => c.id)
+                    .toList(growable: false),
+              })
+          .toList(growable: false);
+
+      await connection.send({
+        'type': 'sync_plugins_response',
+        'device_id': deviceId,
+        'plugins': plugins,
+        'timestamp': DateTime.now().toUtc().toIso8601String(),
+      });
+      debugPrint(
+        '[PaiApp] → sync_plugins_response (${plugins.length} plugins)',
+      );
+    } catch (e) {
+      debugPrint('[PaiApp] sync_plugins_response failed: $e');
+    }
+  }
+
+  // ----------------------------------------------------------------
+  // Existing plugin-command bridge (unchanged)
+  // ----------------------------------------------------------------
 
   Future<void> _handlePluginCommand(
     Map<String, dynamic> message,
@@ -309,6 +487,9 @@ class _PaiAppState extends State<PaiApp> {
     pluginManager = null;
     pluginService = null;
     pluginCommandHandler = null;
+    _dispatcher = null;                                // NEW
+    _testTaskRunner?.dispose();                        // NEW
+_testTaskRunner = null;                            // NEW
 
     await auth.logout();
 
@@ -325,6 +506,8 @@ class _PaiAppState extends State<PaiApp> {
 
   @override
   void dispose() {
+    _taskEventsController.close();                     // NEW
+    _testTaskRunner?.dispose();                        // NEW
     connectionService?.dispose();
     super.dispose();
   }
@@ -335,7 +518,7 @@ class _PaiAppState extends State<PaiApp> {
 
   @override
   Widget build(BuildContext context) {
-    // 1. Booting — reading token from disk.
+    // 1. Booting.
     if (_booting) {
       return const MaterialApp(
         debugShowCheckedModeBanner: false,
@@ -345,7 +528,7 @@ class _PaiAppState extends State<PaiApp> {
       );
     }
 
-    // 2. Not authenticated — show login.
+    // 2. Not authenticated.
     if (!auth.isAuthenticated) {
       return MaterialApp(
         debugShowCheckedModeBanner: false,
@@ -364,7 +547,7 @@ class _PaiAppState extends State<PaiApp> {
       );
     }
 
-    // 3. Init error — allow retry or logout.
+    // 3. Init error.
     if (_initError != null) {
       return MaterialApp(
         debugShowCheckedModeBanner: false,
@@ -431,12 +614,25 @@ class _PaiAppState extends State<PaiApp> {
       );
     }
 
+    // Memoize services — create once, not every build.
+    final chatService = _chatService ??= ChatService(api);
+    final taskService = _taskService ??= TaskService(api);
+
+    
+
     // 5. Full app.
-    final screens = [
-      ChatScreen(service: ChatService(api), deviceId: deviceId!),
-      TasksScreen(service: TaskService(api)),
-      PluginsScreen(manager: pluginManager!),
-    ];
+    final screens = <Widget>[
+    ChatScreen(service: chatService, deviceId: deviceId!),
+    TasksScreen(
+      service: taskService,
+      taskEvents: _taskEventsController.stream,
+    ),
+    PluginsScreen(manager: pluginManager!),
+    TestTaskScreen(
+      pluginManager: pluginManager!,
+      runner: _testTaskRunner!,
+    ),
+  ];
 
     return MaterialApp(
       debugShowCheckedModeBanner: false,
@@ -455,7 +651,11 @@ class _PaiAppState extends State<PaiApp> {
             ),
           ],
         ),
-        body: screens[page],
+        // >>> The change <<<
+        body: IndexedStack(
+          index: page,
+          children: screens,
+        ),
         bottomNavigationBar: NavigationBar(
           selectedIndex: page,
           onDestinationSelected: (i) => setState(() => page = i),
@@ -464,6 +664,8 @@ class _PaiAppState extends State<PaiApp> {
             NavigationDestination(icon: Icon(Icons.task), label: 'Tasks'),
             NavigationDestination(
                 icon: Icon(Icons.extension), label: 'Plugins'),
+                NavigationDestination(
+      icon: Icon(Icons.bug_report), label: 'Test'),   // NEW
           ],
         ),
       ),
