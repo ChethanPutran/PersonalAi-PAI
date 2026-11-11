@@ -96,3 +96,45 @@ class UserRepository(BaseRepository[UserModel]):
             await self.session.flush()
             span.set_attribute("deleted", True)
             return True
+
+    async def get_by_email(self, email: str) -> UserModel | None:
+        tracer = get_tracer()
+        async with tracer.span("user.get_by_email"):
+            result = await self.session.execute(
+                select(UserModel).where(UserModel.email == email)
+            )
+            return result.scalar_one_or_none()
+
+
+    async def list_all(self) -> list[UserModel]:
+        tracer = get_tracer()
+        async with tracer.span("user.list_all") as span:
+            result = await self.session.execute(
+                select(UserModel).order_by(UserModel.created_at)
+            )
+            rows = list(result.scalars().all())
+            span.set_attribute("count", len(rows))
+            return rows
+
+
+    async def create_with_credentials(
+        self,
+        *,
+        email: str,
+        hashed_password: str,
+        is_admin: bool = False,
+    ) -> UserModel:
+        import uuid
+        tracer = get_tracer()
+        async with tracer.span(
+            "user.create_with_credentials", is_admin=is_admin,
+        ):
+            user = UserModel(
+                id=str(uuid.uuid4()),
+                email=email,
+                hashed_password=hashed_password,
+                is_admin=is_admin,
+            )
+            self.session.add(user)
+            await self.session.flush()
+            return user
