@@ -54,3 +54,5 @@ build/
 .flutter-plugins-dependencies
 
 artifacts
+
+logs/

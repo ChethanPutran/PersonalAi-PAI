@@ -1,51 +1,82 @@
-"""HTTP request logging middleware.
-
-Cancellations during shutdown are normal — uvicorn cancels in-flight
-ASGI tasks after the graceful period expires. Treating them as errors
-produces scary tracebacks for behaviour that is actually correct.
-"""
+"""HTTP request logging middleware."""
 from __future__ import annotations
 
 import asyncio
 import time
 
 from loguru import logger
-from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 
 class LoggingMiddleware:
+    """
+    Per-request access logging.
+
+    Every HTTP request emits exactly one INFO record with structured
+    extras (method, path, status, duration_s, client) tagged with
+    ``http_access=True``. The loguru sinks in
+    ``pai.logging_config`` route these records to ``logs/http_access.log``
+    and keep them out of the terminal + ``app.log``.
+
+    Websocket and lifespan scopes pass through untouched — Starlette's
+    own protocols own those.
+    """
+
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
 
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        # Non-HTTP scopes (websocket, lifespan) pass through untouched.
-        # Lifespan in particular must not be wrapped in timing logic —
-        # Starlette's lifespan handler has its own protocol.
+    async def __call__(
+        self, scope: Scope, receive: Receive, send: Send
+    ) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
 
         method = scope.get("method", "?")
         path = scope.get("path", "?")
-        start = time.perf_counter()      # monotonic — safe under clock changes
+        query = scope.get("query_string", b"").decode(errors="replace")
+        full_path = f"{path}?{query}" if query else path
+
+        client = scope.get("client")
+        client_host = client[0] if client else "-"
+
+        start = time.perf_counter()
+        status_code = 0
+        cancelled = False
+
+        async def _send(message: Message) -> None:
+            nonlocal status_code
+            if message["type"] == "http.response.start":
+                status_code = message["status"]
+            await send(message)
 
         try:
-            await self.app(scope, receive, send)
+            await self.app(scope, receive, _send)
 
         except asyncio.CancelledError:
-            # Shutdown signal interrupted this request. Re-raise so the
-            # parent task group can clean up correctly — but log at debug,
-            # not error, because this is expected shutdown behaviour.
-            logger.debug("{} {} — cancelled during shutdown", method, path)
+            # Shutdown interrupted an in-flight request. Expected
+            # behaviour — log at debug, keep the exception flowing.
+            cancelled = True
             raise
 
         except Exception:
-            # A real application error. Log the traceback, then re-raise
-            # so Starlette's error handler can produce the 500 response.
-            logger.exception("{} {} — unhandled exception", method, path)
+            # Real error — log the traceback so it lands in app.log.
+            # Starlette's error handler will emit the 500 response.
+            logger.exception("{} {} — unhandled exception", method, full_path)
             raise
 
         finally:
-            # Always log duration — including on cancellation and error.
-            duration_ms = (time.perf_counter() - start) * 1000
-            logger.info("{} {} - {:.3f}s", method, path, duration_ms / 1000)
+            duration_s = time.perf_counter() - start
+            if status_code == 0:
+                # Response never started: 499 for cancellation (nginx
+                # convention), 500 for a genuine error before send.
+                status_code = 499 if cancelled else 500
+
+            logger.bind(
+                http_access=True,
+                method=method,
+                path=full_path,
+                status=status_code,
+                duration_s=duration_s,
+                client=client_host,
+            ).info("{} {} - {:.3f}s", method, full_path, duration_s)

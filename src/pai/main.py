@@ -17,10 +17,19 @@ from pai.app_context import (
     create_app_context,
     get_app_context,
 )
+from pathlib import Path
+from pai.logging_config import configure_logging
 from pai.config import config
 from pai.observability import TraceStore, Tracer, set_tracer
 from pai.observability.tracer import get_tracer
 
+
+# ── Configure logging BEFORE anything else that might log ──
+configure_logging(
+    log_dir=Path("logs"),
+    level="DEBUG" if config.debug else "INFO",
+    json_access=False,     # True → logs/http_access.jsonl
+)
 
 def create_lifespan(context: PAIAppContext):
     """Application lifespan manager."""

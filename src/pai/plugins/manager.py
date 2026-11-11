@@ -304,6 +304,34 @@ class PluginManager(Manager):
             raise ValueError(f"Plugin '{plugin_id}' not found")
         return plugin
 
+    async def get_manifest_at_version(
+        self, plugin_id: str, version: str,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Read a specific version's manifest from the plugin_registry dir,
+        bypassing the in-memory catalog.
+
+        The catalog only holds the *latest* version per plugin. When a
+        caller asks for `browser@1.0.0` after a bump to `1.0.1`, the
+        catalog entry says `1.0.1` — but the disk still has `1.0.0/`.
+        This method lets the caller install an older version explicitly.
+        """
+        import json
+        from pathlib import Path
+
+        if self.plugin_registry_dir is None:
+            return None
+        path = Path(self.plugin_registry_dir) / plugin_id / version / "manifest.json"
+        if not path.exists():
+            return None
+        try:
+            return json.loads(path.read_text())
+        except Exception as exc:
+            logger.warning(
+                "Failed to read manifest %s: %s", path, exc
+            )
+            return None
+    
     async def get_plugin_for_capability(
         self, capability: str,
     ) -> Optional[PluginInfo]:
@@ -572,12 +600,14 @@ class PluginManager(Manager):
                 "version": r.version,
                 "is_installed": r.is_installed,
                 "enabled_on_device": r.enabled_on_device,
-                "installed_at": r.installed_at.isoformat() if r.installed_at else None,
+                "artifact_sha256": getattr(r, "artifact_sha256", None),   # ← add
+                "installed_at": (
+                    r.installed_at.isoformat() if r.installed_at else None
+                ),
                 "last_error": r.last_error,
             }
             for r in records
         ]
-
     # ------------------------------------------------------------------
     # Install request builder
     # ------------------------------------------------------------------
