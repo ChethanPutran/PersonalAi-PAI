@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:pai_mobile/protocol/device_enums.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'auth/auth_service.dart';
 import 'config/app_config.dart';
@@ -31,6 +32,10 @@ import 'ui/auth/login_screen.dart';
 import 'ui/chat/chat_screen.dart';
 import 'ui/plugins/plugins_screen.dart';
 import 'ui/tasks/tasks_screen.dart';
+import 'models/user_profile.dart';
+import 'profile/profile_service.dart';
+import 'profile/settings_service.dart';
+import 'ui/profile/profile_screen.dart';
 
 
 import 'tasks/local_task_runner.dart';             // NEW
@@ -57,6 +62,18 @@ class _PaiAppState extends State<PaiApp> {
   DeviceConnectionService? connectionService;
   CapabilityDispatcher? _dispatcher;    
   LocalTaskRunner? _testTaskRunner; 
+
+  ProfileService? _profileService;
+  // in _PaiAppState, replace the default construction:
+late final SettingsService _settingsService = SettingsService(
+  initial: {'notifications': true, 'auto_sync': true},
+  onChanged: (values) async {
+    final prefs = await SharedPreferences.getInstance();
+    for (final e in values.entries) {
+      await prefs.setBool('settings.${e.key}', e.value);
+    }
+  },
+);
 
   /// Broadcast stream of `task.*` / `plan.*` events received over the WS.
   /// Fed by [_handleDeviceMessage]; consumed by TasksScreen for auto-refresh.
@@ -136,6 +153,8 @@ class _PaiAppState extends State<PaiApp> {
       final chat = _chatService ??= ChatService(api);
       await chat.restoreSession();
 
+      _profileService ??= ProfileService(api: api);
+
       // --------------------------------------------------------
       // 3. UI-facing manager.
       // --------------------------------------------------------
@@ -145,10 +164,7 @@ class _PaiAppState extends State<PaiApp> {
         deviceId: id,
       );
 
-      await manager.loadCatalog(
-        platform: device.platform,
-        architecture: device.architecture,
-      );
+      await manager.loadCatalog();
 
       // 4. Command router + handler.
       final commandRouter = PluginCommandRouter(service: service);
@@ -234,10 +250,7 @@ class _PaiAppState extends State<PaiApp> {
 
     await manager.reconcileWithBackend();
 
-    await manager.loadCatalog(
-      platform: device.platform,
-      architecture: device.architecture,
-    );
+    await manager.loadCatalog();
     debugPrint('[PaiApp] Plugin state reconciled + catalog refreshed');
 
     // Any installs / uninstalls may have changed which plugin owns a
@@ -497,6 +510,7 @@ _testTaskRunner = null;                            // NEW
     setState(() {
       _initializing = false;
       _initError = null;
+      _profileService = null;
     });
   }
 
@@ -632,6 +646,12 @@ _testTaskRunner = null;                            // NEW
       pluginManager: pluginManager!,
       runner: _testTaskRunner!,
     ),
+    ProfileScreen(
+    service: _profileService!,
+    settings: _settingsService,
+    currentDeviceId: deviceId,
+    onLogout: _logout,
+  ),
   ];
 
     return MaterialApp(
@@ -665,7 +685,8 @@ _testTaskRunner = null;                            // NEW
             NavigationDestination(
                 icon: Icon(Icons.extension), label: 'Plugins'),
                 NavigationDestination(
-      icon: Icon(Icons.bug_report), label: 'Test'),   // NEW
+      icon: Icon(Icons.bug_report), label: 'Test'), 
+       NavigationDestination(icon: Icon(Icons.person), label: 'Profile'),
           ],
         ),
       ),

@@ -101,9 +101,18 @@ class PluginInfo {
   /// Catalog fields.
   final List<String> availablePlatforms;
   final List<String> architectures;
+
+  /// NEW: device types this plugin is installable on.
+  /// Mirrors `manifest.device_types` (e.g. ["server"], ["desktop","mobile"]).
+  final List<String> deviceTypes;
+
   final String? packageUrl;
   final String? checksum;
   final int size;
+
+  /// NEW: what version is actually installed (from device_plugins.version).
+  /// Only set when the plugin is installed on the queried device.
+  final String? installedVersion;
 
   /// Mutable UI state.
   PluginState state;
@@ -125,9 +134,11 @@ class PluginInfo {
     this.platforms = const {},
     this.availablePlatforms = const [],
     this.architectures = const [],
+    this.deviceTypes = const [],
     this.packageUrl,
     this.checksum,
     this.size = 0,
+    this.installedVersion,
     this.state = PluginState.available,
     this.error,
   });
@@ -144,6 +155,26 @@ class PluginInfo {
 
   // -----------------------------------------------------------------
   // CATALOG (from backend /plugins/catalog)
+  //
+  // The backend emits per-device groups. Each plugin entry looks like:
+  //
+  //   {
+  //     "id": "browser",
+  //     "name": "Browser",
+  //     "version": "1.0.1",
+  //     "description": "...",
+  //     "platforms": ["linux"],
+  //     "architectures": ["x86_64"],
+  //     "device_types": ["server"],
+  //     "capabilities": [...],
+  //     "package_url": "...",
+  //     "checksum": "...",
+  //     "size": 0,
+  //     "state": "available" | "installed" | "disabled" | "enabled",
+  //     "is_installed": true | false,
+  //     "enabled_on_device": true | false,
+  //     "installed_version": "1.0.1" | null,
+  //   }
   // -----------------------------------------------------------------
   factory PluginInfo.fromCatalogJson(Map<String, dynamic> j) {
     final capsRaw = j['capabilities'];
@@ -162,6 +193,21 @@ class PluginInfo {
       }
     }
 
+    // Backend sends `state` explicitly. When it's absent (older backend),
+    // fall back to inferring from is_installed / enabled_on_device so the
+    // tile still renders correctly.
+    PluginState state;
+    final rawState = j['state']?.toString();
+    if (rawState != null && rawState.isNotEmpty) {
+      state = pluginStateFromString(rawState);
+    } else if (j['is_installed'] == true) {
+      state = j['enabled_on_device'] == true
+          ? PluginState.enabled
+          : PluginState.disabled;
+    } else {
+      state = PluginState.available;
+    }
+
     return PluginInfo(
       id: j['id']?.toString() ?? '',
       name: j['name']?.toString() ?? '',
@@ -173,10 +219,13 @@ class PluginInfo {
           (j['platforms'] as List?)?.cast<String>() ?? const [],
       architectures:
           (j['architectures'] as List?)?.cast<String>() ?? const [],
+      deviceTypes:
+          (j['device_types'] as List?)?.cast<String>() ?? const [],
       packageUrl: j['package_url']?.toString(),
       checksum: j['checksum']?.toString(),
       size: (j['size'] as num?)?.toInt() ?? 0,
-      state: pluginStateFromString(j['state']?.toString()),
+      installedVersion: j['installed_version']?.toString(),
+      state: state,
       error: j['error']?.toString(),
     );
   }
@@ -227,6 +276,8 @@ class PluginInfo {
       nativeModule: runtime['nativeModule']?.toString() ?? '',
       minPaiVersion: runtime['minPaiVersion']?.toString() ?? '0.0.0',
       platforms: platformMap,
+      deviceTypes:
+          (j['device_types'] as List?)?.cast<String>() ?? const [],
     );
   }
 
@@ -245,6 +296,7 @@ class PluginInfo {
           'minPaiVersion': minPaiVersion,
         },
         'platforms': platforms.map((k, v) => MapEntry(k, v.toJson())),
+        'device_types': deviceTypes,
       };
 
   Map<String, dynamic> toCatalogJson() => {
@@ -254,6 +306,7 @@ class PluginInfo {
         'capabilities': capabilities,
         'platforms': availablePlatforms,
         'architectures': architectures,
+        'device_types': deviceTypes,
         'package_url': packageUrl,
         'checksum': checksum,
         'size': size,
@@ -262,5 +315,7 @@ class PluginInfo {
       };
 
   @override
-  String toString() => 'PluginInfo(id=$id, version=$version, state=$state)';
+  String toString() =>
+      'PluginInfo(id=$id, version=$version, state=$state, '
+      'deviceTypes=$deviceTypes)';
 }
