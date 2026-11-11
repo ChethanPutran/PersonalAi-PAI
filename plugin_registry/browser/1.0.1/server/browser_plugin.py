@@ -5,7 +5,7 @@ import asyncio
 import logging
 import time
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -101,29 +101,75 @@ class BrowserPlugin:
                 **self._context_kwargs(user_id)
             )
             page = await ctx.new_page()
+            start_url = params["url"]
             try:
                 await page.goto(
-                    params["url"],
+                    start_url,
                     wait_until="domcontentloaded",
                     timeout=30_000,
                 )
+
+                # Fill — collect per-field errors instead of aborting on
+                # the first bad selector.
+                fill_errors: Dict[str, str] = {}
                 for selector, value in params["fields"].items():
-                    await page.fill(selector, str(value))
+                    try:
+                        # 5s is plenty for any real form field. Bad selectors
+                        # should fail fast — 30s default hides problems and
+                        # races against the caller's --timeout.
+                        await page.fill(selector, str(value), timeout=5_000)
+                    except Exception as exc:
+                        fill_errors[selector] = str(exc)[:200]
+
+                # Submit — capture whether navigation happened
+                submit_info: Optional[Dict[str, Any]] = None
                 if params.get("submit_selector"):
-                    await page.click(params["submit_selector"])
-                    await page.wait_for_load_state(
-                        "networkidle", timeout=30_000
-                    )
+                    url_before = page.url
+                    navigated = False
+                    try:
+                        # Native form submit → full navigation
+                        async with page.expect_navigation(timeout=15_000):
+                            await page.click(params["submit_selector"])
+                        navigated = True
+                    except Exception:
+                        # No navigation — SPA / type="button" / blocked
+                        try:
+                            await page.wait_for_load_state(
+                                "networkidle", timeout=5_000
+                            )
+                        except Exception:
+                            pass
+                    submit_info = {
+                        "clicked": True,
+                        "navigated": navigated,
+                        "url_before": url_before,
+                        "url_after": page.url,
+                    }
+
+                # Screenshot (opt-in)
                 shot = None
                 if params.get("screenshot"):
                     shot = str(
                         self._out_dir / f"form_{int(time.time())}.png"
                     )
                     await page.screenshot(path=shot, full_page=True)
+
+                # Diagnostic payload — this is what tells you what happened
+                title = await page.title()
+                try:
+                    text = await page.inner_text("body")
+                except Exception:
+                    text = ""
+
                 return {
                     "ok": True,
                     "url": page.url,
+                    "url_changed": page.url != start_url,
+                    "title": title,
+                    "text": text[:20_000],
                     "screenshot": shot,
+                    "fill_errors": fill_errors or None,
+                    "submit": submit_info,
                 }
             finally:
                 await self._save_state(ctx, user_id)

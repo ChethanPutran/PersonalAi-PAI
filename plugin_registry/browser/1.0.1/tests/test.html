@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Webagent Testing Sandbox</title>
+    <style>
+        body { font-family: sans-serif; margin: 40px; max-width: 500px; }
+        .form-group { margin-bottom: 15px; display: flex; flex-direction: column; }
+        label { font-weight: bold; margin-bottom: 5px; }
+        input, select { padding: 8px; font-size: 14px; }
+        button { padding: 10px; background: #007BFF; color: white; border: none; cursor: pointer; }
+        #success-message { display: none; color: green; margin-top: 15px; font-weight: bold; }
+    </style>
+</head>
+<body>
+
+    <h2>Agent Test Form</h2>
+    <form id="testForm" onsubmit="event.preventDefault(); document.getElementById('success-message').style.display='block';">
+        
+        <div class="form-group">
+            <label for="username">Full Name (Standard Text):</label>
+            <input type="text" id="username" name="fullname" placeholder="John Doe" required>
+        </div>
+
+        <div class="form-group">
+            <label for="email">Email Address (Type Email):</label>
+            <input type="email" id="email" name="email" required>
+        </div>
+
+        <div class="form-group">
+            <label for="choices">Options (Dropdown Select):</label>
+            <select id="choices" name="tier">
+                <option value="">--Select an option--</option>
+                <option value="tier1">Tier 1</option>
+                <option value="tier2">Tier 2</option>
+            </select>
+        </div>
+
+        <div class="form-group">
+            <label>
+                <input type="checkbox" id="tos" name="tos" value="agreed" required>
+                I agree to the fake terms of service
+            </label>
+        </div>
+
+        <button type="submit" id="submitBtn">Submit Form</button>
+    </form>
+
+    <div id="success-message">🎉 Success! The webagent successfully filled and submitted the form.</div>
+
+</body>
+</html>
