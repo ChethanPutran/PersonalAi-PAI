@@ -4,13 +4,13 @@ import hashlib
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
-from pai.api.dependencies import get_current_user
+from pai.api.dependencies import get_current_admin, get_current_user
 from pai.app_context import PAIAppContext, get_app_context
 
 
@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 class PluginInstallRequest(BaseModel):
     device_id: str
+    version: Optional[str] = None
 
 
 class PluginConfigRequest(BaseModel):
@@ -234,43 +235,224 @@ async def reconcile_device(
 # Catalog
 # ============================================================
 
-@router.get("/catalog")
-async def get_catalog(
+def _enum_value(v: Any) -> Optional[str]:
+    """DeviceInfo fields are enums; stringify to their .value."""
+    if v is None:
+        return None
+    if hasattr(v, "value"):
+        return str(v.value)
+    return str(v)
+
+
+def _plugin_compatible(
+    manifest: Dict[str, Any],
+    vinfo: Dict[str, Any],
     platform: str,
     architecture: str,
+    device_type: str,
+) -> bool:
+    """
+    A plugin is compatible iff:
+      - the manifest publishes an artifact for this platform
+      - the device_type is declared in the manifest and matches
+      - the architecture is declared AND matches (or the manifest
+        declares no architectures, meaning "any")
+    """
+    if not platform or platform not in (vinfo.get("artifacts") or {}):
+        return False
+
+    declared_types = manifest.get("device_types") or []
+    if not device_type or device_type not in declared_types:
+        return False
+
+    declared_archs = manifest.get("architectures") or []
+    if declared_archs and architecture and architecture not in declared_archs:
+        return False
+
+    return True
+
+
+@router.get("/catalog")
+async def get_catalog(
     request: Request,
+    platform: Optional[str] = Query(None),
+    architecture: Optional[str] = Query(None),
+    device_type: Optional[str] = Query(None),
+    device_id: Optional[str] = Query(None, description="If set, resolve platform/arch/type from this device"),
+    user_id: str = Depends(get_current_user),
     context: PAIAppContext = Depends(get_app_context),
 ) -> Dict[str, Any]:
-    index = await registry_index(request)
+    """
+    Return plugins grouped by device compatibility.
 
-    plugins = []
-    for entry in index["plugins"]:
-        latest = entry["latest"]
-        vinfo = entry["versions"][latest]
-        if platform not in vinfo["artifacts"]:
-            continue
+    Response shape:
+        {
+          "this_device": {..., "plugins": [compatible plugins]},
+          "other_devices": [
+            {..., "plugins": [compatible plugins on that device]},
+            ...
+          ]
+        }
 
-        manifest = json.loads(
-            (REGISTRY_ROOT / entry["id"] / latest / "manifest.json").read_text()
+    Resolving:
+      - If `device_id` is set, its platform/arch/type override the query
+        params, and its install state is joined from `device_plugins`.
+      - Otherwise `platform`, `architecture`, `device_type` must be
+        supplied directly.
+    """
+    dm = context.orchestrator.device_manager
+
+    # ---- 1. Resolve current device ----
+    this_device = None
+    if device_id:
+        this_device = await dm.get(device_id)
+        if this_device is not None:
+            platform = _enum_value(this_device.platform) or platform
+            architecture = this_device.architecture or architecture
+            device_type = _enum_value(this_device.device_type) or device_type
+
+    if not platform or not architecture or not device_type:
+        raise HTTPException(
+            400,
+            "Either device_id, or (platform, architecture, device_type) "
+            "must be provided",
         )
 
-        plugins.append({
+    # ---- 2. Load index + manifests ----
+    index = await registry_index(request)
+
+    manifests: Dict[str, Dict[str, Any]] = {}
+    for entry in index["plugins"]:
+        pid = entry["id"]
+        latest = entry["latest"]
+        path = REGISTRY_ROOT / pid / latest / "manifest.json"
+        if path.exists():
+            try:
+                manifests[pid] = json.loads(path.read_text())
+            except Exception as exc:
+                logger.warning("bad manifest %s: %s", path, exc)
+
+    # ---- 3. Fetch this user's other devices ----
+    try:
+        user_devices = await dm.list_devices(user_id)
+    except Exception as exc:
+        logger.warning("list_devices failed for %s: %s", user_id, exc)
+        user_devices = []
+
+    other_devices = [d for d in user_devices if d.id != device_id]
+
+    # ---- 4. Batch-fetch install state for every relevant device ----
+    install_map: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    all_device_ids = [did for did in [device_id, *(d.id for d in other_devices)] if did]
+
+    if all_device_ids and context.database is not None:
+        try:
+            from sqlalchemy import select as sa_select
+            from pai.storage.models import DevicePluginModel
+
+            rows = []
+            async with context.database.session() as session:
+                result = await session.execute(sa_select(DevicePluginModel).where(
+                                        DevicePluginModel.device_id.in_(all_device_ids)
+                                    ))
+                rows = list(result.scalars().all())
+            for row in rows:
+                install_map[(row.device_id, row.plugin_id)] = {
+                    "is_installed": row.is_installed,
+                    "enabled_on_device": row.enabled_on_device,
+                    "installed_version": row.version,
+                }
+        except Exception as exc:
+            logger.warning("install-state fetch failed: %s", exc)
+
+    # ---- 5. Classify each plugin ----
+    def _serialize(
+        entry: Dict[str, Any],
+        manifest: Dict[str, Any],
+        vinfo: Dict[str, Any],
+        plat: str,
+        install_info: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        out = {
             "id": entry["id"],
             "name": entry["name"],
-            "version": latest,
+            "version": entry["latest"],
             "description": manifest.get("description", ""),
             "platforms": list(vinfo["artifacts"].keys()),
-            "architectures": [architecture],
-            "capabilities": manifest.get("capabilities", []),
-            "package_url": vinfo["artifacts"][platform],
-            "checksum": vinfo["sha256"][platform],
-            "size": vinfo["sizeBytes"][platform],
+            "architectures": list(manifest.get("architectures") or []),
+            "device_types": list(manifest.get("device_types") or []),
+            "capabilities": manifest.get("capabilities") or [],
+            "package_url": vinfo["artifacts"].get(plat),
+            "checksum": vinfo["sha256"].get(plat),
+            "size": vinfo["sizeBytes"].get(plat, 0),
             "state": "available",
-        })
+            "is_installed": False,
+            "enabled_on_device": False,
+            "installed_version": None,
+        }
+        if install_info:
+            out.update(install_info)
+            if install_info.get("is_installed"):
+                out["state"] = (
+                    "enabled" if install_info.get("enabled_on_device")
+                    else "disabled"
+                )
+        return out
 
-    return {"plugins": plugins}
+    this_plugins: List[Dict[str, Any]] = []
+    per_other: Dict[str, List[Dict[str, Any]]] = {d.id: [] for d in other_devices}
 
+    for entry in index["plugins"]:
+        pid = entry["id"]
+        latest = entry["latest"]
+        vinfo = entry["versions"][latest]
+        manifest = manifests.get(pid)
+        if not manifest:
+            continue
 
+        # This device?
+        if _plugin_compatible(manifest, vinfo, platform, architecture, device_type):
+            this_plugins.append(_serialize(
+                entry, manifest, vinfo, platform,
+                install_map.get((device_id or "", pid)),
+            ))
+            continue
+
+        # Other devices?
+        for d in other_devices:
+            d_plat = _enum_value(d.platform)
+            d_arch = d.architecture or ""
+            d_type = _enum_value(d.device_type) or ""
+
+            if _plugin_compatible(manifest, vinfo, d_plat, d_arch, d_type):
+                per_other[d.id].append(_serialize(
+                    entry, manifest, vinfo, d_plat,
+                    install_map.get((d.id, pid)),
+                ))
+
+    return {
+        "this_device": {
+            "device_id": device_id,
+            "name": this_device.name if this_device else None,
+            "platform": platform,
+            "architecture": architecture,
+            "device_type": device_type,
+            "plugins": this_plugins,
+        },
+        "other_devices": [
+            {
+                "device_id": d.id,
+                "name": d.name,
+                "platform": _enum_value(d.platform),
+                "architecture": d.architecture,
+                "device_type": _enum_value(d.device_type),
+                "connected": await dm.is_connected(d.id),
+                "plugins": per_other[d.id],
+            }
+            for d in other_devices
+            if per_other[d.id]
+        ],
+    }
 # ============================================================
 # List plugins
 # ============================================================
@@ -324,10 +506,34 @@ async def install_plugin(
     plugin_manager = context.orchestrator.plugin_manager
     device_manager = context.orchestrator.device_manager
 
-    try:
-        plugin = await plugin_manager.require_plugin(plugin_id)
-    except ValueError as exc:
-        raise HTTPException(404, str(exc)) from exc
+    # ---- resolve the version ----
+    if payload.version:
+        # explicit version — read the manifest at that path,
+        # bypassing the (potentially stale) catalog cache
+        manifest = await plugin_manager.get_manifest_at_version(
+            plugin_id, payload.version
+        )
+        if manifest is None:
+            raise HTTPException(
+                404,
+                f"Plugin '{plugin_id}@{payload.version}' not found "
+                f"in registry",
+            )
+        version = payload.version
+    else:
+        try:
+            catalog_entry = await plugin_manager.require_plugin(plugin_id)
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        version = catalog_entry.version
+        manifest = await plugin_manager.get_manifest_at_version(plugin_id, version)
+        if manifest is None:
+            # catalog says this version exists but disk disagrees
+            raise HTTPException(
+                500,
+                f"Plugin '{plugin_id}@{version}' is in catalog but "
+                f"manifest missing on disk",
+            )
 
     device = await device_manager.get(payload.device_id)
     if device is None:
@@ -353,10 +559,31 @@ async def install_plugin(
                 f"{device_platform}/{device_architecture}",
             )
 
-    command = await plugin_manager.build_install_request(
-        plugin_id=plugin_id,
-        device_id=payload.device_id,
-    )
+        # ---- build the WS command from the *resolved* manifest ----
+    # We can't use plugin_manager.build_install_request() here because
+    # it reads from the catalog (`require_plugin(plugin_id)`), which only
+    # holds the latest version. For an explicit `browser@1.0.0` request
+    # after a bump to 1.0.1, that would push 1.0.1 over WS and ignore
+    # the pin. Build from `manifest` instead — it's the manifest of the
+    # version we actually resolved above.
+    capabilities = [
+        c.get("id") or c.get("name")
+        for c in manifest.get("capabilities") or []
+        if isinstance(c, dict)
+    ]
+    command = {
+        "type": "plugin.install",
+        "request_id": f"install:{plugin_id}:{payload.device_id}",
+        "device_id": payload.device_id,
+        "plugin": {
+            "id": plugin_id,
+            "name": manifest.get("name", plugin_id),
+            "version": version,
+            "platforms": list((manifest.get("platforms") or {}).keys()),
+            "architectures": manifest.get("architectures") or [],
+            "capabilities": capabilities,
+        },
+    }
 
     try:
         await device_manager.send(payload.device_id, command)
@@ -373,7 +600,7 @@ async def install_plugin(
         "success": True,
         "plugin_id": plugin_id,
         "device_id": payload.device_id,
-        "version": plugin.version,
+        "version": version,
         "status": "install_requested",
     }
 
@@ -612,4 +839,4 @@ async def set_plugin_config(
 async def plugin_manager_status(
     context: PAIAppContext = Depends(get_app_context),
 ) -> Dict[str, Any]:
-    return context.orchestrator.plugin_manager.get_status()
+    return await context.orchestrator.plugin_manager.get_status()

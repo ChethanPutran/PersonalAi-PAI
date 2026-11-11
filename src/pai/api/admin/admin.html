@@ -93,6 +93,125 @@
 
   .layout { display: flex; flex: 1; min-height: 0; }
 
+
+
+  /* ── Header interval control ── */
+header .interval-control {
+  display: flex; align-items: center; gap: 6px;
+  padding: 0 10px;
+  border-left: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+  height: 32px;
+}
+header .interval-control label {
+  font-size: 10px; text-transform: uppercase;
+  letter-spacing: .5px; color: var(--muted);
+}
+header .interval-control select {
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 4px 8px; font-size: 12px; font-family: inherit;
+  cursor: pointer;
+}
+header .interval-control select:focus {
+  outline: none; border-color: var(--accent);
+}
+header .refresh-now-btn {
+  background: transparent; color: var(--muted);
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 4px 8px; font-size: 13px; cursor: pointer;
+  line-height: 1;
+}
+header .refresh-now-btn:hover { color: var(--text); background: var(--surface-2); }
+header .refresh-now-btn.spinning { animation: spin 0.6s linear; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ── Action buttons ── */
+.btn-sm {
+  padding: 3px 8px; font-size: 11px; border-radius: 4px;
+  border: 1px solid var(--border); background: var(--surface-2);
+  color: var(--text); cursor: pointer;
+}
+.btn-sm:hover { background: var(--border); }
+.btn-sm.danger { color: var(--err); border-color: rgba(239,68,68,.4); }
+.btn-sm.danger:hover { background: rgba(239,68,68,.15); }
+.btn-sm.ok     { color: var(--ok); border-color: rgba(34,197,94,.4); }
+.btn-sm.warn   { color: var(--warn); border-color: rgba(245,158,11,.4); }
+.btn-primary {
+  padding: 8px 14px; background: var(--accent); color: var(--bg);
+  border: none; border-radius: 6px; font-weight: 700; cursor: pointer;
+}
+.btn-primary:hover { filter: brightness(1.1); }
+.btn-secondary {
+  padding: 8px 14px; background: var(--surface-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px; cursor: pointer;
+}
+.btn-danger {
+  padding: 8px 14px; background: var(--err); color: #fff;
+  border: none; border-radius: 6px; font-weight: 700; cursor: pointer;
+}
+
+.row-actions { display: flex; gap: 4px; flex-wrap: wrap; }
+
+/* ── Section header with primary action ── */
+.view-toolbar {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 16px; gap: 12px; flex-wrap: wrap;
+}
+.view-toolbar h2 { margin: 0; font-size: 18px; }
+
+/* ── Modal ── */
+.modal-backdrop {
+  position: fixed; inset: 0; z-index: 900;
+  background: rgba(15,23,42,.75); backdrop-filter: blur(4px);
+  display: flex; align-items: center; justify-content: center;
+}
+.modal-backdrop.hidden { display: none; }
+.modal {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; padding: 24px; min-width: 380px;
+  max-width: 640px; max-height: 85vh; overflow-y: auto;
+  box-shadow: 0 24px 48px rgba(0,0,0,.6);
+}
+.modal h3 { margin: 0 0 16px; font-size: 16px; }
+.modal label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+.modal input, .modal select, .modal textarea {
+  width: 100%; padding: 8px 10px; margin-bottom: 12px;
+  background: var(--bg); border: 1px solid var(--border);
+  color: var(--text); border-radius: 6px; font-size: 13px;
+  font-family: inherit;
+}
+.modal input[type=checkbox] { width: auto; margin-right: 6px; }
+.modal-actions {
+  display: flex; justify-content: flex-end; gap: 8px;
+  margin-top: 16px; padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+.modal-error {
+  color: var(--err); font-size: 12px; margin-bottom: 8px;
+  min-height: 16px;
+}
+
+/* ── Toast ── */
+.toast-container {
+  position: fixed; bottom: 24px; right: 24px; z-index: 1100;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.toast {
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  padding: 10px 16px; border-radius: 6px; font-size: 13px;
+  animation: toast-in .2s ease-out;
+  max-width: 360px;
+}
+.toast.ok    { border-left-color: var(--ok); }
+.toast.err   { border-left-color: var(--err); }
+.toast.warn  { border-left-color: var(--warn); }
+@keyframes toast-in {
+  from { transform: translateY(10px); opacity: 0; }
+  to   { transform: translateY(0); opacity: 1; }
+}
+
   /* ============ Sidebar ============ */
   .sidebar {
     width: 200px; flex-shrink: 0;
@@ -529,6 +648,20 @@
   <header>
     <h1>PAI Admin</h1>
     <div class="right">
+      <div class="interval-control">
+  <label for="refresh-interval">Poll</label>
+  <select id="refresh-interval" title="Auto-refresh interval for admin data">
+    <option value="0">off</option>
+    <option value="1000">1s</option>
+    <option value="2000">2s</option>
+    <option value="5000">5s</option>
+    <option value="10000">10s</option>
+    <option value="30000">30s</option>
+    <option value="60000">60s</option>
+  </select>
+  <button id="btn-refresh-now" class="refresh-now-btn" title="Refresh now">⟳</button>
+</div>
+
       <div class="user-info">
         <strong id="admin-email"></strong>
         <span class="dot" id="live-dot"></span>
@@ -544,6 +677,7 @@
       <a class="nav-item" data-view="devices">Devices <span class="count" id="count-devices"></span></a>
       <a class="nav-item" data-view="plugins">Plugins <span class="count" id="count-plugins"></span></a>
       <a class="nav-item" data-view="users">Users <span class="count" id="count-users"></span></a>
+      <a class="nav-item" data-view="tasks">Tasks <span class="count" id="count-tasks"></span></a>
       <a class="nav-item" data-view="traces">Traces <span class="count" id="count-traces"></span></a>
       <a class="nav-item" data-view="raw">Raw JSON</a>
     </nav>
@@ -564,7 +698,31 @@
       <section class="view" id="view-users">
         <div id="users-content"><div class="empty">Loading…</div></div>
       </section>
+      <section class="view" id="view-tasks">
+  <div class="view-toolbar">
+    <h2>Tasks</h2>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <select id="task-filter-status">
+        <option value="">all statuses</option>
+        <option value="pending">pending</option>
+        <option value="running">running</option>
+        <option value="paused">paused</option>
+        <option value="completed">completed</option>
+        <option value="failed">failed</option>
+        <option value="cancelled">cancelled</option>
+      </select>
+      <input id="task-filter-user" placeholder="user_id" style="width:200px">
+      <button class="btn-sm" id="btn-refresh-tasks">⟳ Refresh</button>
+    </div>
+  </div>
+  <div id="tasks-content"><div class="empty">Loading…</div></div>
+</section>
 
+<!-- Modal + toast shells -->
+<div id="modal-backdrop" class="modal-backdrop hidden">
+  <div class="modal" id="modal-body"></div>
+</div>
+<div id="toast-container" class="toast-container"></div>
       <section class="view" id="view-traces">
         <aside class="traces-list-panel">
           <div class="traces-filters">
@@ -626,14 +784,28 @@
   const API_TRACES_STREAM = '/api/v1/system/traces/stream';
   const TOKEN_KEY = 'pai_admin_token';
   const EMAIL_KEY = 'pai_admin_email';
-  const REFRESH_MS = 5000;
+  // ── Polling interval (persisted) ──
+const INTERVAL_KEY = 'pai_admin_refresh_ms';
+const DEFAULT_REFRESH_MS = 5000;
+let refreshMs = (() => {
+  const raw = localStorage.getItem(INTERVAL_KEY);
+  if (raw === null) return DEFAULT_REFRESH_MS;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 0 ? n : DEFAULT_REFRESH_MS;
+})();
+
+function fmtInterval(ms) {
+  if (!ms) return 'manual';
+  if (ms < 1000) return ms + 'ms';
+  return (ms / 1000) + 's';
+}
 
   // ============================================================
   // State
   // ============================================================
   let token = localStorage.getItem(TOKEN_KEY) || '';
   let adminEmail = localStorage.getItem(EMAIL_KEY) || '';
-  let adminTimer = null;
+  let pollTimer = null;
   let traceStreamStop = null;
   let selectedTraceId = null;
   let selectedNodeId = null;
@@ -700,6 +872,468 @@
   }
 
   // ============================================================
+// Toast / Modal helpers
+// ============================================================
+function toast(message, kind = 'info') {
+  const el = document.createElement('div');
+  el.className = `toast ${kind === 'error' ? 'err' : kind}`;
+  el.textContent = message;
+  $('toast-container').appendChild(el);
+  setTimeout(() => el.remove(), 4000);
+}
+
+function openModal(html) {
+  $('modal-body').innerHTML = html;
+  $('modal-backdrop').classList.remove('hidden');
+}
+function closeModal() {
+  $('modal-backdrop').classList.add('hidden');
+  $('modal-body').innerHTML = '';
+}
+$('modal-backdrop').addEventListener('click', (e) => {
+  if (e.target.id === 'modal-backdrop') closeModal();
+});
+
+function confirmAction(message, onConfirm) {
+  openModal(`
+    <h3>Confirm</h3>
+    <p style="color:var(--muted);font-size:13px">${esc(message)}</p>
+    <div class="modal-actions">
+      <button class="btn-secondary" id="mc-cancel">Cancel</button>
+      <button class="btn-danger" id="mc-confirm">Confirm</button>
+    </div>`);
+  $('mc-cancel').addEventListener('click', closeModal);
+  $('mc-confirm').addEventListener('click', () => {
+    closeModal();
+    onConfirm();
+  });
+}
+
+// ============================================================
+// JSON API helper
+// ============================================================
+async function apiCall(method, url, body) {
+  const opts = {
+    method,
+    headers: { ...authHeaders() },
+    cache: 'no-store',
+  };
+  if (body !== undefined) {
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(body);
+  }
+  const r = await fetch(url, opts);
+  if (r.status === 401 || r.status === 403) { doLogout(); throw new Error('Unauthorized'); }
+  if (r.status === 204) return null;
+  const text = await r.text();
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch { data = text; }
+  if (!r.ok) {
+    const detail = (data && data.detail) || `HTTP ${r.status}`;
+    throw new Error(detail);
+  }
+  return data;
+}
+
+// ============================================================
+// Tasks view
+// ============================================================
+let taskRefreshTimer = null;
+
+async function refreshTasks() {
+  if (!token) return;
+  const params = new URLSearchParams();
+  const st = $('task-filter-status').value;
+  const uid = $('task-filter-user').value.trim();
+  if (st) params.set('status', st);
+  if (uid) params.set('user_id', uid);
+  params.set('limit', '200');
+
+  try {
+    const data = await apiCall('GET', `/api/v1/system/tasks?${params}`);
+    renderTasks(data.tasks || []);
+    $('count-tasks').textContent = data.total ?? '';
+  } catch (e) {
+    $('tasks-content').innerHTML =
+      `<div class="empty">${esc(e.message)}</div>`;
+  }
+}
+
+function renderTasks(tasks) {
+  const el = $('tasks-content');
+  if (!tasks.length) {
+    el.innerHTML = '<div class="empty">No tasks found.</div>';
+    return;
+  }
+  el.innerHTML = `
+    <table>
+      <thead><tr>
+        <th>ID</th><th>Capability</th><th>User</th><th>Status</th>
+        <th>Device</th><th>Created</th><th>Actions</th>
+      </tr></thead>
+      <tbody>
+        ${tasks.map(t => {
+          const statusClass = t.status === 'completed' ? 'online'
+                            : t.status === 'failed'    ? 'error'
+                            : t.status === 'running'   ? 'running'
+                            : t.status === 'paused'    ? 'warn' : 'disabled';
+          const canPause   = t.status === 'running';
+          const canResume  = t.status === 'paused';
+          const canCancel  = ['pending','running','paused'].includes(t.status);
+          return `
+            <tr>
+              <td><code>${esc(t.id.slice(0, 12))}</code></td>
+              <td>${esc(t.capability || '—')}</td>
+              <td><code style="font-size:11px">${esc(t.user_id || '—')}</code></td>
+              <td>${badge(t.status || 'unknown', statusClass)}</td>
+              <td><code style="font-size:11px">${esc(t.device_id || '—')}</code></td>
+              <td>${esc(t.created_at || '—')}</td>
+              <td>
+                <div class="row-actions">
+                  <button class="btn-sm" data-action="view" data-id="${esc(t.id)}">View</button>
+                  ${canPause  ? `<button class="btn-sm warn"   data-action="pause"  data-id="${esc(t.id)}">Pause</button>` : ''}
+                  ${canResume ? `<button class="btn-sm ok"     data-action="resume" data-id="${esc(t.id)}">Resume</button>` : ''}
+                  ${canCancel ? `<button class="btn-sm danger" data-action="cancel" data-id="${esc(t.id)}">Cancel</button>` : ''}
+                </div>
+              </td>
+            </tr>`;
+        }).join('')}
+      </tbody>
+    </table>`;
+  el.querySelectorAll('[data-action]').forEach(btn => {
+    btn.addEventListener('click', () => handleTaskAction(btn.dataset.action, btn.dataset.id));
+  });
+}
+
+async function handleTaskAction(action, id) {
+  if (action === 'view') return showTaskDetail(id);
+
+  const verb = { pause: 'Pause', resume: 'Resume', cancel: 'Cancel' }[action];
+  if (action === 'cancel') {
+    return confirmAction(`Cancel task ${id.slice(0,12)}?`, async () => {
+      try {
+        await apiCall('POST', `/api/v1/system/tasks/${id}/cancel`);
+        toast('Task cancelled', 'ok');
+        refreshTasks();
+      } catch (e) { toast(e.message, 'error'); }
+    });
+  }
+
+  try {
+    await apiCall('POST', `/api/v1/system/tasks/${id}/${action}`);
+    toast(`Task ${verb.toLowerCase()}d`, 'ok');
+    refreshTasks();
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+async function showTaskDetail(id) {
+  openModal('<h3>Loading…</h3>');
+  try {
+    const t = await apiCall('GET', `/api/v1/system/tasks/${id}`);
+    openModal(`
+      <h3>Task <code style="font-size:11px">${esc(id.slice(0,16))}</code></h3>
+      <dl class="kv-grid" style="margin-bottom:16px">
+        <dt>Status</dt><dd>${badge(t.status || 'unknown', t.status === 'completed' ? 'online' : t.status === 'failed' ? 'error' : 'running')}</dd>
+        <dt>Capability</dt><dd>${esc(t.capability || '—')}</dd>
+        <dt>User</dt><dd><code>${esc(t.user_id || '—')}</code></dd>
+        <dt>Device</dt><dd><code>${esc(t.device_id || '—')}</code></dd>
+        <dt>Executor</dt><dd><code>${esc(t.executor_id || '—')}</code></dd>
+        <dt>Created</dt><dd>${esc(t.created_at || '—')}</dd>
+        <dt>Started</dt><dd>${esc(t.started_at || '—')}</dd>
+        <dt>Completed</dt><dd>${esc(t.completed_at || '—')}</dd>
+        ${t.error ? `<dt>Error</dt><dd style="color:var(--err)">${esc(t.error)}</dd>` : ''}
+      </dl>
+      ${t.parameters ? `
+        <div class="section-title" style="font-size:11px;text-transform:uppercase;color:var(--muted);margin-bottom:6px">Parameters</div>
+        <pre style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px;font-size:11px;max-height:200px;overflow:auto">${esc(JSON.stringify(t.parameters, null, 2))}</pre>
+      ` : ''}
+      ${t.result ? `
+        <div class="section-title" style="font-size:11px;text-transform:uppercase;color:var(--muted);margin:12px 0 6px">Result</div>
+        <pre style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px;font-size:11px;max-height:240px;overflow:auto">${esc(JSON.stringify(t.result, null, 2))}</pre>
+      ` : ''}
+      <div class="modal-actions">
+        <button class="btn-secondary" id="modal-close">Close</button>
+      </div>
+    `);
+    $('modal-close').addEventListener('click', closeModal);
+  } catch (e) {
+    openModal(`<h3 style="color:var(--err)">Error</h3>
+      <p>${esc(e.message)}</p>
+      <div class="modal-actions"><button class="btn-secondary" id="modal-close">Close</button></div>`);
+    $('modal-close').addEventListener('click', closeModal);
+  }
+}
+
+// Wire up task controls
+$('btn-refresh-tasks').addEventListener('click', refreshTasks);
+$('task-filter-status').addEventListener('change', refreshTasks);
+$('task-filter-user').addEventListener('change', refreshTasks);
+
+// ============================================================
+// User CRUD
+// ============================================================
+function openCreateUserModal() {
+  openModal(`
+    <h3>Create User</h3>
+    <div class="modal-error" id="um-error"></div>
+    <label>Email</label>
+    <input id="um-email" type="email" autocomplete="off">
+    <label>Password (min 8 chars)</label>
+    <input id="um-password" type="password" autocomplete="new-password">
+    <label><input type="checkbox" id="um-admin"> Grant admin access</label>
+    <div class="modal-actions">
+      <button class="btn-secondary" id="um-cancel">Cancel</button>
+      <button class="btn-primary"   id="um-save">Create</button>
+    </div>`);
+  $('um-cancel').addEventListener('click', closeModal);
+  $('um-save').addEventListener('click', async () => {
+    $('um-error').textContent = '';
+    try {
+      await apiCall('POST', '/api/v1/system/users', {
+        email: $('um-email').value.trim(),
+        password: $('um-password').value,
+        is_admin: $('um-admin').checked,
+      });
+      toast('User created', 'ok');
+      closeModal();
+      refreshAdmin();
+    } catch (e) {
+      $('um-error').textContent = e.message;
+    }
+  });
+}
+
+function openEditUserModal(user) {
+  openModal(`
+    <h3>Edit User</h3>
+    <div class="modal-error" id="um-error"></div>
+    <label>Email</label>
+    <input id="um-email" type="email" value="${esc(user.email || '')}">
+    <label>New password (leave blank to keep)</label>
+    <input id="um-password" type="password" autocomplete="new-password">
+    <label><input type="checkbox" id="um-admin" ${user.is_admin ? 'checked' : ''}> Admin</label>
+    <div class="modal-actions">
+      <button class="btn-secondary" id="um-cancel">Cancel</button>
+      <button class="btn-primary"   id="um-save">Save</button>
+    </div>`);
+  $('um-cancel').addEventListener('click', closeModal);
+  $('um-save').addEventListener('click', async () => {
+    $('um-error').textContent = '';
+    const body = { email: $('um-email').value.trim(), is_admin: $('um-admin').checked };
+    const pw = $('um-password').value;
+    if (pw) body.password = pw;
+    try {
+      await apiCall('PATCH', `/api/v1/system/users/${user.id}`, body);
+      toast('User updated', 'ok');
+      closeModal();
+      refreshAdmin();
+    } catch (e) {
+      $('um-error').textContent = e.message;
+    }
+  });
+}
+
+async function deleteUser(id, email) {
+  confirmAction(`Delete user "${email}"? This cannot be undone.`, async () => {
+    try {
+      await apiCall('DELETE', `/api/v1/system/users/${id}`);
+      toast('User deleted', 'ok');
+      refreshAdmin();
+    } catch (e) { toast(e.message, 'error'); }
+  });
+}
+
+// ============================================================
+// Device actions
+// ============================================================
+async function disconnectDevice(id) {
+  try {
+    await apiCall('POST', `/api/v1/system/devices/${id}/disconnect`);
+    toast('Device disconnected', 'ok');
+    refreshAdmin();
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+async function deleteDevice(id, name) {
+  confirmAction(`Delete device "${name}"?`, async () => {
+    try {
+      await apiCall('DELETE', `/api/v1/system/devices/${id}`);
+      toast('Device deleted', 'ok');
+      refreshAdmin();
+    } catch (e) { toast(e.message, 'error'); }
+  });
+}
+
+// ============================================================
+// Plugin actions
+// ============================================================
+async function toggleUserPlugin(userId, pluginId, currentlyEnabled) {
+  try {
+    await apiCall(
+      'POST',
+      `/api/v1/system/users/${userId}/plugins/${pluginId}/toggle`,
+      { enabled: !currentlyEnabled },
+    );
+    toast(`Plugin ${!currentlyEnabled ? 'enabled' : 'disabled'}`, 'ok');
+    refreshAdmin();
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+// ============================================================
+// Override renderers to add action columns
+// ============================================================
+
+// ── Devices: add Actions column ──
+const _origRenderDevices = renderDevices;
+renderDevices = function(devices) {
+  const el = $('devices-content');
+  if (!devices.length) { el.innerHTML = '<div class="empty">No devices registered yet.</div>'; return; }
+  el.innerHTML = `
+    <table>
+      <thead><tr>
+        <th>Name</th><th>ID</th><th>Platform</th><th>Status</th>
+        <th>Connected</th><th>Last seen</th><th>Actions</th>
+      </tr></thead>
+      <tbody>
+        ${devices.map(d => `
+          <tr>
+            <td><strong>${esc(d.name)}</strong>
+              ${d.hostname ? `<br><small style="color:var(--muted)">${esc(d.hostname)}</small>` : ''}</td>
+            <td><code>${esc(d.id)}</code></td>
+            <td>${esc(d.platform || '')}/${esc(d.architecture || '')}</td>
+            <td>${badge(d.status || 'unknown', d.status === 'online' ? 'online' : 'offline')}</td>
+            <td>${d.connected ? badge('live', 'online') : badge('—', 'offline')}</td>
+            <td>${esc(d.last_seen || '—')}</td>
+            <td>
+              <div class="row-actions">
+                ${d.connected ? `<button class="btn-sm warn" data-disconnect="${esc(d.id)}">Disconnect</button>` : ''}
+                <button class="btn-sm danger" data-delete="${esc(d.id)}" data-name="${esc(d.name)}">Delete</button>
+              </div>
+            </td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>`;
+  el.querySelectorAll('[data-disconnect]').forEach(b =>
+    b.addEventListener('click', () => disconnectDevice(b.dataset.disconnect)));
+  el.querySelectorAll('[data-delete]').forEach(b =>
+    b.addEventListener('click', () => deleteDevice(b.dataset.delete, b.dataset.name)));
+};
+
+// ── Users: add Actions column + toolbar ──
+const _origRenderUsers = renderUsers;
+renderUsers = function(users) {
+  const el = $('users-content');
+  if (!users.length) {
+    el.innerHTML = `
+      <div class="view-toolbar">
+        <h2>Users</h2>
+        <button class="btn-primary" id="btn-create-user">+ Create User</button>
+      </div>
+      <div class="empty">No users yet.</div>`;
+    $('btn-create-user').addEventListener('click', openCreateUserModal);
+    return;
+  }
+  el.innerHTML = `
+    <div class="view-toolbar">
+      <h2>Users</h2>
+      <button class="btn-primary" id="btn-create-user">+ Create User</button>
+    </div>
+    <table>
+      <thead><tr>
+        <th>User</th><th>Created</th>
+        <th>Enabled</th><th>Total plugins</th><th>Details</th><th>Actions</th>
+      </tr></thead>
+      <tbody>
+        ${users.map(u => `
+          <tr>
+            <td><strong>${esc(u.email || u.id)}</strong>
+              ${u.is_admin ? badge('admin', 'admin') : ''}
+              <br><code>${esc(u.id)}</code></td>
+            <td>${esc(u.created_at || '—')}</td>
+            <td>${u.plugins_enabled}</td>
+            <td>${u.plugins_total}</td>
+            <td>
+              <details>
+                <summary>view</summary>
+                <ul>${(u.plugins || []).map(p => `
+                  <li>
+                    <code>${esc(p.plugin_id)}</code>
+                    ${p.is_enabled ? badge('enabled', 'enabled') : badge('disabled', 'disabled')}
+                    <button class="btn-sm" data-toggle-plugin="${esc(p.plugin_id)}" data-user="${esc(u.id)}" data-enabled="${p.is_enabled}">
+                      ${p.is_enabled ? 'Disable' : 'Enable'}
+                    </button>
+                  </li>`).join('')}</ul>
+              </details>
+            </td>
+            <td>
+              <div class="row-actions">
+                <button class="btn-sm" data-edit="${esc(u.id)}">Edit</button>
+                <button class="btn-sm danger" data-delete="${esc(u.id)}" data-email="${esc(u.email || u.id)}">Delete</button>
+              </div>
+            </td>
+          </tr>`).join('')}
+      </tbody>
+    </table>`;
+  $('btn-create-user').addEventListener('click', openCreateUserModal);
+  el.querySelectorAll('[data-edit]').forEach(b => {
+    const u = users.find(x => x.id === b.dataset.edit);
+    b.addEventListener('click', () => u && openEditUserModal(u));
+  });
+  el.querySelectorAll('[data-delete]').forEach(b =>
+    b.addEventListener('click', () => deleteUser(b.dataset.delete, b.dataset.email)));
+  el.querySelectorAll('[data-toggle-plugin]').forEach(b =>
+    b.addEventListener('click', () =>
+      toggleUserPlugin(b.dataset.user, b.dataset.togglePlugin, b.dataset.enabled === 'true')));
+};
+
+// ── Plugins: add enable/disable per device ──
+const _origRenderPlugins = renderPlugins;
+renderPlugins = function(plugins) {
+  const el = $('plugins-content');
+  if (!plugins.length) { el.innerHTML = '<div class="empty">No plugins in catalog.</div>'; return; }
+  // Delegate to original layout with an extra Details toggle per device
+  el.innerHTML = `
+    <table>
+      <thead><tr>
+        <th>Plugin</th><th>Version</th><th>Platforms</th>
+        <th>Installs</th><th>Enabled</th><th>Details</th>
+      </tr></thead>
+      <tbody>
+        ${plugins.map(p => `
+          <tr>
+            <td><strong>${esc(p.name)}</strong><br><code>${esc(p.id)}</code></td>
+            <td>${esc(p.version || '')}</td>
+            <td>${esc((p.platforms || []).join(', '))}</td>
+            <td>${p.installations}</td>
+            <td>${p.enabled_on_devices}</td>
+            <td>
+              <details>
+                <summary>${(p.devices || []).length} device(s)</summary>
+                <ul>${(p.devices || []).map(d => `
+                  <li><code>${esc(d.device_id)}</code> @ ${esc(d.version)}
+                    ${d.is_installed ? badge('installed', 'online') : badge('not installed', 'offline')}
+                    ${d.enabled_on_device ? badge('enabled', 'enabled') : ''}
+                    ${d.last_error ? badge(d.last_error, 'error') : ''}
+                  </li>`).join('')}</ul>
+              </details>
+            </td>
+          </tr>`).join('')}
+      </tbody>
+    </table>`;
+};
+
+// ============================================================
+// Extend switchView to handle 'tasks'
+// ============================================================
+const _origSwitchView = switchView;
+switchView = function(name) {
+  _origSwitchView(name);
+  if (name === 'tasks') refreshTasks();
+};
+
+
+  // ============================================================
   // Auth
   // ============================================================
   const overlay = $('login-overlay');
@@ -741,7 +1375,7 @@
       localStorage.setItem(EMAIL_KEY, adminEmail);
       loginPass.value = '';
       showApp();
-      startAdminPoll();
+      startPolling();
       if (currentView === 'traces') ensureTraceStream();
     } catch (e) {
       loginErr.textContent = e.message || String(e);
@@ -755,7 +1389,7 @@
     token = ''; adminEmail = '';
     localStorage.removeItem(TOKEN_KEY);
     localStorage.removeItem(EMAIL_KEY);
-    stopAdminPoll();
+    stopPolling();
     stopTraceStream();
     selectedTraceId = null; selectedNodeId = null;
     expandedNodes.clear();
@@ -784,7 +1418,7 @@
       adminEmail = me.email || adminEmail;
       $('admin-email').textContent = adminEmail;
       showApp();
-      startAdminPoll();
+      startPolling();
     } catch { doLogout(); }
   }
 
@@ -826,21 +1460,28 @@
       if (!r.ok) throw new Error('HTTP ' + r.status);
       const data = await r.json();
       renderAdmin(data);
-      setLiveStatus(true, 'live · ' + new Date().toLocaleTimeString());
+      setLiveStatus(true, `live · ${fmtInterval(refreshMs)} · ${new Date().toLocaleTimeString()}`);
     } catch (e) {
       setLiveStatus(false, 'offline · ' + e.message);
     }
   }
 
-  function startAdminPoll() {
-    stopAdminPoll();
-    refreshAdmin();
-    adminTimer = setInterval(refreshAdmin, REFRESH_MS);
+function startPolling() {
+  stopPolling();
+  pollTick();                            // always load once
+  if (refreshMs > 0) {
+    pollTimer = setInterval(pollTick, refreshMs);
   }
-  function stopAdminPoll() {
-    if (adminTimer) { clearInterval(adminTimer); adminTimer = null; }
-  }
+}
 
+function stopPolling() {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+}
+
+function pollTick() {
+  refreshAdmin();
+  if (currentView === 'tasks') refreshTasks();
+}
   function renderAdmin(data) {
     const s = data.summary || {};
     renderCards(s);
@@ -1711,6 +2352,31 @@
       } catch {}
     }, 300);
   }
+
+  // ============================================================
+// Polling interval UI
+// ============================================================
+$('refresh-interval').value = String(refreshMs);
+
+$('refresh-interval').addEventListener('change', (e) => {
+  const ms = parseInt(e.target.value, 10) || 0;
+  refreshMs = ms;
+  localStorage.setItem(INTERVAL_KEY, String(ms));
+  if (token) startPolling();
+  toast(
+    ms ? `Polling every ${fmtInterval(ms)}` : 'Polling disabled — use ⟳ to refresh',
+    'ok',
+  );
+});
+
+$('btn-refresh-now').addEventListener('click', () => {
+  const btn = $('btn-refresh-now');
+  btn.classList.remove('spinning');
+  void btn.offsetWidth;   // reflow so the animation restarts
+  btn.classList.add('spinning');
+  refreshAdmin();
+  if (currentView === 'tasks') refreshTasks();
+});
 
   // ============================================================
   // Boot

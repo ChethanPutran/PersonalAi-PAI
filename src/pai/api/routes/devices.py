@@ -10,6 +10,7 @@ from fastapi import (
     Depends,
     HTTPException,
     Request,
+    Response,
     WebSocket,
     WebSocketDisconnect,
 )
@@ -20,7 +21,8 @@ from pai.api.dependencies import get_current_user, get_db
 from pai.app_context import get_app_context, PAIAppContext
 from pai.devices.models import DeviceInfo, DevicePlatform, DeviceRegistration, DeviceStatus, DeviceType
 from pai.devices.websocket import WebSocketDeviceConnection
-
+from pydantic import BaseModel
+from fastapi import Body
 
 router = APIRouter(prefix="/devices", tags=["devices"])
 logger = logging.getLogger(__name__)
@@ -187,11 +189,48 @@ async def register_device(
 async def list_devices(
     user_id: str,
     context: PAIAppContext = Depends(get_app_context),
+    current_user: str = Depends(get_current_user),
 ):
+    if user_id != current_user:
+        raise HTTPException(403, "You can only list your own devices")
     devices = await context.orchestrator.device_manager.list_devices(user_id)
-    logger.info("Devices returned for user %s: %d", user_id, len(devices))
     return {"devices": devices}
 
+
+# devices.py — additions
+
+@router.post("/{device_id}/disconnect")
+async def disconnect_my_device(
+    device_id: str,
+    context: PAIAppContext = Depends(get_app_context),
+    user_id: str = Depends(get_current_user),
+):
+    dm = context.orchestrator.device_manager
+    device = await dm.get(device_id)
+    if device is None:
+        raise HTTPException(404, "Device not found")
+    if getattr(device, "user_id", None) != user_id:
+        raise HTTPException(403, "Not your device")
+    await dm.disconnect(device_id)
+    return {"device_id": device_id, "disconnected": True}
+
+
+@router.delete("/{device_id}", status_code=204)
+async def remove_my_device(
+    device_id: str,
+    context: PAIAppContext = Depends(get_app_context),
+    user_id: str = Depends(get_current_user),
+):
+    dm = context.orchestrator.device_manager
+    device = await dm.get(device_id)
+    if device is None:
+        raise HTTPException(404, "Device not found")
+    if getattr(device, "user_id", None) != user_id:
+        raise HTTPException(403, "Not your device")
+    removed = await dm.unregister(device_id)
+    if not removed:
+        raise HTTPException(404, "Device not found")
+    return Response(status_code=204)
 
 # ============================================================
 # Heartbeat (HTTP)
@@ -212,8 +251,7 @@ async def device_heartbeat(
 
 
 
-from pydantic import BaseModel
-from fastapi import Body
+
 
 class InvokeRequest(BaseModel):
     capability: str
@@ -237,6 +275,7 @@ async def invoke_on_device(
     device = await dm.get(device_id)
     if device is None:
         raise HTTPException(404, f"Device '{device_id}' not found")
+    
     if getattr(device, "user_id", None) and device.user_id != user_id:
         raise HTTPException(403, "Device belongs to a different user")
 
@@ -257,6 +296,10 @@ async def invoke_on_device(
             capability=payload.capability,
             parameters=payload.parameters,
             timeout=payload.timeout_seconds,
+        )
+        logger.info(
+            "Invoke result from %s: capability=%s result=%s",
+            device_id, payload.capability, result,
         )
     except asyncio.TimeoutError:
         raise HTTPException(
@@ -360,6 +403,7 @@ async def device_websocket(websocket: WebSocket, device_id: str):
             await websocket.close(code=4500)
             return
 
+    print(device,user_id)
     # ---------- 4. Ownership check ----------
     if getattr(device, "user_id", None) and device.user_id != user_id:
         logger.warning(
@@ -413,18 +457,13 @@ async def device_websocket(websocket: WebSocket, device_id: str):
                 })
 
             elif message_type == "result":
-                logger.info("Result from %s: %s", device_id, message)
-                
                 request_id = message.get("request_id")
-                logger.info(
-                    "Result from {}: request_id={}", device_id, request_id,
-                )
+                logger.info("Result from %s: request_id=%s", device_id, request_id)
 
                 executor_manager = context.orchestrator.executor_manager
                 device_executor = executor_manager.get("device_executor")
                 if device_executor is not None and hasattr(device_executor, "deliver_result"):
                     device_executor.deliver_result(request_id, message.get("result") or message)
-                    
             elif message_type == "event":
                 logger.info("Event from %s: %s", device_id, message)
 

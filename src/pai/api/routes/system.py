@@ -1,25 +1,31 @@
-"""
-System status, health, and admin endpoints.
-"""
+"""System status, health, and admin endpoints."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.responses import HTMLResponse
+from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pai.api.dependencies import get_current_admin, get_db
 from pai.app_context import PAIAppContext, get_app_context
+from pai.security.auth import ahash_password
 from pai.storage.models import (
     DevicePluginModel,
-    UserModel,
     UserPluginModel,
 )
+from pai.storage.repositories import (
+    DeviceRepository,
+    UserPluginRepository,
+    UserRepository,
+)
+from pai.tasks.models import TaskStatus
 
 logger = logging.getLogger(__name__)
 
@@ -45,12 +51,8 @@ async def get_system_info():
         "version": "1.0.0",
         "description": "Context-Aware Autonomous Personal Agent System",
         "components": [
-            "AI Kernel",
-            "Event Bus",
-            "Plugin Manager",
-            "Agent Manager",
-            "Executor Manager",
-            "Memory Service",
+            "AI Kernel", "Event Bus", "Plugin Manager",
+            "Agent Manager", "Executor Manager", "Memory Service",
             "Device Manager",
         ],
         "documentation": "/docs",
@@ -67,38 +69,380 @@ async def get_system_status(
         "status": "operational",
         "uptime_seconds": int(time.time() - _STARTED_AT),
         "components": {
-            "device_manager": _device_manager_summary(kernel),
-            "plugin_manager": _plugin_manager_summary(kernel),
-            "agent_manager": _agent_manager_summary(kernel),
+            "device_manager":   _device_manager_summary(kernel),
+            "plugin_manager":   await _plugin_manager_summary(kernel),   # ← await
+            "agent_manager":    _agent_manager_summary(kernel),
             "executor_manager": _executor_manager_summary(kernel),
-            "memory_service": _memory_service_summary(kernel),
+            "memory_service":   _memory_service_summary(kernel),
         },
         "message": "Personal AI System is operational",
     }
 
 
 # ============================================================
-# Admin — HTML panel (public shell, protected data)
+# Request models
+# ============================================================
+
+class UserCreateRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=72)
+    is_admin: bool = False
+
+
+class UserUpdateRequest(BaseModel):
+    email: Optional[EmailStr] = None
+    password: Optional[str] = Field(default=None, min_length=8, max_length=72)
+    is_admin: Optional[bool] = None
+
+
+class PluginToggleRequest(BaseModel):
+    enabled: bool
+
+
+class ActionExecuteRequest(BaseModel):
+    user_id: str
+    capability: str
+    parameters: Dict[str, Any] = Field(default_factory=dict)
+    device_id: Optional[str] = None
+
+
+# ============================================================
+# Task management (admin) — unchanged
+# ============================================================
+
+def _serialize_task(task: Any) -> Dict[str, Any]:
+    if hasattr(task, "to_dict"):
+        d = task.to_dict()
+    elif isinstance(task, dict):
+        d = task
+    else:
+        d = {k: v for k, v in getattr(task, "__dict__", {}).items()
+             if not k.startswith("_")}
+
+    status = d.get("status")
+    if hasattr(status, "value"):
+        status = status.value
+    elif status is not None:
+        status = str(status)
+
+    def _ts(k):
+        v = d.get(k)
+        return _iso(v) if v is not None else None
+
+    return {
+        "id": d.get("id") or d.get("task_id") or "",
+        "status": status,
+        "user_id": d.get("user_id"),
+        "session_id": d.get("session_id"),
+        "capability": d.get("capability") or d.get("task_type") or d.get("type"),
+        "device_id": d.get("device_id"),
+        "executor_id": d.get("executor_id"),
+        "created_at": _ts("created_at"),
+        "started_at": _ts("started_at"),
+        "completed_at": _ts("completed_at"),
+        "error": d.get("error") or d.get("last_error"),
+        "progress": d.get("progress"),
+        "input": d.get("input"),
+        "parameters": d.get("parameters"),
+        "metadata": d.get("metadata"),
+        "result": d.get("result"),
+        "retry_count": d.get("retry_count"),
+    }
+
+
+@router.get("/tasks", dependencies=[Depends(get_current_admin)])
+async def admin_list_tasks(
+    status: Optional[str] = None,
+    user_id: Optional[str] = None,
+    limit: int = 200,
+    context: PAIAppContext = Depends(get_app_context),
+) -> Dict[str, Any]:
+    tm = context.orchestrator.task_manager
+    try:
+        raw = await tm.list_tasks(
+            status=TaskStatus(status) if status else None,
+        )
+    except Exception as exc:
+        logger.warning("list_tasks failed: %s", exc)
+        raise HTTPException(500, f"Failed to list tasks: {exc}")
+
+    items = [_serialize_task(t) for t in (raw or [])]
+    if user_id:
+        items = [t for t in items if t.get("user_id") == user_id]
+
+    items.sort(key=lambda t: t.get("created_at") or "", reverse=True)
+    items = items[:limit]
+    return {"tasks": items, "total": len(items)}
+
+
+@router.get("/tasks/{task_id}", dependencies=[Depends(get_current_admin)])
+async def admin_get_task(
+    task_id: str,
+    context: PAIAppContext = Depends(get_app_context),
+) -> Dict[str, Any]:
+    task = await context.orchestrator.task_manager.get(task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+    return _serialize_task(task)
+
+
+async def _task_action(
+    task_id: str,
+    method: str,
+    context: PAIAppContext,
+) -> Dict[str, Any]:
+    tm = context.orchestrator.task_manager
+    fn = getattr(tm, method, None)
+    if fn is None:
+        raise HTTPException(500, f"Task manager has no `{method}` method")
+    try:
+        result = fn(task_id)
+        if asyncio.iscoroutine(result):
+            result = await result
+    except Exception as exc:
+        raise HTTPException(400, f"{method} failed: {exc}")
+    if not result:
+        raise HTTPException(404, "Task not found")
+    return _serialize_task(result)
+
+
+@router.post("/tasks/{task_id}/pause", dependencies=[Depends(get_current_admin)])
+async def admin_pause_task(task_id: str, context: PAIAppContext = Depends(get_app_context)):
+    return await _task_action(task_id, "pause", context)
+
+
+@router.post("/tasks/{task_id}/resume", dependencies=[Depends(get_current_admin)])
+async def admin_resume_task(task_id: str, context: PAIAppContext = Depends(get_app_context)):
+    return await _task_action(task_id, "resume", context)
+
+
+@router.post("/tasks/{task_id}/cancel", dependencies=[Depends(get_current_admin)])
+async def admin_cancel_task(task_id: str, context: PAIAppContext = Depends(get_app_context)):
+    return await _task_action(task_id, "cancel", context)
+
+
+# ============================================================
+# User CRUD (admin) — via UserRepository
+# ============================================================
+
+@router.post("/users", status_code=201, dependencies=[Depends(get_current_admin)])
+async def admin_create_user(
+    payload: UserCreateRequest,
+    session: AsyncSession = Depends(get_db),
+) -> Dict[str, Any]:
+    repo = UserRepository(session)
+
+    if await repo.get_by_email(payload.email) is not None:
+        raise HTTPException(409, "Email already registered")
+
+    hashed = await ahash_password(payload.password)
+    user = await repo.create_with_credentials(
+        email=payload.email,
+        hashed_password=hashed,
+        is_admin=payload.is_admin,
+    )
+    await session.commit()
+
+    return {"id": user.id, "email": user.email, "is_admin": user.is_admin}
+
+
+@router.patch("/users/{user_id}", dependencies=[Depends(get_current_admin)])
+async def admin_update_user(
+    user_id: str,
+    payload: UserUpdateRequest,
+    session: AsyncSession = Depends(get_db),
+    context: PAIAppContext = Depends(get_app_context),
+) -> Dict[str, Any]:
+    repo = UserRepository(session)
+
+    user = await repo.get(user_id)
+    if user is None:
+        raise HTTPException(404, "User not found")
+
+    if payload.email is not None and payload.email != user.email:
+        other = await repo.get_by_email(payload.email)
+        if other is not None and other.id != user_id:
+            raise HTTPException(409, "Email already in use")
+        user.email = payload.email
+
+    if payload.password is not None:
+        user.hashed_password = await ahash_password(payload.password)
+
+    if payload.is_admin is not None:
+        user.is_admin = payload.is_admin
+
+    await session.commit()
+
+    # Invalidate per-user caches (capability map may include admin gates,
+    # plugin enables, etc. — safest to always drop after any user write)
+    if context.orchestrator.capability_router is not None:
+        context.orchestrator.capability_router.invalidate(user_id)
+
+    return {"id": user.id, "email": user.email, "is_admin": user.is_admin}
+
+
+@router.delete("/users/{user_id}", status_code=204)
+async def admin_delete_user(
+    user_id: str,
+    session: AsyncSession = Depends(get_db),
+    context: PAIAppContext = Depends(get_app_context),
+    current_admin_id: str = Depends(get_current_admin),
+) -> Response:
+    if user_id == current_admin_id:
+        raise HTTPException(400, "You cannot delete your own account")
+
+    user_repo = UserRepository(session)
+    user = await user_repo.get(user_id)
+    if user is None:
+        raise HTTPException(404, "User not found")
+
+    # Cascade 1: unregister owned devices through DeviceManager.
+    # unregister() detaches the WebSocket, removes the device from the
+    # registry, deletes the DB row, invalidates the router — all in one
+    # traced call. Uses its own session, so it commits independently;
+    # failure for one device is logged and skips to the next.
+    dm = context.orchestrator.device_manager
+    for device in await DeviceRepository(session).list_for_user(user_id):
+        try:
+            await dm.unregister(device.id)
+        except Exception as exc:
+            logger.warning(
+                "admin_delete_user: unregister %s failed: %s",
+                device.id, exc,
+            )
+
+    # Cascade 2: delete user_plugins rows (FK owner)
+    up_repo = UserPluginRepository(session)
+    for record in await up_repo.list_for_user(user_id):
+        await up_repo.delete(user_id, record.plugin_id)
+
+    # Finally the user
+    await user_repo.delete(user_id)
+    await session.commit()
+
+    if context.orchestrator.capability_router is not None:
+        context.orchestrator.capability_router.invalidate(user_id)
+
+    return Response(status_code=204)
+
+
+# ============================================================
+# Device management (admin) — via DeviceManager
+# ============================================================
+
+@router.post("/devices/{device_id}/disconnect", dependencies=[Depends(get_current_admin)])
+async def admin_disconnect_device(
+    device_id: str,
+    context: PAIAppContext = Depends(get_app_context),
+) -> Dict[str, Any]:
+    dm = context.orchestrator.device_manager
+    try:
+        await dm.disconnect(device_id)
+    except Exception as exc:
+        raise HTTPException(400, f"Disconnect failed: {exc}")
+    return {"device_id": device_id, "disconnected": True}
+
+
+@router.delete("/devices/{device_id}", status_code=204,
+               dependencies=[Depends(get_current_admin)])
+async def admin_delete_device(
+    device_id: str,
+    context: PAIAppContext = Depends(get_app_context),
+) -> Response:
+    dm = context.orchestrator.device_manager
+    removed = await dm.unregister(device_id)
+    if not removed:
+        raise HTTPException(404, "Device not found")
+    return Response(status_code=204)
+
+
+# ============================================================
+# Plugin management (admin) — via PluginManager
+# ============================================================
+
+@router.post("/users/{user_id}/plugins/{plugin_id}/toggle",
+             dependencies=[Depends(get_current_admin)])
+async def admin_toggle_user_plugin(
+    user_id: str,
+    plugin_id: str,
+    payload: PluginToggleRequest,
+    context: PAIAppContext = Depends(get_app_context),
+) -> Dict[str, Any]:
+    pm = context.orchestrator.plugin_manager
+    try:
+        if payload.enabled:
+            await pm.enable(user_id=user_id, plugin_id=plugin_id)
+        else:
+            await pm.disable(user_id=user_id, plugin_id=plugin_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(500, str(exc))
+
+    return {
+        "user_id": user_id,
+        "plugin_id": plugin_id,
+        "is_enabled": payload.enabled,
+    }
+
+
+@router.delete("/users/{user_id}/plugins/{plugin_id}", status_code=204,
+               dependencies=[Depends(get_current_admin)])
+async def admin_delete_user_plugin(
+    user_id: str,
+    plugin_id: str,
+    session: AsyncSession = Depends(get_db),
+    context: PAIAppContext = Depends(get_app_context),
+) -> Response:
+    repo = UserPluginRepository(session)
+    deleted = await repo.delete(user_id, plugin_id)
+    if not deleted:
+        raise HTTPException(404, "Plugin record not found")
+    await session.commit()
+
+    if context.orchestrator.capability_router is not None:
+        context.orchestrator.capability_router.invalidate(user_id)
+
+    return Response(status_code=204)
+
+
+# ============================================================
+# Direct action execution (admin)
+# ============================================================
+
+@router.post("/actions/execute", dependencies=[Depends(get_current_admin)])
+async def admin_execute_action(
+    payload: ActionExecuteRequest,
+    context: PAIAppContext = Depends(get_app_context),
+) -> Dict[str, Any]:
+    try:
+        return await context.orchestrator.execute_action(
+            user_id=payload.user_id,
+            capability=payload.capability,
+            params=payload.parameters,
+            device_id=payload.device_id,
+        )
+    except Exception as exc:
+        raise HTTPException(400, f"Action failed: {exc}")
+
+
+# ============================================================
+# Admin panel HTML (public shell — data is behind /admin/data)
 # ============================================================
 
 @router.get("/admin", response_class=HTMLResponse)
 async def admin_panel() -> HTMLResponse:
-    """
-    Serve the HTML shell.
-
-    Public — contains no data. The shell itself asks the user to log
-    in and attaches the resulting JWT to every /admin/data call.
-    """
     if not _ADMIN_HTML.exists():
         return HTMLResponse(
-            f"<h1>Admin panel not installed</h1><p>Expected file: {_ADMIN_HTML}</p>",
+            f"<h1>Admin panel not installed</h1>"
+            f"<p>Expected file: {_ADMIN_HTML}</p>",
             status_code=500,
         )
     return HTMLResponse(_ADMIN_HTML.read_text(encoding="utf-8"))
 
 
 # ============================================================
-# Admin — aggregate (requires admin)
+# Admin — aggregate
 # ============================================================
 
 @router.get("/admin/data", dependencies=[Depends(get_current_admin)])
@@ -113,14 +457,12 @@ async def admin_data(
     install_rows = await session.execute(select(DevicePluginModel))
     installs = list(install_rows.scalars().all())
 
-    user_rows = await session.execute(select(UserModel))
-    users = list(user_rows.scalars().all())
+    users = await UserRepository(session).list_all()
 
     user_plugin_rows = await session.execute(select(UserPluginModel))
     user_plugins = list(user_plugin_rows.scalars().all())
 
     plugins = _collect_plugins(kernel, installs)
-
     online = sum(1 for d in devices if d["connected"])
 
     return {
@@ -139,7 +481,7 @@ async def admin_data(
 
 
 # ============================================================
-# Admin — granular (all require admin)
+# Admin — granular reads (direct SQL is fine; read-only)
 # ============================================================
 
 @router.get("/devices", dependencies=[Depends(get_current_admin)])
@@ -165,12 +507,9 @@ async def get_device(
 async def list_users(
     session: AsyncSession = Depends(get_db),
 ) -> List[Dict[str, Any]]:
-    user_rows = await session.execute(select(UserModel))
-    users = list(user_rows.scalars().all())
-
+    users = await UserRepository(session).list_all()
     plugin_rows = await session.execute(select(UserPluginModel))
     user_plugins = list(plugin_rows.scalars().all())
-
     return _collect_users(users, user_plugins)
 
 
@@ -179,10 +518,7 @@ async def user_plugins(
     user_id: str,
     session: AsyncSession = Depends(get_db),
 ) -> Dict[str, Any]:
-    result = await session.execute(
-        select(UserPluginModel).where(UserPluginModel.user_id == user_id)
-    )
-    records = list(result.scalars().all())
+    records = await UserPluginRepository(session).list_for_user(user_id)
     return {
         "user_id": user_id,
         "plugins": [
@@ -289,7 +625,6 @@ async def _collect_devices(kernel: Any) -> List[Dict[str, Any]]:
     if dm is None:
         return []
 
-    devices: List[Dict[str, Any]] = []
     try:
         all_devices = await dm.registry.all()
     except TypeError:
@@ -300,35 +635,24 @@ async def _collect_devices(kernel: Any) -> List[Dict[str, Any]]:
 
     connections = getattr(dm, "_connections", {})
 
-    for d in all_devices:
-        device_id = getattr(d, "id", None) or getattr(d, "device_id", None) or str(d)
-        connected = device_id in connections
-        devices.append({
-            "id": device_id,
-            "name": getattr(d, "name", None) or device_id,
+    return [
+        {
+            "id": getattr(d, "id", None) or getattr(d, "device_id", None) or str(d),
+            "name": getattr(d, "name", None) or getattr(d, "id", ""),
             "platform": getattr(d, "platform", None),
             "architecture": getattr(d, "architecture", None),
             "device_type": getattr(d, "device_type", None),
             "status": getattr(d, "status", "unknown"),
-            "connected": connected,
+            "connected": (getattr(d, "id", None) in connections),
             "last_seen": _iso(getattr(d, "last_seen", None)),
             "hostname": getattr(d, "hostname", None),
             "app_version": getattr(d, "app_version", None),
-        })
-    return devices
+        }
+        for d in all_devices
+    ]
 
 
 def _collect_plugins(kernel: Any, installs: list) -> List[Dict[str, Any]]:
-    """
-    Build the admin plugin view from the plugin manager's in-memory
-    catalog, joined with the device_plugins table.
-
-    `get_catalog()` is populated at startup from every discovered
-    manifest — server plugins (`pai/plugins/*/manifest.json`) and
-    device plugins (`plugin_registry/<id>/<version>/manifest.json`).
-    No filesystem access here; the manager is the single source of
-    truth for what the catalog contains.
-    """
     pm = getattr(kernel, "plugin_manager", None)
     catalog_info: List[Any] = []
     if pm is not None:
@@ -337,14 +661,10 @@ def _collect_plugins(kernel: Any, installs: list) -> List[Dict[str, Any]]:
         except Exception as exc:
             logger.warning("plugin catalog access failed: %s", exc)
 
-    # Group device_plugins rows by plugin_id (install state lives in the
-    # DB, not the manager — the manager is the catalog, the DB is truth
-    # for what's deployed where).
     per_plugin: Dict[str, list] = {}
     for row in installs:
         per_plugin.setdefault(row.plugin_id, []).append(row)
 
-    # Build the catalog map from PluginInfo entries.
     catalog: Dict[str, Dict[str, Any]] = {}
     for info in catalog_info:
         pid = info.id
@@ -364,8 +684,6 @@ def _collect_plugins(kernel: Any, installs: list) -> List[Dict[str, Any]]:
             "size": info.size or 0,
         }
 
-    # Include DB-only plugins (a manifest was removed while devices
-    # still have the row) so the admin view doesn't silently drop them.
     for plugin_id in per_plugin:
         if plugin_id not in catalog:
             catalog[plugin_id] = {
@@ -401,6 +719,7 @@ def _collect_plugins(kernel: Any, installs: list) -> List[Dict[str, Any]]:
             ],
         })
     return out
+
 
 def _collect_users(users: list, plugin_records: list) -> List[Dict[str, Any]]:
     per_user: Dict[str, list] = {}
