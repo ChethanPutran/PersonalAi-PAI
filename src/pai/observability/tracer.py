@@ -21,12 +21,37 @@ class _Ctx:
 
 
 class NoOpSpan:
-    def set_attribute(self, _k, _v): pass
-    def set_error(self, _e): pass
-    def __enter__(self): return self
-    def __exit__(self, *_): pass
-    async def __aenter__(self): return self
-    async def __aexit__(self, *_): pass
+    """Silently discards all calls. Returned when tracing is disabled.
+
+    Implements the union of `TraceSession`'s and `Span`'s public
+    methods so that `start_trace()` and `span()` can both return
+    `NoOpSpan` in the disabled path without breaking the type contract
+    at any call site.
+    """
+
+    # Span-level operations
+    def set_attribute(self, _key: str, _value: Any) -> None:
+        pass
+
+    def set_error(self, _error: str) -> None:
+        pass
+
+    # TraceSession-level operation
+    def set_status(self, _status: str) -> None:
+        pass
+
+    # Context-manager protocol
+    def __enter__(self) -> "NoOpSpan":
+        return self
+
+    def __exit__(self, *_args: Any) -> None:
+        pass
+
+    async def __aenter__(self) -> "NoOpSpan":
+        return self
+
+    async def __aexit__(self, *_args: Any) -> None:
+        pass
 
 
 class Span:

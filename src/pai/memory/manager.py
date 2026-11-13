@@ -6,6 +6,7 @@ from loguru import logger
 import re
 from typing import Iterable
 from datetime import datetime, timezone
+from pai.event_bus.bus import EventBus
 from pai.memory.episodic import EpisodicMemory
 from pai.memory.knowledge_graph import KnowledgeGraph
 from pai.memory.long_term import LongTermMemory
@@ -202,6 +203,110 @@ def _doc_fields(doc: Any) -> tuple[str, Any, Dict[str, Any]]:
     return _flatten_content(raw), ts, meta
 
 
+# Retry intent — the user is asking to redo / continue / explain the
+# previous attempt.
+_RETRY_PATTERNS = [
+    re.compile(r"\bretry\b", re.I),
+    re.compile(r"\btry\s+again\b", re.I),
+    re.compile(r"\bagain\b", re.I),
+    re.compile(r"\bredo\b", re.I),
+    re.compile(r"\brepeat\b", re.I),
+    re.compile(r"\bdo\s+(?:it|that)\s+again\b", re.I),
+    re.compile(r"\bcontinue\b", re.I),
+    re.compile(r"\bsame\b", re.I),
+    re.compile(r"\bwhy\s+did\s+(?:it|that|the\s+last\s+\w+)\s+fail\b", re.I),
+    re.compile(r"\bwhat\s+happened\b", re.I),
+    re.compile(r"\b(?:didn'?t|did\s+not)\s+work\b", re.I),
+]
+
+def _looks_like_retry(query: str) -> bool:
+    return any(p.search(query) for p in _RETRY_PATTERNS)
+
+
+def _summary_of_failure(raw: Any) -> str:
+    """Pull concrete error lines out of a stored raw_result blob."""
+    if not isinstance(raw, dict):
+        return ""
+    lines: List[str] = []
+    for r in raw.get("results") or []:
+        if not isinstance(r, dict):
+            continue
+        if r.get("status") == "completed":
+            continue
+        cap = r.get("capability") or r.get("type") or "task"
+        err = str(r.get("error") or "").strip()
+        lines.append(f"  • {cap}: {err[:200] or '(no message)'}")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Result summarization (used by store_interaction to shorten task output)
+# ---------------------------------------------------------------------------
+def _summarize_result(result: Any) -> str:
+    if result is None:
+        return "(no result)"
+    if isinstance(result, str):
+        return result[:1000]
+    if not isinstance(result, dict):
+        return str(result)[:1000]
+
+    is_failure = result.get("status") == "failed"
+
+    # For failures: preserve both the chat reply AND the concrete error
+    # lines so a subsequent retry can see *why* the previous attempt
+    # didn't work.
+    if is_failure:
+        err_lines: List[str] = []
+        for r in result.get("results") or []:
+            if not isinstance(r, dict):
+                continue
+            if r.get("status") == "completed":
+                continue
+            cap = r.get("capability") or r.get("type") or "task"
+            err = str(r.get("error") or "").strip()
+            err_lines.append(f"{cap}: {err[:300] or 'failed'}")
+
+        reply_text = ""
+        for r in result.get("results") or []:
+            if isinstance(r, dict) and r.get("reply"):
+                reply_text = str(r["reply"])[:600]
+                break
+
+        parts: List[str] = []
+        if err_lines:
+            parts.append("Errors: " + " | ".join(err_lines))
+        if reply_text:
+            parts.append("Assistant said: " + reply_text)
+        if parts:
+            return "\n".join(parts)[:2000]
+
+    # ---- existing happy-path logic (chat reply first) ----
+    for r in result.get("results", []) or []:
+        reply = r.get("reply") if isinstance(r, dict) else None
+        if reply:
+            return str(reply)[:1000]
+
+    lines: List[str] = []
+    for r in result.get("results", []) or []:
+        if not isinstance(r, dict):
+            continue
+        cap = r.get("capability") or r.get("type") or "task"
+        status = r.get("status", "completed")
+        if status == "completed":
+            res = r.get("result") or {}
+            bits = []
+            if isinstance(res, dict):
+                for k in ("path", "url", "title", "value", "ok"):
+                    if res.get(k):
+                        bits.append(f"{k}={res[k]}")
+            lines.append(f"{cap}: ok" + (f" ({', '.join(bits)})" if bits else ""))
+        else:
+            lines.append(f"{cap}: {status}" + (f" — {r.get('error', '')[:200]}" if r.get("error") else ""))
+
+    if not lines:
+        return "(empty result)"
+    return "; ".join(lines)[:1000]
+
 
 class MemoryManager(Manager):
     """
@@ -220,6 +325,7 @@ class MemoryManager(Manager):
     def __init__(
         self,
         *,
+        event_bus: EventBus,
         user_id:str,
         knowledge_graph_enabled: bool = True,
          knowledge_graph_uri: Optional[str] = None,
@@ -234,7 +340,7 @@ class MemoryManager(Manager):
         procedural_path: str = "./data/procedural.json",
         embedding_model: str = "all-MiniLM-L6-v2",
     ):
-        super().__init__()
+        super().__init__(event_bus=event_bus)
         self.user_id = user_id
 
         self.short_term = ShortTermMemory(
@@ -504,11 +610,18 @@ class MemoryManager(Manager):
                             "capability_snapshot": ",".join(meta.get("capability_snapshot") or []),
                         },
                         document_id=episode_id,
-                    )
+                        )
                     except Exception as exc:
                         logger.warning("vector_store add failed: {}", exc)
                         vec_span.set_error(str(exc))
-
+            self._emit("memory.stored",
+                       {
+                        "user_id":user_id, 
+                        "session_id":session_id, 
+                        "request_id":request_id, 
+                        "episode_id":episode_id, 
+                        "success":success
+            })
             span.set_attribute("episode_id", episode_id)
             span.set_attribute("indexed_for_recall", success)
 
@@ -758,16 +871,25 @@ class MemoryManager(Manager):
                     logger.warning("procedural read failed: {}", exc)
                     proc_span.set_error(str(exc))
 
+            counts = {
+                                k: (
+                                    len(v) if isinstance(v, list)
+                                    else (1 if v else 0)
+                                )
+                                for k, v in result.items()
+                            },
+            
             span.set_attribute(
-                "counts",
-                {
-                    k: (
-                        len(v) if isinstance(v, list)
-                        else (1 if v else 0)
-                    )
-                    for k, v in result.items()
-                },
+                "counts",counts
+                
             )
+            self._emit("memory.recalled",
+                {
+                    "user_id":user_id, 
+                    "session_id":session_id, 
+                    "query_len":len(query), 
+                    "counts":counts
+            })
             return result
 
     # ------------------------------------------------------------------
@@ -783,16 +905,15 @@ class MemoryManager(Manager):
         session_id: Optional[str] = None,
         exclude_session: bool = True,
         current_capabilities: Optional[Iterable[str]] = None,
+        include_failed: Optional[bool] = None,   # ← new
     ) -> str:
         """
         Recall and format memories for prompt injection.
 
-        When `current_capabilities` is provided, entries that make a
-        negative claim about a capability now in that set are dropped —
-        the assistant's own past "I can't take a photo" lines will not
-        re-enter the prompt after the camera plugin was enabled. This is
-        how memory "updates": not by mutating the store, but by filtering
-        at read time against the live capability set.
+        ``include_failed`` — if ``True``, failed attempts *are* surfaced,
+        labelled ``(PREVIOUS ATTEMPT FAILED)`` so the LLM treats them as
+        history, not as its considered answer. If ``None`` (default), the
+        flag is auto-derived from ``query``: retry-shaped queries flip it on.
         """
         memories = await self.recall(
             query,
@@ -802,10 +923,13 @@ class MemoryManager(Manager):
             exclude_session=exclude_session,
         )
 
+        if include_failed is None:
+            include_failed = _looks_like_retry(query)
+
         current_caps: set[str] = set(current_capabilities or ())
         sections: List[str] = []
 
-        # ---- long-term preferences (highest signal) ----
+        # ---- long-term preferences (unchanged) ----
         long_term = memories.get("long_term") or []
         if long_term:
             lines = []
@@ -813,62 +937,108 @@ class MemoryManager(Manager):
                 if isinstance(item, dict):
                     k = item.get("key") or item.get("name") or "?"
                     v = item.get("value")
-                    lines.append(f"- {k}: {v}")
                 else:
-                    key = getattr(item, "key", "?")
-                    val = getattr(item, "value", None)
-                    lines.append(f"- {key}: {val}")
+                    k = getattr(item, "key", "?")
+                    v = getattr(item, "value", None)
+                lines.append(f"- {k}: {v}")
             if lines:
-                sections.append(
-                    "KNOWN USER PREFERENCES:\n" + "\n".join(lines)
-                )
+                sections.append("KNOWN USER PREFERENCES:\n" + "\n".join(lines))
 
-        # ---- semantic / episodic recall (past interactions) ----
+        # ---- past interactions ----
+        #
+        # Merge semantic + episodic + (on retry) short_term. Each list can
+        # contribute different entries — semantic has successful interactions,
+        # episodic has everything that reached storage, short_term has the
+        # current session's turns even when they haven't been indexed yet.
+        #
+        # Dedup on the text body so an interaction stored in both episodic
+        # and short_term shows once.
+        candidate_lists: list[list] = []
+        if memories.get("semantic"):
+            candidate_lists.append(memories["semantic"])
+        if memories.get("episodic"):
+            candidate_lists.append(memories["episodic"])
+        if include_failed and memories.get("short_term"):
+            # short_term is only for same-session context; when this is a
+            # retry, the current session's previous turn is the most
+            # important signal we have.
+            candidate_lists.append(memories["short_term"])
 
-        past_lines = []
+        past_lines: List[str] = []
+        seen_bodies: set[str] = set()
         skipped_failed = 0
         skipped_stale = 0
+        skipped_dup = 0
 
-        candidates = (memories.get("semantic") or memories.get("episodic") or [])
-        for doc in candidates[: limit * 3]:     # oversample, then filter
-            text, ts, meta = _doc_fields(doc)
-            if not text:
-                continue
-            # Failed interactions never make it into vector, but the
-            # episodic path might still surface one if vector is empty.
-            if meta.get("failed") or meta.get("exclude_from_recall"):
-                skipped_failed += 1
-                continue
+        for bucket in candidate_lists:
+            for doc in bucket:
+                text, ts, meta = _doc_fields(doc)
+                if not text:
+                    continue
 
-            # Legacy string markers (pre-`success` flag data)
-            if "status\": \"failed\"" in text or "': failed" in text:
-                skipped_failed += 1
-                continue
+                key = str(text)[:200]
+                if key in seen_bodies:
+                    skipped_dup += 1
+                    continue
+                seen_bodies.add(key)
 
-            # Stale claim filter — the core of the "memory updates" fix.
-            if current_caps and _is_stale_given_capabilities(text, current_caps):
-                skipped_stale += 1
-                continue
+                is_failed = bool(
+                    meta.get("failed") or meta.get("exclude_from_recall")
+                )
 
-            # Coerce once more — cheap insurance against any backend
-            # returning a non-str despite _doc_fields.
-            past_lines.append(f"- {_reltime(ts)}: {str(text)[:240]}")
-            if len(past_lines) >= limit:
+                # Legacy string markers (pre-`success` flag data)
+                if not is_failed:
+                    if 'status": "failed"' in text or "': failed" in text:
+                        is_failed = True
+
+                if is_failed and not include_failed:
+                    skipped_failed += 1
+                    continue
+
+                if current_caps and _is_stale_given_capabilities(text, current_caps):
+                    skipped_stale += 1
+                    continue
+
+                # For failures, append the concrete error blob that
+                # `store_interaction` attached as `raw_result` metadata.
+                err_block = ""
+                if is_failed:
+                    err_block = _summary_of_failure(meta.get("raw_result"))
+                    if err_block:
+                        err_block = "\n" + err_block
+
+                if is_failed:
+                    past_lines.append(
+                        f"- {_reltime(ts)} (PREVIOUS ATTEMPT FAILED): "
+                        f"{str(text)[:240]}{err_block}"
+                    )
+                else:
+                    past_lines.append(f"- {_reltime(ts)}: {str(text)[:240]}")
+
+                if len(past_lines) >= limit * 2 if include_failed else limit:
+                    break
+            if past_lines and len(past_lines) >= (limit * 2 if include_failed else limit):
                 break
-            
+
         if past_lines:
-            sections.append(
-                "RELEVANT PAST INTERACTIONS:\n" + "\n".join(past_lines)
-            )
+            header = "RELEVANT PAST INTERACTIONS:"
+            if include_failed:
+                header += (
+                    " (a PREVIOUS ATTEMPT FAILED line means the last try was "
+                    "made and did not succeed; use it as context for the "
+                    "current request, not as a reason to refuse)"
+                )
+            sections.append(header + "\n" + "\n".join(past_lines))
 
-        if skipped_failed or skipped_stale:
+        if skipped_failed or skipped_stale or skipped_dup:
             logger.debug(
-                "memory.recall_for_prompt: filtered {} failed, {} stale "
-                "entr(ies) (current capabilities={})",
-                skipped_failed, skipped_stale, sorted(current_caps),
+                "memory.recall_for_prompt: filtered {} failed, {} stale, "
+                "{} dup; include_failed={}, capabilities={}",
+                skipped_failed, skipped_stale, skipped_dup,
+                include_failed, sorted(current_caps),
             )
 
-        # ---- procedural (matched workflow) ----
+        # ---- procedural (unchanged) ----
         procedure = memories.get("procedural")
         if procedure:
             goal = (
@@ -877,7 +1047,8 @@ class MemoryManager(Manager):
                 else getattr(procedure, "goal_pattern", None)
             )
             steps = (
-                procedure.get("steps") if isinstance(procedure, dict)
+                procedure.get("steps")
+                if isinstance(procedure, dict)
                 else getattr(procedure, "steps", [])
             )
             if goal:
@@ -941,62 +1112,14 @@ class MemoryManager(Manager):
         tracer = get_tracer()
         async with tracer.span("memory.consolidate"):
             try:
-                await self.long_term.consolidate()
+                removed = await self.long_term.consolidate()
+                self._emit("memory.consolidated",
+                           {
+                               
+                               "removed":removed
+                                
+                           })
                 logger.info("Memory consolidation completed")
+
             except Exception as exc:
                 logger.warning("consolidate failed: {}", exc)
-
-
-# ---------------------------------------------------------------------------
-# Result summarization (used by store_interaction to shorten task output)
-# ---------------------------------------------------------------------------
-
-def _summarize_result(result: Any) -> str:
-    """
-    Convert a raw orchestrator result (or arbitrary response) into a
-    compact string suitable for storage and retrieval.
-
-    Prefers chat.reply text; falls back to a one-line-per-task summary.
-    """
-    if result is None:
-        return "(no result)"
-
-    if isinstance(result, str):
-        return result[:1000]
-
-    if not isinstance(result, dict):
-        return str(result)[:1000]
-
-    # Chat reply takes priority
-    for r in result.get("results", []) or []:
-        reply = r.get("reply") if isinstance(r, dict) else None
-        if reply:
-            return str(reply)[:1000]
-
-    # Tool results: one line per completed/failed task
-    lines: List[str] = []
-    for r in result.get("results", []) or []:
-        if not isinstance(r, dict):
-            continue
-        cap = r.get("capability") or r.get("type") or "task"
-        status = r.get("status", "completed")
-        if status == "completed":
-            res = r.get("result") or {}
-            bits = []
-            if isinstance(res, dict):
-                for k in ("path", "url", "title", "value", "ok"):
-                    if res.get(k):
-                        bits.append(f"{k}={res[k]}")
-            lines.append(
-                f"{cap}: ok"
-                + (f" ({', '.join(bits)})" if bits else "")
-            )
-        else:
-            lines.append(
-                f"{cap}: {status}"
-                + (f" — {r.get('error', '')[:200]}" if r.get("error") else "")
-            )
-
-    if not lines:
-        return "(empty result)"
-    return "; ".join(lines)[:1000]

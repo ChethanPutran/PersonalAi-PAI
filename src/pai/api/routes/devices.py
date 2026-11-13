@@ -403,7 +403,6 @@ async def device_websocket(websocket: WebSocket, device_id: str):
             await websocket.close(code=4500)
             return
 
-    print(device,user_id)
     # ---------- 4. Ownership check ----------
     if getattr(device, "user_id", None) and device.user_id != user_id:
         logger.warning(

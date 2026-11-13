@@ -2,6 +2,7 @@
 
 import '../core/api/api_client.dart';
 import '../models/chat.dart';
+import 'dart:math';
 
 class ChatService {
   final ApiClient api;
@@ -11,21 +12,38 @@ class ChatService {
 
   String? get sessionId => _sessionId;
 
+  /// Per-user key. `auth.userId` is stable across restarts, so a
+  /// returning user gets their previous session back, and switching
+  /// users doesn't hand them someone else's session id.
+  String get _sessionKey =>
+      'chat_session_id_${api.auth?.userId ?? "anon"}';
+
+
+  /// Cryptographically-random 32-char hex id.
+  /// 128 bits of entropy — collision probability is astronomically low
+  /// for any realistic number of sessions.
+  static String _generateSessionId() {
+    final rand = Random.secure();
+    final bytes = List<int>.generate(16, (_) => rand.nextInt(256));
+    return bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+  }
+
+
   Future<void> setSessionId(String? id) async {
     _sessionId = id;
     await _persistSession();
   }
   Future<void> restoreSession() async {
     final prefs = await SharedPreferences.getInstance();
-    _sessionId = prefs.getString('chat_session_id');
+    _sessionId = prefs.getString(_sessionKey);
   }
 
   Future<void> _persistSession() async {
     final prefs = await SharedPreferences.getInstance();
     if (_sessionId != null) {
-      await prefs.setString('chat_session_id', _sessionId!);
+      await prefs.setString(_sessionKey, _sessionId!);
     } else {
-      await prefs.remove('chat_session_id');
+      await prefs.remove(_sessionKey);
     }
   }
 
@@ -71,6 +89,10 @@ class ChatService {
 
 
   Future<void> startNewSession() async {
-    await setSessionId(null);
+    // Was `setSessionId(null)` — that left the client with no id, so
+    // ChatStatusService had nothing to subscribe to. Mint the id here
+    // so the WS can open *before* the first POST.
+    _sessionId = _generateSessionId();
+    await _persistSession();
   }
 }

@@ -8,6 +8,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar
 from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from pai.event_bus.bus import EventBus
 from pai.observability.tracer import get_tracer
 from pai.plugins.models import PluginInfo, PluginManifest
 from pai.plugins.registry import PluginRegistry
@@ -22,11 +23,14 @@ PLUGIN_REGISTRY_DIR = Path(__file__).resolve().parent.parent.parent.parent / "pl
 class PluginManager(Manager):
     def __init__(
         self,
+        event_bus:EventBus,
         registry: Optional[PluginRegistry] = None,
         session_factory: Optional[Callable[[], AsyncSession]] = None,
         plugin_registry_dir: Optional[str | Path] = PLUGIN_REGISTRY_DIR,
+        **kwargs
+        
     ):
-        super().__init__(session_factory=session_factory)
+        super().__init__(session_factory=session_factory, event_bus=event_bus)
         self.registry = registry
         self._catalog: Dict[str, PluginInfo] = {}
         self._capability_router: Any = None
@@ -128,6 +132,26 @@ class PluginManager(Manager):
                 "Backend plugin manager initialized: "
                 "{} server + {} device + {} static = {} plugins",
                 server_count, device_count, static_count, len(self._catalog),
+            )
+
+            # ── EVENT: plugin.catalog_loaded ──
+            #
+            # Pure observability — the catalog is per-replica (each
+            # process loads its own), so this doesn't propagate over
+            # NATS. An admin dashboard on the same replica can show
+            # "N plugins loaded, M failures" without hitting the manager
+            # directly. `_emit` (fire-and-forget) because startup must
+            # not block on the bus.
+            self._emit(
+                "plugin.catalog_loaded",
+                {
+                    "plugin_count": len(self._catalog),
+                    "server_count": server_count,
+                    "device_count": device_count,
+                    "static_count": static_count,
+                    "failures": device_failures,
+                },
+                distributed=False,
             )
 
 
@@ -442,6 +466,27 @@ class PluginManager(Manager):
             self._invalidate(user_id)
             logger.info("Plugin '{}' enabled for user '{}'", plugin_id, user_id)
 
+            # ── EVENT: plugin.enabled ──
+            #
+            # `_publish` (awaited) because the CapabilityRouter on
+            # *this* replica was just invalidated inline — but any
+            # other backend replica still holds a stale per-user cache
+            # that says "this plugin is disabled for user X". Awaited
+            # delivery ensures the event reaches NATS before `enable()`
+            # returns, so a subsequent request that lands on replica B
+            # sees fresh capabilities.
+            #
+            # `distributed=True` — this is precisely the case NATS
+            # exists for.
+            await self._publish(
+                "plugin.enabled",
+                {
+                    "plugin_id": plugin_id,
+                    "user_id": user_id,
+                },
+                distributed=True,
+            )
+
     async def disable(self, user_id: str, plugin_id: str) -> None:
         await self.require_plugin(plugin_id)
 
@@ -457,6 +502,19 @@ class PluginManager(Manager):
             await self._with_session(_do)
             self._invalidate(user_id)
             logger.info("Plugin '{}' disabled for user '{}'", plugin_id, user_id)
+
+            # ── EVENT: plugin.disabled ──
+            #
+            # Symmetric to `plugin.enabled`. Awaited + distributed for
+            # the same reason — cross-replica cache invalidation.
+            await self._publish(
+                "plugin.disabled",
+                {
+                    "plugin_id": plugin_id,
+                    "user_id": user_id,
+                },
+                distributed=True,
+            )
 
     async def get_user_plugin_config(
         self, user_id: str, plugin_id: str,
@@ -488,6 +546,26 @@ class PluginManager(Manager):
 
             await self._with_session(_do)
 
+            # ── EVENT: plugin.config_updated ──
+            #
+            # `_emit` (fire-and-forget) because config changes don't
+            # invalidate the capability router — a plugin's availability
+            # is unchanged, only its per-user metadata. Observability
+            # for the settings UI, not a cache-invalidation trigger.
+            #
+            # Emit only the keys, not the values — user config may
+            # contain secrets (API keys, credentials) and the event
+            # bus payload lands in logs and NATS.
+            self._emit(
+                "plugin.config_updated",
+                {
+                    "plugin_id": plugin_id,
+                    "user_id": user_id,
+                    "keys": sorted(metadata.keys()),
+                },
+                distributed=False,
+            )
+
     # ------------------------------------------------------------------
     # Device plugin state
     # ------------------------------------------------------------------
@@ -512,6 +590,23 @@ class PluginManager(Manager):
             logger.info(
                 "Set device enabled: device={} plugin={} enabled={}",
                 device_id, plugin_id, enabled,
+            )
+
+            # ── EVENT: plugin.device_enabled ──
+            #
+            # `_publish(distributed=True)` — the flip changes whether
+            # a capability is routable to this device. Replica B's
+            # router has a cached "capability X is on device D" entry
+            # that's now stale. Awaited so the invalidation lands
+            # before the HTTP response returns to the caller.
+            await self._publish(
+                "plugin.device_enabled",
+                {
+                    "plugin_id": plugin_id,
+                    "device_id": device_id,
+                    "enabled": enabled,
+                },
+                distributed=True,
             )
 
     async def build_uninstall_request(
@@ -550,6 +645,24 @@ class PluginManager(Manager):
                 plugin_id, version, device_id,
             )
 
+            # ── EVENT: plugin.installed ──
+            #
+            # `_publish(distributed=True)` — a new capability just
+            # became routable on `device_id`. Every replica's router
+            # cache must drop its "no such capability" verdict for
+            # this plugin/device pair, or the next chat request
+            # routes nowhere.
+            await self._publish(
+                "plugin.installed",
+                {
+                    "plugin_id": plugin_id,
+                    "device_id": device_id,
+                    "version": version,
+                    "artifact_sha256": artifact_sha256,
+                },
+                distributed=True,
+            )
+
     async def mark_uninstalled_on_device(
         self, device_id: str, plugin_id: str,
     ) -> None:
@@ -565,6 +678,20 @@ class PluginManager(Manager):
             await self._with_session(_do)
             self._invalidate()
 
+            # ── EVENT: plugin.uninstalled ──
+            #
+            # `_publish(distributed=True)` — symmetric to installed.
+            # The capability is no longer routable to this device;
+            # any replica that cached it needs to invalidate.
+            await self._publish(
+                "plugin.uninstalled",
+                {
+                    "plugin_id": plugin_id,
+                    "device_id": device_id,
+                },
+                distributed=True,
+            )
+
     async def record_device_error(
         self, device_id: str, plugin_id: str, error: str,
     ) -> None:
@@ -573,6 +700,23 @@ class PluginManager(Manager):
             await repo.record_error(device_id, plugin_id, error)
 
         await self._with_session(_do)
+
+        # ── EVENT: plugin.error_recorded ──
+        #
+        # `_emit(distributed=False)` — pure observability. The admin
+        # panel wants "this device/plugin had an error"; no cache
+        # invalidation needed (an error doesn't change routability).
+        # Truncate the error to keep the bus payload small — the full
+        # traceback lives in `device_plugins.last_error` if needed.
+        self._emit(
+            "plugin.error_recorded",
+            {
+                "plugin_id": plugin_id,
+                "device_id": device_id,
+                "error": error[:200],
+            },
+            distributed=False,
+        )
 
     async def reconcile_device_plugins(
         self, device_id: str, device_plugins: list[dict],
@@ -583,6 +727,29 @@ class PluginManager(Manager):
 
         result = await self._with_session(_do)
         self._invalidate()
+
+        # ── EVENT: plugin.reconciled ──
+        #
+        # `_emit(distributed=False)` — the reconcile returns an
+        # added/updated/removed diff that admin tooling wants to see,
+        # but the router invalidation already happened inline via
+        # `_invalidate()`. Cross-replica propagation is a separate
+        # concern the router will handle on its next cold read.
+        #
+        # `result` is whatever DevicePluginRepository.reconcile()
+        # returns — defensively pull the three keys admin expects.
+        self._emit(
+            "plugin.reconciled",
+            {
+                "device_id": device_id,
+                "added": result.get("added", []) if isinstance(result, dict) else [],
+                "updated": result.get("updated", []) if isinstance(result, dict) else [],
+                "removed": result.get("removed", []) if isinstance(result, dict) else [],
+                "reported": result.get("reported", 0) if isinstance(result, dict) else 0,
+            },
+            distributed=False,
+        )
+
         return result
 
     async def list_device_plugins(self, device_id: str) -> list[dict]:

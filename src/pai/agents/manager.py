@@ -4,13 +4,14 @@ from pai.agents.base import BaseAgent
 from pai.agents.conversation import ConversationAgent
 from pai.agents.productivity import ProductivityAgent
 from pai.common.manager import Manager
+from pai.event_bus.bus import EventBus
 
 class AgentManager(  Manager):
     """Manages lifecycle, coordination, and goal routing for all agents."""
     name = "agent_manager"
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, event_bus:EventBus):
+        super().__init__(event_bus=event_bus)
         self._agents: Dict[str, BaseAgent] = {}
         self._agent_capabilities: Dict[str, str] = {}  # capability -> agent_name
     

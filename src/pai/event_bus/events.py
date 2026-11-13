@@ -44,6 +44,13 @@ class EventType(str, Enum):
     EXECUTION_COMPLETED = "execution.completed"
     EXECUTION_FAILED = "execution.failed"
 
+    # Plan
+    PLAN_CREATING = "plan.creating"
+    PLAN_CREATED = "plan.created"
+    PLAN_FAILED = "plan.failed"
+
+    
+
 
 @dataclass(slots=True)
 class Event:

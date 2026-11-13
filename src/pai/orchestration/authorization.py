@@ -10,6 +10,7 @@ from typing import Any, Callable, Dict, Optional
 
 from loguru import logger
 
+from pai.event_bus.bus import EventBus
 from pai.observability.tracer import get_tracer
 from pai.common.manager import Manager
 
@@ -134,11 +135,12 @@ class AuthorizationManager(Manager):
 
     def __init__(
         self,
+        event_bus:EventBus,
         security_manager: Any,
         plugin_manager: Any = None,
         device_manager: Any = None,
     ):
-        super().__init__()
+        super().__init__(event_bus=event_bus)
         self.security = security_manager
         self.plugin_manager = plugin_manager
         self.device_manager = device_manager

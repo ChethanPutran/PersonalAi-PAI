@@ -19,6 +19,14 @@ class ApiClient {
 
   final AuthService? auth;
 
+  /// The current access token, or null if unauthenticated.
+  ///
+  /// This is the single place WS-based services should look for the
+  /// token. If `AuthService` gains an auto-refresh mechanism later,
+  /// adding it here (e.g. making this async and calling refresh on
+  /// expiry) propagates to every consumer without touching them.
+  String? get authToken => auth?.token;
+
   ApiClient({
     String? baseUrl,
     this.auth,
@@ -125,7 +133,12 @@ Future<dynamic> patch(String path, Map<String, dynamic> body) async {
         : jsonDecode(response.body);
 
     if (response.statusCode == 401) {
-      throw UnauthorizedException();
+      // Clear the local session so the UI falls back to the login
+    // screen. Without this, an expired token produces a cascade of
+    // UnauthorizedException on every screen and the app never
+    // recovers.
+    auth?.handleUnauthorized();
+    throw UnauthorizedException();
     }
 
     if (response.statusCode >= 200 && response.statusCode < 300) {

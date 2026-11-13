@@ -138,8 +138,9 @@ class _PluginTestScreenState extends State<PluginTestScreen> {
   // ------------------------------------------------------------------
 
   Widget _buildGlobal() {
-    final plugins =
-        widget.manager.plugins.where((p) => p.isInstalled).toList();
+    final plugins = widget.manager.thisDevicePlugins
+      .where((p) => p.isInstalled)
+      .toList();
 
     return Scaffold(
       appBar: AppBar(

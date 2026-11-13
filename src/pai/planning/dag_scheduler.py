@@ -7,9 +7,11 @@ from typing import Any, Dict, List
 from loguru import logger
 
 from pai.core.lifecycle import Lifecycle
+from pai.event_bus.bus import EventBus
 from pai.observability.tracer import get_tracer
 from pai.orchestration.execution_context import ExecutionContext
 from pai.orchestration.task_runner import TaskRunner
+from pai.planning.models import TaskSpec
 
 
 class DAGScheduler(Lifecycle):
@@ -17,10 +19,12 @@ class DAGScheduler(Lifecycle):
     def __init__(
         self,
         *,
+        event_bus:EventBus,
         task_runner: TaskRunner,
         max_concurrency: int = 4,
     ):
         self.task_runner = task_runner
+        self._event_bus = event_bus
         self.max_concurrency = max_concurrency
         logger.debug(
             "DAGScheduler initialized max_concurrency={}", max_concurrency
@@ -31,7 +35,7 @@ class DAGScheduler(Lifecycle):
         if self.task_runner.is_initialized():
             await self.task_runner.initialize()
 
-    async def is_initialized(self) -> bool:
+    def is_initialized(self) -> bool:
         return self.task_runner.is_initialized()
 
     async def shutdown(self) -> None:
@@ -41,7 +45,7 @@ class DAGScheduler(Lifecycle):
 
     async def execute(
         self,
-        tasks: List[Any],
+        tasks: List[TaskSpec],
         context: ExecutionContext,
     ) -> Dict[str, Any]:
 
@@ -73,7 +77,7 @@ class DAGScheduler(Lifecycle):
             # ------------------------------------------------------------------
             # Build id → task map
             # ------------------------------------------------------------------
-            task_map: Dict[str, Any] = {}
+            task_map: Dict[str, TaskSpec] = {}
             for task in tasks:
                 task_id = self._id(task)
                 if task_id in task_map:
@@ -104,6 +108,14 @@ class DAGScheduler(Lifecycle):
                 dag_span.set_error(f"Cycle detected: {cycle_str}")
                 raise RuntimeError(f"DAG contains a cycle: {cycle_str}")
 
+            self._emit("dag.started", 
+                       {
+                           "task_count":len(tasks), 
+                           "max_concurrency":self.max_concurrency, 
+                           "request_id":context.request_id, 
+                           "user_id":context.user_id
+                           }
+                       )
             completed: set[str] = set()
             failed: set[str] = set()
             results: List[Any] = []
@@ -119,7 +131,7 @@ class DAGScheduler(Lifecycle):
 
                 round_index += 1
 
-                ready: List[Any] = []
+                ready: List[TaskSpec] = []
                 blocked_info: Dict[str, List[str]] = {}
 
                 for task_id, task in task_map.items():
@@ -178,7 +190,7 @@ class DAGScheduler(Lifecycle):
                 # ------------------------------------------------------------------
                 # Run ready tasks with a per-task span
                 # ------------------------------------------------------------------
-                async def run_one(task: Any):
+                async def run_one(task: TaskSpec):
                     task_id = self._id(task)
                     task_dict = self._dict(task)
                     capability = (
@@ -257,6 +269,18 @@ class DAGScheduler(Lifecycle):
                     sum(1 for _, s, _ in batch if not s),
                 )
 
+                self._emit(
+                    "dag.round_completed",
+                    {
+                        "round": round_index,
+                        "completed": list(completed),
+                        "failed": list(failed),
+                        "remaining": [
+                            tid for tid in task_map
+                            if tid not in completed and tid not in failed
+                        ],
+                    }
+                )
             # ------------------------------------------------------------------
             # Handle tasks blocked by failed dependencies
             # ------------------------------------------------------------------
@@ -307,6 +331,17 @@ class DAGScheduler(Lifecycle):
             dag_span.set_attribute(
                 "duration_ms", round(elapsed_total_s * 1000, 1),
             )
+
+            self._emit("dag.completed" if status == "completed" else "dag.failed", {
+                "status": status,
+                "completed": len(completed),
+                "failed": len(failed),
+                "skipped": len(still_pending),
+                "duration_ms": round(elapsed_total_s * 1000, 1),
+                "request_id": context.request_id,
+                "user_id": context.user_id,
+                "session_id": getattr(context, "session_id", None),
+            })
 
             return {
                 "status": status,

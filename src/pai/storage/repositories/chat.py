@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, AsyncIterator, Callable, Optional
 
-from sqlalchemy import select, func
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from pai.storage.models import ChatSessionModel, ChatMessageModel
-
 
 import json
 from datetime import datetime, date
@@ -52,8 +52,40 @@ def _new_id() -> str:
 
 
 class ChatRepository:
-    def __init__(self, session: AsyncSession) -> None:
-        self.session = session
+    """Chat session + message persistence.
+
+    Two construction modes:
+
+      • ``ChatRepository(session)`` — uses the passed session for every
+        operation. Suitable when the caller already owns an ``AsyncSession``
+        (request handler, manager ``_with_session`` block).
+
+      • ``ChatRepository(session_factory=factory)`` — opens a fresh session
+        per operation. Suitable for long-lived holders like ``TaskOrchestrator``
+        that outlive any single request.
+    """
+
+    def __init__(
+        self,
+        session: Optional[AsyncSession] = None,
+        *,
+        session_factory: Optional[Callable[[], Any]] = None,
+    ) -> None:
+        if session is None and session_factory is None:
+            raise ValueError(
+                "ChatRepository requires either `session` or `session_factory`"
+            )
+        self._bound_session = session
+        self._session_factory = session_factory
+
+    @asynccontextmanager
+    async def _session(self) -> AsyncIterator[AsyncSession]:
+        if self._session_factory is not None:
+            async with self._session_factory() as s:
+                yield s
+        else:
+            assert self._bound_session is not None
+            yield self._bound_session
 
     # ---- sessions ----
 
@@ -69,102 +101,91 @@ class ChatRepository:
         If `session_id` exists but belongs to a different user, raises
         PermissionError — prevents session id guessing across users.
         """
-        result = await self.session.execute(
-            select(ChatSessionModel).where(
-                ChatSessionModel.id == session_id,
+        async with self._session() as session:
+            result = await session.execute(
+                select(ChatSessionModel).where(ChatSessionModel.id == session_id)
             )
-        )
-        existing = result.scalar_one_or_none()
+            existing = result.scalar_one_or_none()
+            if existing is not None:
+                if existing.user_id != user_id:
+                    raise PermissionError(
+                        f"session {session_id} does not belong to user"
+                    )
+                return existing
 
-        if existing is not None:
-            if existing.user_id != user_id:
-                raise PermissionError(
-                    f"session {session_id} does not belong to user"
-                )
-            return existing
-
-        session = ChatSessionModel(
-            id=session_id,
-            user_id=user_id,
-            title=(title or "New chat")[:256],
-            message_count=0,
-            last_message_at=_now(),
-            metadata_json={},
-        )
-        self.session.add(session)
-        await self.session.flush()
-        return session
+            new_session = ChatSessionModel(
+                id=session_id,
+                user_id=user_id,
+                title=(title or "New chat")[:256],
+                message_count=0,
+                last_message_at=_now(),
+                metadata_json={},
+            )
+            session.add(new_session)
+            await session.flush()
+            return new_session
 
     async def list_sessions(
-        self,
-        user_id: str,
-        *,
-        limit: int = 50,
-        offset: int = 0,
+        self, user_id: str, *, limit: int = 50, offset: int = 0,
     ) -> list[ChatSessionModel]:
-        result = await self.session.execute(
-            select(ChatSessionModel)
-            .where(ChatSessionModel.user_id == user_id)
-            .order_by(
-                ChatSessionModel.last_message_at.desc().nullslast(),
-                ChatSessionModel.created_at.desc(),
+        async with self._session() as session:
+            result = await session.execute(
+                select(ChatSessionModel)
+                .where(ChatSessionModel.user_id == user_id)
+                .order_by(
+                    ChatSessionModel.last_message_at.desc().nullslast(),
+                    ChatSessionModel.created_at.desc(),
+                )
+                .limit(limit)
+                .offset(offset)
             )
-            .limit(limit)
-            .offset(offset)
-        )
-        return list(result.scalars().all())
+            return list(result.scalars().all())
 
     async def get_session_with_messages(
-        self,
-        session_id: str,
-        user_id: str,
+        self, session_id: str, user_id: str,
     ) -> Optional[ChatSessionModel]:
-        result = await self.session.execute(
-            select(ChatSessionModel)
-            .where(
-                ChatSessionModel.id == session_id,
-                ChatSessionModel.user_id == user_id,
+        async with self._session() as session:
+            result = await session.execute(
+                select(ChatSessionModel)
+                .where(
+                    ChatSessionModel.id == session_id,
+                    ChatSessionModel.user_id == user_id,
+                )
+                .options(selectinload(ChatSessionModel.messages))
             )
-            .options(selectinload(ChatSessionModel.messages))
-        )
-        return result.scalar_one_or_none()
+            return result.scalar_one_or_none()
 
     async def rename_session(
-        self,
-        session_id: str,
-        user_id: str,
-        title: str,
+        self, session_id: str, user_id: str, title: str,
     ) -> bool:
-        result = await self.session.execute(
-            select(ChatSessionModel).where(
-                ChatSessionModel.id == session_id,
-                ChatSessionModel.user_id == user_id,
+        async with self._session() as session:
+            result = await session.execute(
+                select(ChatSessionModel).where(
+                    ChatSessionModel.id == session_id,
+                    ChatSessionModel.user_id == user_id,
+                )
             )
-        )
-        session = result.scalar_one_or_none()
-        if session is None:
-            return False
-        session.title = title[:256]
-        await self.session.flush()
-        return True
+            row = result.scalar_one_or_none()
+            if row is None:
+                return False
+            row.title = title[:256]
+            await session.flush()
+            return True
 
-    async def delete_session(
-        self,
-        session_id: str,
-        user_id: str,
-    ) -> bool:
-        result = await self.session.execute(
-            select(ChatSessionModel).where(
-                ChatSessionModel.id == session_id,
-                ChatSessionModel.user_id == user_id,
+    async def delete_session(self, session_id: str, user_id: str) -> bool:
+        async with self._session() as session:
+            result = await session.execute(
+                select(ChatSessionModel).where(
+                    ChatSessionModel.id == session_id,
+                    ChatSessionModel.user_id == user_id,
+                )
             )
-        )
-        session = result.scalar_one_or_none()
-        if session is None:
-            return False
-        await self.session.delete(session)
-        await self.session.flush()
-        return True
+            row = result.scalar_one_or_none()
+            if row is None:
+                return False
+            await session.delete(row)
+            await session.flush()
+            return True
 
     # ---- messages ----
 
@@ -179,29 +200,66 @@ class ChatRepository:
         status: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None,
     ) -> ChatMessageModel:
-        msg = ChatMessageModel(
-            id=_new_id(),
-            session_id=session_id,
-            role=role,
-            content=content,
-            plan_id=plan_id,
-            task_id=task_id,
-            status=status,
-            metadata_json=_json_safe(metadata or {}),
-            created_at=_now(),
-        )
-        self.session.add(msg)
-
-        # bump the session's counters
-        result = await self.session.execute(
-            select(ChatSessionModel).where(
-                ChatSessionModel.id == session_id,
+        async with self._session() as session:
+            msg = ChatMessageModel(
+                id=_new_id(),
+                session_id=session_id,
+                role=role,
+                content=content,
+                plan_id=plan_id,
+                task_id=task_id,
+                status=status,
+                metadata_json=_json_safe(metadata or {}),
+                created_at=_now(),
             )
-        )
-        session = result.scalar_one_or_none()
-        if session is not None:
-            session.message_count = (session.message_count or 0) + 1
-            session.last_message_at = msg.created_at
+            session.add(msg)
+            # bump the session's counters
+            result = await session.execute(
+                select(ChatSessionModel).where(ChatSessionModel.id == session_id)
+            )
+            chat_session = result.scalar_one_or_none()
+            if chat_session is not None:
+                chat_session.message_count = (chat_session.message_count or 0) + 1
+                chat_session.last_message_at = msg.created_at
 
-        await self.session.flush()
-        return msg
+            await session.flush()
+            return msg
+
+    # ---- NEW: recent messages for prompt injection ----
+
+    async def recent_messages(
+        self,
+        session_id: str,
+        *,
+        user_id: Optional[str] = None,
+        limit: int = 20,
+    ) -> list[ChatMessageModel]:
+        """Return the most recent messages for a session, oldest-first.
+
+        Used by the orchestrator's chat reply path to inject conversation
+        continuity into the LLM prompt. ``user_id`` is optional but
+        recommended — it asserts ownership by joining through the parent
+        session, preventing cross-user session-id guessing.
+
+        Order is oldest-first so the caller can render a chronological
+        transcript without reversing.
+        """
+        async with self._session() as session:
+            q = select(ChatMessageModel).where(
+                ChatMessageModel.session_id == session_id,
+            )
+
+            if user_id is not None:
+                # Verify ownership by joining to the parent session row.
+                q = (
+                    q.join(
+                        ChatSessionModel,
+                        ChatSessionModel.id == ChatMessageModel.session_id,
+                    )
+                    .where(ChatSessionModel.user_id == user_id)
+                )
+
+            q = q.order_by(ChatMessageModel.created_at.desc()).limit(limit)
+            result = await session.execute(q)
+            messages = list(result.scalars().all())
+            return list(reversed(messages))

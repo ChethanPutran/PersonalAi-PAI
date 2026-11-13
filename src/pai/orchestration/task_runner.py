@@ -41,7 +41,7 @@ class TaskRunner(Lifecycle):
         self.device_selector = device_selector
         self.authorizer = authorization_manager
         self.executor_manager = executor_manager
-        self.event_bus = event_bus
+        self._event_bus = event_bus
 
     async def initialize(self) -> None:
         if not self.capability_resolver.is_initialized():
@@ -61,8 +61,8 @@ class TaskRunner(Lifecycle):
         if not self.task_manager.is_initialized():
             raise RuntimeError("TaskRunner: task_manager not initialized")
 
-        if self.event_bus and not getattr(
-            self.event_bus, "is_initialized", lambda: True
+        if self._event_bus and not getattr(
+            self._event_bus, "is_initialized", lambda: True
         )():
             raise RuntimeError("TaskRunner: event_bus not initialized")
 
@@ -189,14 +189,17 @@ class TaskRunner(Lifecycle):
                     round((time.perf_counter() - t0) * 1000, 1),
                 )
 
-            # ---- 6. Publish completion event ----
-            await self._publish_completion(
-                runtime_task=runtime_task,
-                capability=resolution,
-                target=target,
-                context=context,
-                result=result,
-            )
+            # ---- 6. Emit completion event ----
+            self._emit("task.dispatched", {
+                "task_id": self._id(runtime_task),
+                "task_spec_id": task_id,
+                "capability": resolution.capability,
+                "plugin": resolution.plugin_name,
+                "device_id": target.device_id,
+                "executor_id": target.executor_id,
+                "request_id": context.request_id,
+                "user_id": context.user_id,
+            })
 
             span.set_attribute("status", "completed")
 
@@ -271,39 +274,6 @@ class TaskRunner(Lifecycle):
 
         return await self.task_manager.submit(runtime_id, wait=True)
 
-    # ------------------------------------------------------------------
-    # Events
-    # ------------------------------------------------------------------
-
-    async def _publish_completion(
-        self,
-        *,
-        runtime_task: Any,
-        capability: Any,
-        target: Any,
-        context: Any,
-        result: Any,
-    ) -> None:
-
-        if not self.event_bus:
-            return
-
-        try:
-            await self.event_bus.publish(
-                "task.completed",
-                {
-                    "task_id": self._id(runtime_task),
-                    "request_id": context.request_id,
-                    "user_id": context.user_id,
-                    "device_id": target.device_id,
-                    "executor_id": target.executor_id,
-                    "capability": capability.capability,
-                    "plugin": capability.plugin_name,
-                    "result": result,
-                },
-            )
-        except Exception as exc:
-            logger.warning("task.completed publish failed: {}", exc)
 
     # ------------------------------------------------------------------
     # Helpers

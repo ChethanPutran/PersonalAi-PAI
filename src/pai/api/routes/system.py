@@ -159,7 +159,7 @@ async def admin_list_tasks(
 ) -> Dict[str, Any]:
     tm = context.orchestrator.task_manager
     try:
-        raw = await tm.list_tasks(
+        raw = await tm.list(
             status=TaskStatus(status) if status else None,
         )
     except Exception as exc:

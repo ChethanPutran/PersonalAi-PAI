@@ -35,11 +35,16 @@ from loguru import logger
 
 from abc import ABC, abstractmethod
 
+from pai.event_bus.bus import EventBus
+
 class Lifecycle(ABC):
     """Components that participate in the application's startup/shutdown."""
 
     name: str = "component"
+    _event_bus: EventBus
+    _emit_tasks: set[asyncio.Task] = set()
 
+    
     @abstractmethod
     async def initialize(self) -> None: ...
 
@@ -48,7 +53,93 @@ class Lifecycle(ABC):
 
     @abstractmethod
     def is_initialized(self) -> bool: ...
+    
+    # ------------------------------------------------------------------
+    # Public helpers
+    # ------------------------------------------------------------------
+    
+    async def _publish(
+        self,
+        event_type: str,
+        data: Optional[Dict[str, Any]] = None,
+        *,
+        distributed: bool = False,
+    ) -> None:
+        """Awaited publish. No-op if the bus is not wired."""
+        if self._event_bus is None:
+            return
+        try:
+            await self._event_bus.publish(
+                event_type,
+                data or {},
+                source=self.name,
+                distributed=distributed,
+            )
+        except Exception as exc:
+            logger.warning(
+                "{}: publish {} failed: {}",
+                self.name, event_type, exc,
+            )
 
+    def _emit(
+        self,
+        event_type: str,
+        data: Optional[Dict[str, Any]] = None,
+        *,
+        distributed: bool = False,
+    ) -> None:
+        """Fire-and-forget publish.
+
+        Spawns a task so the caller's `async with` block doesn't wait
+        on queue capacity. The task holds a strong reference until
+        done; the class-level set prevents GC-before-run on older
+        Python versions.
+        """
+        if self._event_bus is None:
+            logger.warning(
+                "{}: emit {} dropped (no bus)",
+                self.name, event_type,
+            )
+            return
+        try:
+            task = asyncio.create_task(
+                self._do_emit(event_type, data, distributed=distributed),
+                name=f"{self.name}:emit:{event_type}",
+            )
+            self._emit_tasks.add(task)
+            task.add_done_callback(self._emit_tasks.discard)
+        except RuntimeError:
+            # No running loop — shutdown or test context. Drop.
+            pass
+
+    async def _do_emit(
+        self,
+        event_type: str,
+        data: Optional[Dict[str, Any]],
+        *,
+        distributed: bool,
+    ) -> None:
+        try:
+            assert self._event_bus is not None
+            await asyncio.wait_for(
+                self._event_bus.publish(
+                    event_type,
+                    data or {},
+                    source=self.name,
+                    distributed=distributed,
+                ),
+                timeout=0.1,
+            )
+        except asyncio.TimeoutError:
+            logger.debug(
+                "{}: emit {} timed out (queue full)",
+                self.name, event_type,
+            )
+        except Exception as exc:
+            logger.debug(
+                "{}: emit {} failed: {}",
+                self.name, event_type, exc,
+            )
 # ---------------------------------------------------------------------------
 # Single-component assertions
 # ---------------------------------------------------------------------------

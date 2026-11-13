@@ -33,11 +33,10 @@ class TaskManager(Manager):
         event_bus: EventBus,
         session_factory: Optional[Callable[[], AsyncSession]],
     ) -> None:
-        super().__init__(session_factory=session_factory)
+        super().__init__(session_factory=session_factory, event_bus=event_bus)
         self.store = store
         self.scheduler = scheduler
         self.executor_manager = executor_manager
-        self.event_bus = event_bus
         self.session_factory = session_factory
         self._running_tasks: Dict[str, asyncio.Task] = {}
         self._pause_events:  Dict[str, asyncio.Event] = {}   
@@ -119,7 +118,7 @@ class TaskManager(Manager):
             )
 
             await self.store.create(task)
-            await self._publish("task.created", task)
+            await self._publish("task.created", task.to_dict())
 
             span.set_attribute("task_id", task.id)
 
@@ -170,7 +169,7 @@ class TaskManager(Manager):
             )
 
             await self.store.save(task)
-            await self._publish("task.initialized", task)
+            await self._publish("task.initialized", task.to_dict())
 
             logger.info(
                 "Task initialized: id={} capability={} device={} executor={}",
@@ -266,7 +265,7 @@ class TaskManager(Manager):
 
             TaskLifecycle.queue(task)
             await self.store.save(task)
-            await self._publish("task.queued", task)
+            await self._publish("task.queued", task.to_dict())
 
             span.set_attribute("executor_id", task.executor_id)
             span.set_attribute("device_id", task.device_id)
@@ -309,7 +308,7 @@ class TaskManager(Manager):
             try:
                 TaskLifecycle.start(task)
                 await self.store.save(task)
-                await self._publish("task.started", task)
+                await self._publish("task.started", task.to_dict())
 
                 logger.info(
                     "Executing task {} using {}", task.id, task.executor_id,
@@ -368,7 +367,7 @@ class TaskManager(Manager):
 
                 TaskLifecycle.complete(task, task_result)
                 await self.store.save(task)
-                await self._publish("task.completed", task)
+                await self._publish("task.completed", task.to_dict())
 
                 logger.info("Task completed: {}", task.id)
                 span.set_attribute("status", "completed")
@@ -384,7 +383,7 @@ class TaskManager(Manager):
             except asyncio.CancelledError:
                 TaskLifecycle.cancel(task, "Task execution cancelled")
                 await self.store.save(task)
-                await self._publish("task.cancelled", task)
+                await self._publish("task.cancelled", task.to_dict())
                 span.set_attribute("status", "cancelled")
                 raise
 
@@ -417,13 +416,21 @@ class TaskManager(Manager):
 
             TaskLifecycle.fail(task, error, result)
             await self.store.save(task)
-            await self._publish("task.failed", task)
+            await self._publish("task.failed", task.to_dict())
 
             if task.can_retry:
                 logger.warning(
                     "Retrying task {} ({}/{})",
                     task.id, task.retry_count + 1, task.max_retries,
                 )
+                self._emit("task.retrying", {
+                    "task_id": task.id,
+                    "attempt": task.retry_count + 1,
+                    "max_attempts": task.max_retries,
+                    "error": error,
+                    "user_id": task.user_id,
+                    "session_id": task.session_id,
+                })
                 TaskLifecycle.retry(task)
                 await self.store.save(task)
                 span.set_attribute("action", "retry")
@@ -464,7 +471,7 @@ class TaskManager(Manager):
                 TaskLifecycle.cancel(task, reason or "Cancelled by user")
                 await self.store.save(task)
 
-            await self._publish("task.cancelled", task)
+            await self._publish("task.cancelled", task.to_dict())
             return task
 
     async def pause(self, task_id: str) -> Task:
@@ -497,7 +504,7 @@ class TaskManager(Manager):
             #    both the executor and the wrapper have acknowledged.
             TaskLifecycle.pause(task)          # status → PAUSED
             await self.store.save(task)
-            await self._publish("task.paused", task)
+            await self._publish("task.paused", task.to_dict())
             return task
 
 
@@ -522,7 +529,7 @@ class TaskManager(Manager):
             if event is not None:
                 event.set()                     # wake the blocked coroutine
 
-            await self._publish("task.resumed", task)
+            await self._publish("task.resumed", task.to_dict())
             return task
 
     # ------------------------------------------------------------------
@@ -532,8 +539,6 @@ class TaskManager(Manager):
     async def get(self, task_id: str) -> Task:
         return await self.store.require(task_id)
 
-    async def list_tasks(self, status: Optional[TaskStatus] = None) -> List[Task]:
-        return await self.store.list(status=status)
 
     async def list(
         self,
@@ -608,23 +613,3 @@ class TaskManager(Manager):
             device_id=task.device_id,
             started_at=task.started_at,
         )
-
-    async def _publish(self, event_type: str, task: Task) -> None:
-        if self.event_bus is None:
-            return
-        try:
-            event = {
-                "type": event_type,
-                "task_id": task.id,
-                "status": task.status.value,
-                "user_id": task.user_id,
-                "session_id": task.session_id,
-            }
-            publish = getattr(self.event_bus, "publish", None)
-            if publish is not None:
-                await publish(event_type, event)
-        except Exception:
-            logger.exception(
-                "Failed to publish task event: {}", event_type,
-            )
-

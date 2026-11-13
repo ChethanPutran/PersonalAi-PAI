@@ -12,7 +12,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from loguru import logger
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
+import contextlib
+from fastapi import WebSocket, WebSocketDisconnect
+from sqlalchemy import select
 
+from pai.event_bus.events import Event
+from pai.security.auth import decode_access_token
+from pai.storage.models import ChatSessionModel
 from pai.api.dependencies import get_current_user
 from pai.app_context import get_app_context, get_orchestrator, get_db_session
 from pai.app_context import PAIAppContext
@@ -21,6 +27,9 @@ from pai.orchestration.orchestrator import (
     TaskOrchestrator,
 )
 from pai.storage.repositories.chat import ChatRepository
+
+
+
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -248,6 +257,131 @@ async def chat(
         tasks=tasks,
     )
 
+
+@router.websocket("/{session_id}/stream")
+async def chat_status_stream(websocket: WebSocket, session_id: str) -> None:
+    """Live status updates for an in-flight chat request.
+
+    The client opens this once when the chat screen mounts, and keeps
+    it open across messages. Each `POST /chat` made while the WS is
+    open produces a stream of `chat.status` events on the event bus;
+    this route filters them by session_id and forwards the payload.
+
+    Auth: `?token=<jwt>` on the query string (same pattern as the
+    device WS at `/devices/{id}/ws`).
+
+    Ownership: a not-yet-existing session is allowed — the first POST
+    creates it under the caller. An existing session owned by another
+    user is rejected with 4403.
+    """
+    # ── 1. Auth ──
+    token = websocket.query_params.get("token")
+    user_id: Optional[str] = None
+    if token:
+        try:
+            user_id = decode_access_token(token)
+        except Exception as exc:
+            logger.debug("chat stream token decode failed: %s", exc)
+
+    if user_id is None:
+        await websocket.close(code=4401)
+        return
+
+    context = websocket.app.state.context
+    event_bus = context.orchestrator.event_bus
+
+    # ── 2. Ownership check ──
+    async with context.database.session() as db:
+        result = await db.execute(
+            select(ChatSessionModel).where(
+                ChatSessionModel.id == session_id,
+            )
+        )
+        existing = result.scalar_one_or_none()
+
+    if existing is not None and existing.user_id != user_id:
+        await websocket.accept()
+        await websocket.send_json({
+            "type": "error",
+            "message": "Session belongs to another user",
+        })
+        await websocket.close(code=4403)
+        return
+
+    if event_bus is None:
+        await websocket.accept()
+        await websocket.send_json({
+            "type": "error",
+            "message": "Status stream unavailable",
+        })
+        await websocket.close(code=4511)
+        return
+
+    # ── 3. Subscribe with a fast, non-blocking handler ──
+    #
+    # The EventBus dispatcher awaits each handler and doesn't isolate
+    # slow ones — a handler that does `await websocket.send_json(...)`
+    # would block dispatch for *all* subscribers, including other
+    # sessions. So the handler just pushes to a local queue, and a
+    # separate task drains that queue into the WS.
+    local_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=100)
+
+    async def _on_status(event: Event) -> None:
+        if event.data.get("session_id") != session_id:
+            return
+        try:
+            local_queue.put_nowait(event.data)
+        except asyncio.QueueFull:
+            # Drop oldest, retry once — same policy as the bus itself.
+            try:
+                local_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+            try:
+                local_queue.put_nowait(event.data)
+            except asyncio.QueueFull:
+                pass
+
+    subscription_id = await event_bus.subscribe("chat.status", _on_status)
+
+    await websocket.accept()
+    await websocket.send_json({"type": "connected", "session_id": session_id})
+
+    # ── 4. Drain queue → WS, detect disconnect ──
+    async def _forward() -> None:
+        while True:
+            data = await local_queue.get()
+            await websocket.send_json(data)
+
+    async def _wait_disconnect() -> None:
+        while True:
+            try:
+                await websocket.receive_text()
+            except WebSocketDisconnect:
+                return
+
+    try:
+        forward_task = asyncio.create_task(_forward())
+        disconnect_task = asyncio.create_task(_wait_disconnect())
+        await asyncio.wait(
+            {forward_task, disconnect_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for t in (forward_task, disconnect_task):
+            t.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await t
+    except Exception:
+        logger.exception("chat status stream error for %s", session_id)
+    finally:
+        # Best-effort unsubscribe. If the bus has been shut down under
+        # us, the call is a no-op.
+        try:
+            await event_bus.unsubscribe(subscription_id)
+        except Exception:
+            pass
+        with contextlib.suppress(Exception):
+            await websocket.close()
 
 
 class ChatSessionSummary(BaseModel):

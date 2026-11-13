@@ -4,6 +4,7 @@ from typing import Callable
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from pai.event_bus.bus import EventBus
 from pai.security.audit import AuditLogger
 from pai.security.permissions import Permission, PermissionSet
 from pai.security.policies import (
@@ -29,9 +30,10 @@ class SecurityManager(Manager):
     def __init__(
         self,
         *,
-        session_factory: Callable[[], AsyncSession]
+        session_factory: Callable[[], AsyncSession],
+        event_bus: EventBus,
     ) -> None:
-        super().__init__(session_factory=session_factory)
+        super().__init__(session_factory=session_factory, event_bus=event_bus)
         self.policy_engine = PolicyEngine()
         self.audit_logger = AuditLogger()
 

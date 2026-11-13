@@ -28,8 +28,8 @@ class ExecutorManager(Manager):
         """
     name = "executor_manager"
     
-    def __init__(self) -> None:
-        super().__init__()                 # no session, no router
+    def __init__(self, *, event_bus, **kwargs):
+        super().__init__(event_bus=event_bus)
         self._executors: Dict[str, BaseExecutor] = {}
 
 
@@ -50,6 +50,11 @@ class ExecutorManager(Manager):
                 )
 
             self._executors[executor.name] = executor
+            self._emit("executor.registered", {
+                "name": executor.name,
+                "type": executor.__class__.__name__,
+                "id": executor.executor_id,
+            })
             logger.info("Executor registered: {}", executor.name)
 
 
@@ -63,6 +68,11 @@ class ExecutorManager(Manager):
             executor_name=executor_name,
         ):
             executor = self._executors.pop(executor_name, None)
+            self._emit("executor.unregistered", {
+                "name": executor_name,
+                "type": executor.__class__.__name__ if executor else None,
+                "id": executor.executor_id if executor else None,
+            })
             if executor:
                 logger.info("Executor unregistered: {}", executor_name)
             return executor
@@ -184,7 +194,15 @@ class ExecutorManager(Manager):
                             executor.initialize(),
                             timeout=5.0,
                         )
-                    except asyncio.TimeoutError:
+                    except asyncio.TimeoutError as e:
+                        self._emit(
+                            "executor.failed",
+                            {
+                                "name": executor.name,
+                                "error": str(e),
+                                "stage":"initialize"
+                            }
+                        )
                         logger.warning(
                             "Executor {} initialization timed out "
                             "(5s) — disabling it for this run",
@@ -199,6 +217,14 @@ class ExecutorManager(Manager):
                             pass
                         failures.append(name)
                     except Exception as exc:
+                        self._emit(
+                                "executor.failed",
+                                {
+                                    "name": executor.name,
+                                    "error": str(exc),
+                                    "stage":"initialize"
+                                }
+                                                )
                         logger.exception(
                             "Failed to initialize executor: {}", name,
                         )
@@ -214,6 +240,9 @@ class ExecutorManager(Manager):
                 continue
             try:
                 await asyncio.wait_for(executor.start(), timeout=5.0)
+                self._emit("executor.started",{
+                    "name": executor.name
+                })
             except asyncio.TimeoutError:
                 logger.warning("Executor {} start timed out — skipping", name)
                 try:
@@ -237,6 +266,9 @@ class ExecutorManager(Manager):
                 ) as one_span:
                     try:
                         await executor.stop()
+                        self._emit("executor.stopped",{
+                            "name":executor.name
+                        })
                     except Exception as exc:
                         logger.exception(
                             "Failed to stop executor: {}", executor.name,

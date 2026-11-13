@@ -114,6 +114,47 @@ class LLMRouter:
     # ------------------------------------------------------------------
     # Generation
     # ------------------------------------------------------------------
+    async def generate_request(
+        self,
+        request: LLMRequest,
+        *,
+        route: Optional[str] = None,
+    ) -> LLMResponse:
+        """Generate from a pre-built LLMRequest.
+
+        Preserves the caller's `model`, `temperature`, `max_tokens`, and
+        `extra` fields verbatim — unlike `generate()`, which overrides them
+        with its own keyword arguments. Use this when the caller has already
+        assembled an LLMRequest and doesn't want the router's defaults
+        applied on top.
+        """
+        tracer = get_tracer()
+        selected_route = self.resolve_route(route)
+        provider = self.get_provider(selected_route.provider)
+        # Only override the model if the request didn't specify one, so a
+        # route-level default doesn't clobber an explicit per-request choice.
+        if not request.model:
+            request.model = selected_route.model
+
+        async with tracer.span(
+            "router.generate_request",
+            route=route or "default",
+            provider=selected_route.provider,
+            model=request.model,
+            message_count=len(request.messages),
+        ) as span:
+            t0 = time.perf_counter()
+            try:
+                response = await provider.generate(request)
+                span.set_attribute(
+                    "duration_ms",
+                    round((time.perf_counter() - t0) * 1000, 1),
+                )
+                span.set_attribute("response_length", len(response.content))
+                return response
+            except Exception as exc:
+                span.set_error(f"{type(exc).__name__}: {exc}")
+                raise
 
     async def generate(
         self,
@@ -138,6 +179,10 @@ class LLMRouter:
             model=selected_model,
             message_count=len(messages),
         ) as span:
+            # Optional: set message_count after entering the span so a type
+            # bug in the caller produces a traceback pointing at *that* line
+            # instead of at the span's kwarg evaluation.
+            span.set_attribute("message_count", len(messages))
 
             span.set_attribute(
                 "prompt_length",

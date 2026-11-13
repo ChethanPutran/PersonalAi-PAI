@@ -10,7 +10,11 @@ from typing import Any, Dict, Optional
 from loguru import logger
 
 from pai.core.lifecycle import Lifecycle
+from pai.event_bus.bus import EventBus
+from pai.llm.router import LLMRouter
+from pai.memory.manager import MemoryManager
 from pai.observability.tracer import get_tracer
+from pai.orchestration.capability_router import CapabilityRouter
 from pai.planning.goal_decomposer import GoalDecomposer
 from pai.planning.models import (
     Plan,
@@ -18,15 +22,20 @@ from pai.planning.models import (
     TaskSpec,
 )
 from pai.planning.plan_verifier import PlanVerifier
+from pai.storage.repositories.chat import ChatRepository
+from pai.storage.repositories.chat import ChatRepository
 
 
 class Planner(Lifecycle):
     def __init__(
         self,
-        llm_router: Any,
-        capability_router: Any,
-        memory_manager: Any
+        event_bus:EventBus,
+        llm_router: LLMRouter,
+        capability_router: CapabilityRouter,
+        memory_manager: MemoryManager,
+        chat_repo: ChatRepository,
     ):
+        self._event_bus = event_bus
         self.llm = llm_router
         if self.llm is None:
             raise ValueError("Planner requires an LLM provider")
@@ -34,7 +43,8 @@ class Planner(Lifecycle):
         self.goal_decomposer = GoalDecomposer(
             self.llm,
             capability_router=capability_router,
-            memory_manager=memory_manager
+            memory_manager=memory_manager,
+            chat_repo=chat_repo
         )
         self.verifier = PlanVerifier(capability_router=capability_router)
         self.active_plans: Dict[str, Plan] = {}
@@ -131,6 +141,14 @@ class Planner(Lifecycle):
             if not verification["valid"]:
                 plan.status = PlanStatus.FAILED
                 plan.verification_issues = verification["issues"]
+                await self._publish("plan.rejected", {
+                    "plan_id": plan.id,
+                    "goal": plan.goal[:200],
+                    "issues": verification["issues"],
+                    "session_id": context.get("session_id"),
+                    "user_id": context.get("user_id"),
+                    "request_id": context.get("request_id"),
+                })
                 span.set_error(
                     "invalid_plan: " + "; ".join(verification["issues"])
                 )
@@ -141,6 +159,18 @@ class Planner(Lifecycle):
             plan.status = PlanStatus.VERIFIED
             plan.updated_at = datetime.now(timezone.utc)
             self.active_plans[plan.id] = plan
+            
+            await self._publish("plan.created", {
+                "plan_id": plan.id,
+                "goal": plan.goal[:500],
+                "task_count": len(plan.tasks),
+                "session_id": context.get("session_id"),
+                "user_id": context.get("user_id"),
+                "request_id": context.get("request_id"),
+                "capabilities": sorted({
+                    t.capability for t in plan.tasks if t.capability
+                }),
+            })
 
             logger.info(
                 "Created verified plan {} with {} tasks",
@@ -173,6 +203,12 @@ class Planner(Lifecycle):
             new_plan = await self.create_plan(goal=plan.goal, context=context)
             new_plan.status = PlanStatus.ADAPTED
             new_plan.metadata["replanned_from"] = plan.id
+
+            self._emit("plan.replanned",
+                       {
+                           "original_plan_id": plan.id,
+                           "new_plan_id": new_plan.id
+                       })
 
             return new_plan
 

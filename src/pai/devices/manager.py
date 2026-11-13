@@ -19,6 +19,7 @@ from pai.devices.models import (
 )
 from pai.devices.registry import DeviceRegistry
 from pai.devices.utils import _normalize_status, _device_summary
+from pai.event_bus.bus import EventBus
 from pai.observability.tracer import get_tracer
 from pai.storage.repositories.device import DeviceRepository
 from pai.common.manager import Manager
@@ -47,8 +48,9 @@ class DeviceManager(Manager):
     def __init__(
         self,
         session_factory: Optional[Callable[[], AsyncSession]],
+        event_bus:EventBus
     ) -> None:
-        super().__init__(session_factory=session_factory)
+        super().__init__(session_factory=session_factory, event_bus=event_bus)
         self.registry = DeviceRegistry()
         self._connections: Dict[str, DeviceConnection] = {}
         self._capability_router: Any = None
@@ -260,6 +262,16 @@ class DeviceManager(Manager):
 
             # 2. Mirror in memory
             await self.registry.register(device)
+
+            await self._publish("device.registered", {
+                "device_id": device.id,
+                "user_id": user_id,
+                "platform": str(device.platform),
+                "architecture": device.architecture,
+                "device_type": str(device.device_type),
+                "status": device.status,
+            })
+
             self._invalidate_router(user_id)
 
             logger.info("Device registered: {} ({})", device.id, device.name)
@@ -307,6 +319,10 @@ class DeviceManager(Manager):
                 span.set_attribute("db_delete_failed", True)
 
             removed = await self.registry.unregister(device_id)
+            await self._publish("device.unregistered", {
+                "device_id": device_id,
+                "user_id": user_id,
+                })
             span.set_attribute("removed", removed)
             self._invalidate_router(user_id)
             return removed
@@ -450,6 +466,12 @@ class DeviceManager(Manager):
             await self.registry.update_status(device_id, status_value)
             await self.registry.heartbeat(device_id)
 
+            await self._publish("device.connected", {
+                "device_id": device_id,
+                "user_id": getattr(device, "user_id", None),
+                "device_type": getattr(device, "device_type", None),
+            })
+
             try:
                 async def _do(session: AsyncSession):
                     repo = DeviceRepository(session)
@@ -539,6 +561,10 @@ class DeviceManager(Manager):
 
             try:
                 await self.registry.update_status(device_id, status_value)
+                await self._publish("device.disconnected", {
+                    "device_id": device_id,
+                    "user_id": user_id,
+                })
             except Exception as exc:
                 logger.warning(
                     "Failed to update offline status for {}: {}",
@@ -716,6 +742,11 @@ class DeviceManager(Manager):
                         user_id=user_id,
                     )
                 await self._with_session(_do)
+                self._emit("device.metadata_refreshed", {
+                    "device_id": device_id,
+                    "user_id": user_id,
+                    "updated_keys": list(update.keys()),    
+                })
 
             self._invalidate_router(user_id)
 
@@ -754,5 +785,8 @@ class DeviceManager(Manager):
                     "assign_user: device {} not in registry — DB only",
                     device_id,
                 )
-
+            self._emit("device.ownership_assigned", {
+                "device_id": device_id,
+                "user_id": user_id
+            })
             self._invalidate_router(user_id)
