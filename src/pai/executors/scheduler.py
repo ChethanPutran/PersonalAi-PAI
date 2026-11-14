@@ -122,7 +122,7 @@ class ExecutorScheduler:
 
     async def schedule_task(
         self,
-        task: Any,                              # ← widened from Dict to Any
+        task: Any,                             
         executor_name: str,
     ) -> Dict[str, Any]:
         tracer = get_tracer()

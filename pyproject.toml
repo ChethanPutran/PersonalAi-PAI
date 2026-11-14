@@ -53,3 +53,14 @@ bump-plugin = "scripts.bump_plugin:main"
 members = [
     "server",
 ]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+markers = ["integration: full kernel, slow, needs DB + network"]
+addopts = "-m 'not integration'"        # skip integration by default
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.2",
+    "pytest-asyncio>=0.23.8",
+]

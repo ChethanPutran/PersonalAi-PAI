@@ -328,6 +328,26 @@ class TaskModel(Base):
     )
 
 
+
+# ============================================================
+# Prompt renders
+# ============================================================
+class PromptRenderModel(Base):
+    __tablename__ = "prompt_renders"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    prompt_id: Mapped[str] = mapped_column(String(128), index=True)
+    prompt_version: Mapped[str] = mapped_column(String(32), index=True)
+    sha256: Mapped[str] = mapped_column(String(64), index=True)
+    user_id: Mapped[Optional[str]] = mapped_column(String, nullable=True, index=True)
+    session_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    rendered_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), index=True,
+    )
+    rendered_length: Mapped[int] = mapped_column(Integer)
+    extra: Mapped[dict] = mapped_column(JSON, default=dict)
+
+    
 # ============================================================
 # Device plugins
 # ============================================================

@@ -1,6 +1,8 @@
 """Application context shared by API handlers."""
 
 from dataclasses import dataclass
+import os
+import os
 from typing import AsyncIterator, Optional
 
 from fastapi import FastAPI, Request, WebSocket
@@ -8,12 +10,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from pai.agents.manager import AgentManager
 from pai.config import Config
+from pai.executors.builtin import BuiltinExecutor
+from pai.executors.builtin import BuiltinExecutor
 from pai.notifications.push_service import PushService
+from pai.orchestration.builtin_capabilities import BuiltinCapabilityRegistry
+from pai.orchestration.builtins.schedule import build_schedule_capabilities
+from pai.orchestration.builtins.tasks import build_task_capabilities
+from pai.orchestration.builtins.tasks import build_task_capabilities
+from pai.orchestration.builtins.schedule import build_schedule_capabilities
 from pai.orchestration.execution_context import ContextManager
 from pai.orchestration.task_runner import TaskRunner
 from pai.orchestration.device_selector import DeviceSelector
 from pai.orchestration.authorization import AuthorizationManager
 from pai.planning.planner import Planner
+from pai.prompts.registry import PromptRegistry
+from pai.prompts.tracker import PromptVersionTracker
 from pai.storage.database import Database
 from pai.storage.repositories.chat import ChatRepository
 from pai.storage.repositories.task import TaskRepository
@@ -67,6 +78,28 @@ def create_app_context(config: Config) -> PAIAppContext:
         echo=config.database.echo,
     )
 
+    # Parse overrides from env
+    overrides = {}
+    for pair in (os.getenv("PROMPTS_OVERRIDES") or "").split(","):
+        pair = pair.strip()
+        if "=" in pair:
+            k, v = pair.split("=", 1)
+            overrides[k.strip()] = v.strip()
+
+    prompt_registry = PromptRegistry(
+        root=os.getenv("PROMPTS_ROOT", "./prompts"),
+        frozen=os.getenv("PROMPTS_FROZEN", "true").lower() == "true",
+        override_versions=overrides,
+    )
+
+    prompt_tracker = PromptVersionTracker(
+        session_factory=database.sessionmaker,
+        enabled=os.getenv("PROMPTS_TRACK_USAGE", "true").lower() == "true",
+    )
+
+    # Registry
+    builtin_registry = BuiltinCapabilityRegistry()
+
     # ── Context manager — honor context_history_size ──
     context_manager = ContextManager(
         max_history=config.memory.context_history_size,
@@ -109,6 +142,7 @@ def create_app_context(config: Config) -> PAIAppContext:
         device_manager=device_manager,
         plugin_manager=plugin_manager,
         session_factory=database.factory,
+        builtin_registry=builtin_registry,
     )
 
     # ── Wire router into managers for cache invalidation ──
@@ -123,7 +157,9 @@ def create_app_context(config: Config) -> PAIAppContext:
         llm_router=llm_router,
         capability_router=capability_router,
         memory_manager=memory_manager,
-        chat_repo=chat_repo
+        chat_repo=chat_repo,
+        prompt_registry=prompt_registry, 
+        prompt_tracker=prompt_tracker,        
     )
 
     # ── Task store — in-memory for now, DB-backed later ──
@@ -138,7 +174,10 @@ def create_app_context(config: Config) -> PAIAppContext:
     # `executors=config.executor.executors` kwarg, or the URLs are
     # supposed to be wired through the scheduler. If it's the latter,
     # pass them to ExecutorScheduler instead.
+
+
     executor_manager = ExecutorManager(event_bus=event_bus)
+
 
     executor_scheduler = ExecutorScheduler(
         llm_service=llm_router,
@@ -189,6 +228,21 @@ def create_app_context(config: Config) -> PAIAppContext:
         push_service=push_service,
     )
 
+    
+    for cap in build_schedule_capabilities(
+        session_factory=database.sessionmaker,
+        scheduler_service=scheduler_service,
+    ):
+        builtin_registry.register(cap)
+        
+    for cap in build_task_capabilities(task_manager):
+        builtin_registry.register(cap)
+
+        
+    # Executor — registered under the name the router will route to
+    builtin_executor = BuiltinExecutor(builtin_registry)
+    executor_manager.register(builtin_executor)
+
 
     orchestrator = TaskOrchestrator(
         context_manager=context_manager,
@@ -209,7 +263,9 @@ def create_app_context(config: Config) -> PAIAppContext:
         authorization_manager=authorization_manager,
         device_selector=device_selector,
         scheduler_service=scheduler_service,
-        push_service=push_service
+        push_service=push_service,
+        prompt_registry=prompt_registry,
+        prompt_tracker=prompt_tracker
     )
 
     capability_router.register_change_listener(

@@ -1,6 +1,8 @@
 """Goal decomposition into declarative task specifications."""
 from __future__ import annotations
 
+from datetime import datetime, timezone
+from typing import Any, Dict, List
 import json
 import time
 from typing import Any, Dict, List, Optional
@@ -17,6 +19,8 @@ from pai.orchestration.capability_router import CapabilityRouter
 from pai.planning.models import TaskSpec
 import re
 
+from pai.prompts.registry import PromptRegistry, PromptTemplate
+from pai.prompts.tracker import PromptVersionTracker
 from pai.storage.repositories.chat import ChatRepository
 
 # Sentinel used end-to-end. Never gets a DB row; orchestrator handles it.
@@ -59,14 +63,34 @@ class GoalDecomposer(Lifecycle):
         capability_router: CapabilityRouter,
         memory_manager: MemoryManager,
         chat_repo: ChatRepository,
+        prompt_registry: PromptRegistry,
+        prompt_tracker: PromptVersionTracker,
     ):
         self.llm = llm
         self.capability_router = capability_router
         self.memory_manager = memory_manager
         self.chat_repo = chat_repo
+        self.prompts = prompt_registry
+        self.prompt_tracker = prompt_tracker
 
     async def initialize(self) -> None:
         logger.info("GoalDecomposer initialized")
+
+        for prompt_id in ["planning.goal_decomposition", "chat.reply"]:
+            meta = self.prompts._load_meta(prompt_id)
+            current = meta["current"]
+            template = self.prompts.get(prompt_id, version=current)
+            # Cheap sanity: render with dummies to catch undeclared vars now,
+            # not at 3am when the first user runs a goal.
+            declared = set(meta.get("variables", {}))
+            import re
+            used = set(re.findall(r"{{\s*(\w+)", template.source))
+            undeclared = used - declared - {"loop"}  # `loop` is Jinja builtin
+            if undeclared:
+                raise RuntimeError(
+                    f"{prompt_id}@{current} references undeclared variables: "
+                    f"{sorted(undeclared)}"
+                )
 
 
     async def shutdown(self) -> None:
@@ -74,10 +98,6 @@ class GoalDecomposer(Lifecycle):
 
     def is_initialized(self) -> bool:
         return True
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
 
     # ------------------------------------------------------------------
     # Public API
@@ -123,26 +143,6 @@ class GoalDecomposer(Lifecycle):
             # non-retry turns — "what did you just do?" requires knowing
             # the previous turn, and a follow-up like "and another one"
             # needs to know what was just produced.
-            history_block = ""
-            if self.chat_repo is not None and session_id:
-                try:
-                    msgs = await self.chat_repo.recent_messages(
-                        session_id, user_id=user_id, limit=10,
-                    )
-                    if msgs:
-                        history_block = "\n".join(
-                            f"{getattr(m, 'role', 'unknown')}: "
-                            f"{str(getattr(m, 'content', '') or '')[:300]}"
-                            for m in msgs
-                        )
-                        span.set_attribute(
-                            "history_message_count", len(msgs),
-                        )
-                except Exception as exc:
-                    logger.warning(
-                        "GoalDecomposer: failed to fetch history: {}", exc,
-                    )
-            # 2. Chat history 
             history_block = ""
             if self.chat_repo is not None and session_id:
                 try:
@@ -214,19 +214,37 @@ class GoalDecomposer(Lifecycle):
                 len(router_caps), sorted(capabilities.keys()),
             )
 
+            user_tz = (
+                context.get("timezone")
+                or (context.get("user_preferences") or {}).get("timezone")
+                or "UTC"
+            )
+            span.set_attribute("user_timezone", user_tz)
+
             # 4. Build prompt
             t0 = time.perf_counter()
-            prompt = self._build_prompt(
-                goal,
-                context,
-                capabilities,
+
+            prompt, template = self._render_prompt(
+                goal=goal,
+                context=context,
+                capabilities=capabilities,
                 memory_block=memory_block,
-                history_block=history_block
+                history_block=history_block,
+                user_tz=user_tz,
             )
             span.set_attribute("prompt_length", len(prompt))
             span.set_attribute(
                 "prompt_build_ms",
                 round((time.perf_counter() - t0) * 1000, 1),
+            )
+
+            # 4b. Track usage (non-blocking, non-fatal)
+            await self.prompt_tracker.record(
+                template=template,
+                rendered_text=prompt,
+                user_id=user_id,
+                session_id=session_id,
+                span=span
             )
 
             # 5. LLM call
@@ -306,102 +324,39 @@ class GoalDecomposer(Lifecycle):
     # Prompt building
     # ------------------------------------------------------------------
 
-    def _build_prompt(
+    def _render_prompt(
         self,
+        *,
         goal: str,
         context: Dict[str, Any],
         capabilities: Dict[str, dict],
         memory_block: str = "",
         history_block: str = "",
         is_retry: bool = False,
-    ) -> str:
-        cap_block = self._render_capabilities(capabilities)
-        source_device = context.get("source_device_id") or context.get("device_id")
+        user_tz: str = "UTC",
+    ) -> tuple[str, "PromptTemplate"]:
+        template = self.prompts.get("planning.goal_decomposition")
 
-        retry_rule = (
-            """11. The user is RETRYING a previous request. Look at the
-                RECENT CONVERSATION and PREVIOUS ATTEMPT sections below to find
-                what was attempted. Re-emit the SAME tool tasks with the SAME
-                parameters as the previous attempt. Do NOT emit a chat.reply
-                that pre-announces failure — let the tools run fresh; if you want
-                a summary, add a chat.reply as a *dependent* of the tool tasks
-                (depends_on = the tool task ids)."""
-            if is_retry else ""
+        rendered = template.render(
+            goal=goal,
+            capabilities_block=self._render_capabilities(capabilities),
+            memory_block=memory_block,
+            history_block=history_block,
+            is_retry=is_retry,
+            user_tz=user_tz,
+            current_time=datetime.now(timezone.utc).isoformat(),
+            chat_capability_id=CHAT_CAPABILITY_ID,
+            source_device=(
+                context.get("source_device_id")
+                or context.get("device_id")
+            ),
+            context_json=json.dumps(
+                {k: v for k, v in context.items() if k != "user_id"},
+                default=str,
+                indent=2,
+            ),
         )
-
-        history_section = (
-            f"RECENT CONVERSATION IN THIS SESSION (oldest first, most recent last):\n{history_block}"
-            if history_block else ""
-        )
-        memory_section = (
-            f"RELEVANT MEMORY:\n{memory_block}"
-            if memory_block else ""
-        )
-
-        return f"""
-                You are the planning component of a personal AI agent.
-
-                Convert the user's goal into a small executable task graph.
-
-                STRICT RULES:
-                1. Every task MUST use one of the capabilities listed below.
-                Do NOT invent capability names.
-                2. Task "capability" must exactly match one id from the list.
-                3. Task "type" may be anything descriptive (e.g. "capture_photo"),
-                but "capability" must be from the list.
-                4. Use "depends_on" for dependencies (list of task ids).
-                5. Fill parameters to match the schema. Do NOT add extra keys.
-                6. Use the smallest number of tasks necessary (usually 1-3).
-                7. Do NOT execute anything. Do NOT invent results.
-                8. If the user is just chatting (greeting, small talk, thanks,
-                general question that requires no tool, clarification of a
-                previous reply), use capability "{CHAT_CAPABILITY_ID}" with no
-                other tasks. NEVER return [] — a reply must always be produced.
-                9. If the user asks to DO something with tools, produce the tool
-                tasks first. Optionally end the plan with a single
-                "{CHAT_CAPABILITY_ID}" task to convert raw tool output into a
-                natural-language reply (set its depends_on to the tool task ids).
-                10. If the goal is completely impossible with the available
-                    capabilities, produce a single "{CHAT_CAPABILITY_ID}" task
-                    explaining politely why.
-                {retry_rule}
-
-                AVAILABLE CAPABILITIES FOR THIS USER:
-
-                {cap_block}
-
-                {history_section}
-
-                {memory_section}
-
-                OUTPUT FORMAT — return ONLY a JSON array, no prose, no markdown:
-
-                [
-                {{
-                    "id": "task_1",
-                    "type": "capture_photo",
-                    "capability": "<one of the ids above>",
-                    "parameters": {{}},
-                    "depends_on": []
-                }},
-                {{
-                    "id": "task_2",
-                    "type": "chat",
-                    "capability": "{CHAT_CAPABILITY_ID}",
-                    "parameters": {{"tone": "friendly"}},
-                    "depends_on": ["task_1"]
-                }}
-                ]
-
-                {f"CONTEXT: request originated from device {source_device}." if source_device else ""}
-
-                USER GOAL:
-                {goal}
-
-                ADDITIONAL CONTEXT (JSON):
-                {json.dumps({k: v for k, v in context.items() if k != "user_id"}, default=str, indent=2)}
-                """.strip()
-
+        return rendered, template
     
     @staticmethod
     def _render_capabilities(capabilities: Dict[str, dict]) -> str:

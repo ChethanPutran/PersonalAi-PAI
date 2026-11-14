@@ -13,6 +13,9 @@ from pai.agents.manager import AgentManager
 from pai.llm.models import LLMMessage, LLMRequest
 from pai.notifications.push_service import PushService
 from pai.planning.models import TaskSpec
+from pai.prompts.registry import PromptRegistry
+from pai.prompts.registry import PromptRegistry
+from pai.prompts.tracker import PromptVersionTracker
 from pai.scheduler.scheduler_service import SchedulerService
 from pai.storage.repositories.chat import ChatRepository
 from pai.tasks.task_tracker import TaskTracker
@@ -104,8 +107,11 @@ class TaskOrchestrator(Manager):
         scheduler_service: SchedulerService,
         chat_repo: ChatRepository,
         push_service: PushService,
+        prompt_registry: PromptRegistry,          
+        prompt_tracker: PromptVersionTracker,    
         command_registry: Optional[CommandRegistry] = None,   
         orchestrator_config: OrchestratorConfig = OrchestratorConfig(),
+
     ):
         super().__init__(event_bus=event_bus)
         self.context_manager = context_manager
@@ -125,6 +131,8 @@ class TaskOrchestrator(Manager):
         self.dag_scheduler = dag_scheduler
         self.chat_repo = chat_repo
         self.push_service = push_service
+        self.prompts = prompt_registry
+        self.prompt_tracker = prompt_tracker
         self.command_registry = (                               
             command_registry or default_command_registry()
         )
@@ -740,6 +748,7 @@ class TaskOrchestrator(Manager):
             # / "why did it fail", we surface the previous attempt from
             # *this* session in the memory block. Otherwise it stays excluded.
             is_retry = _looks_like_retry(goal or "")
+            span.set_attribute("tone", tone)
             span.set_attribute("is_retry", is_retry)
 
             # ── 1. Live capabilities ──
@@ -818,79 +827,41 @@ class TaskOrchestrator(Manager):
                 memory_block = memory_block[:self.memory_block_max_size]
                 span.set_attribute("memory_injected", bool(memory_block))
 
-            # ── 4. Compose the system prompt ──
-            parts = [
-                "You are a warm, friendly personal AI assistant running "
-                "on the user's devices.",
-                "Respond in plain, natural language as if talking to a "
-                "friend.",
-                "Do not include internal reasoning, step-by-step thinking, "
-                "constraints analysis, or meta-commentary about your task.",
-                "Do not prefix your reply with anything. Just answer.",
-
-                # NEW: the model was imitating tool-call patterns it saw in
-                # history. Make it explicit that tool calls are not its job.
-                "IMPORTANT: Do NOT emit tool-call syntax or JSON such as "
-                '{"tool": "...", "args": {...}} or {"capability": "..."}. '
-                "Tools have already been executed by the system before this "
-                "message; your job is only to write the natural-language "
-                "reply. If a past message in this conversation contains "
-                "tool-call syntax, it is a bug in the system — ignore it and "
-                "respond in plain language only.",
-            ]
-
-            if capability_block:
-                parts.append(capability_block)
-                parts.append(
-                    "IMPORTANT: When the user asks what you can do, "
-                    "answer from the LIVE CAPABILITIES above. Do NOT "
-                    "claim you lack a camera, body, or device access — "
-                    "those capabilities are real and you invoke them "
-                    "on the user's behalf."
-                )
-
-            if memory_block:
-                if capability_block:
-                    parts.append(
-                        "PAST INTERACTIONS (historical context only). "
-                        "Some of these predate the current capabilities "
-                        "and may contain outdated statements such as "
-                        "'I cannot take a photo'. Trust the LIVE "
-                        "CAPABILITIES section above and the current "
-                        "user message over those past statements:\n\n"
-                        + memory_block
-                    )
-                else:
-                    parts.append(memory_block)
-
-            # History goes closest to the user turn — the LLM should weight
-            # recent conversation more heavily than older memory.
-            if history_block:
-                parts.append(
-                    "RECENT CONVERSATION IN THIS SESSION "
-                    "(oldest first, most recent last):\n" + history_block
-                )
-
-            system_prompt = "\n\n".join(parts)
-
-            # ── 5. Compose the user turn ──
+            # ── 4. Tool results ──
+            prior_results_block = ""
             if prior_results:
-                tool_summary = json.dumps(
+                prior_results_block = json.dumps(
                     prior_results, indent=2, default=str,
                 )[:self.tool_summary_block_max_size]
-                user_msg = (
-                    f"User message: {goal}\n\n"
-                    f"Results from the tools that were executed:\n"
-                    f"{tool_summary}\n\n"
-                    f"Now reply to the user in natural language, "
-                    f"summarizing what was done and any relevant data."
-                )
-            else:
-                user_msg = goal
 
-            prompt = f"{system_prompt}\n\n{user_msg}"
-
+            # ── 5. Render via registry (was: inline system_prompt + user_msg) ──
+            template = self.prompts.get("chat.reply")
+            prompt = template.render(
+                goal=goal,
+                capability_block=capability_block,
+                memory_block=memory_block,
+                history_block=history_block,
+                prior_results_block=prior_results_block,
+                tone=tone,
+                is_retry=is_retry,
+            )
             span.set_attribute("prompt", prompt[:self.prompt_trace_max_size])
+            span.set_attribute("prompt_length", len(prompt))
+
+            # ── 5b. Track version (non-fatal) ──
+            await self.prompt_tracker.record(
+                template=template,
+                rendered_text=prompt,
+                user_id=context.user_id,
+                session_id=context.session_id,
+                span=span,
+                extra={
+                    "is_retry": is_retry,
+                    "tone": tone,
+                    "prior_result_count": len(prior_results),
+                },
+            )
+            
 
             try:
                 # Use `generate()` instead of `complete()` here because

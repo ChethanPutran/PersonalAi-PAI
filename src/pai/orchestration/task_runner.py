@@ -148,13 +148,23 @@ class TaskRunner(Lifecycle):
                 device_id=target.device_id,
                 plugin=resolution.plugin_name,
             ):
-                await self.authorizer.authorize(
-                    user_id=context.user_id,
-                    capability=resolution.capability,
-                    device_id=target.device_id,
-                    plugin_name=resolution.plugin_name,
-                    task=task_dict,
-                )
+                if target.requires_device:
+                    # Plugin capability — needs full device+plugin authorization.
+                    await self.authorizer.authorize(
+                        user_id=context.user_id,
+                        capability=resolution.capability,
+                        device_id=target.device_id,
+                        plugin_name=resolution.plugin_name,
+                        task=task_dict,
+                    )
+                else:
+                    # Built-in — system-provided, no user-installable plugin, no
+                    # device. Still log it so the trace shows the skip.
+                    logger.debug(
+                        "TaskRunner: skipping authorization for built-in %s (user=%s)",
+                        resolution.capability, context.user_id,
+                    )
+
 
             # ---- 4. Create runtime task via TaskManager ----
             async with tracer.span(

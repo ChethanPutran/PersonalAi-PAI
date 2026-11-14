@@ -65,6 +65,60 @@
     min-height: 18px; text-align: center;
   }
 
+  /* ── Resizable splitters for traces view ── */
+.splitter {
+  position: relative;
+  flex: 0 0 6px;
+  width: 6px;
+  background: var(--border);
+  cursor: col-resize;
+  transition: background 0.15s;
+  user-select: none;
+  touch-action: none;
+  z-index: 5;
+}
+
+/* Grip dots — hidden until hover/drag */
+.splitter::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 3px;
+  height: 3px;
+  margin: -1.5px 0 0 -1.5px;
+  border-radius: 50%;
+  background: transparent;
+  box-shadow:
+    0 -8px 0 transparent,
+    0 -4px 0 transparent,
+    0  4px 0 transparent,
+    0  8px 0 transparent;
+  transition: "background" 0.15s, box-shadow 0.15s;
+  pointer-events: none;
+}
+
+.splitter:hover,
+.splitter.dragging {
+  background: var(--accent);
+}
+
+.splitter:hover::before,
+.splitter.dragging::before {
+  background: var(--bg);
+  box-shadow:
+    0 -8px 0 var(--bg),
+    0 -4px 0 var(--bg),
+    0  4px 0 var(--bg),
+    0  8px 0 var(--bg);
+}
+
+/* Vertical stacked layout at narrow widths — splitters no longer make sense */
+@media (max-width: 900px) {
+  #splitter-detail { display: none; }
+  #trace-detail-pane { width: 100% !important; }
+}
+
   /* ============ App shell ============ */
   #app { display: none; height: 100vh; }
   #app.visible { display: flex; flex-direction: column; }
@@ -741,7 +795,7 @@ header .refresh-now-btn.spinning { animation: spin 0.6s linear; }
             <div class="empty">Loading…</div>
           </div>
         </aside>
-
+        <div class="splitter" id="splitter-aside" title="Drag to resize"></div>
         <article class="trace-detail-panel">
           <div id="trace-header" class="trace-header">
             <div class="empty">Select a trace on the left</div>
@@ -758,6 +812,7 @@ header .refresh-now-btn.spinning { animation: spin 0.6s linear; }
                 <div class="empty" style="padding:20px">—</div>
               </div>
             </div>
+             <div class="splitter" id="splitter-detail" title="Drag to resize"></div>
             <div class="trace-detail-pane" id="trace-detail-pane">
               <div class="placeholder">Select a node in the tree</div>
             </div>
@@ -2377,6 +2432,93 @@ $('btn-refresh-now').addEventListener('click', () => {
   refreshAdmin();
   if (currentView === 'tasks') refreshTasks();
 });
+
+  // ============================================================
+  // Resizable trace panels
+  // ============================================================
+  function setupSplitter(splitter, target, storageKey, { min, max, invert }) {
+    if (!splitter || !target) return;
+
+    // Restore saved width
+    const saved = parseInt(localStorage.getItem(storageKey), 10);
+    if (Number.isFinite(saved) && saved >= min) {
+      target.style.width = saved + 'px';
+    }
+
+    let startX = 0;
+    let startW = 0;
+    let dragging = false;
+
+    const clamp = (w) => Math.max(min, Math.min(max(), w));
+
+    const moveTo = (clientX) => {
+      if (!dragging) return;
+      const dx = clientX - startX;
+      const w = clamp(startW + (invert ? -dx : dx));
+      target.style.width = w + 'px';
+    };
+
+    const onMouseMove = (e) => moveTo(e.clientX);
+    const onTouchMove = (e) => { moveTo(e.touches[0].clientX); e.preventDefault(); };
+
+    const stop = () => {
+      if (!dragging) return;
+      dragging = false;
+      splitter.classList.remove('dragging');
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      const w = parseInt(target.style.width, 10);
+      if (Number.isFinite(w)) localStorage.setItem(storageKey, String(w));
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', stop);
+      window.removeEventListener('touchmove', onTouchMove);
+      window.removeEventListener('touchend', stop);
+    };
+
+    const start = (clientX) => {
+      dragging = true;
+      startX = clientX;
+      startW = target.getBoundingClientRect().width;
+      splitter.classList.add('dragging');
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+      window.addEventListener('mousemove', onMouseMove);
+      window.addEventListener('mouseup', stop);
+      window.addEventListener('touchmove', onTouchMove, { passive: false });
+      window.addEventListener('touchend', stop);
+    };
+
+    splitter.addEventListener('mousedown', (e) => { e.preventDefault(); start(e.clientX); });
+    splitter.addEventListener('touchstart', (e) => {
+      e.preventDefault();
+      start(e.touches[0].clientX);
+    }, { passive: false });
+  }
+
+  // Resize the traces list (aside) — dragging right widens it.
+  setupSplitter(
+    document.getElementById('splitter-aside'),
+    document.querySelector('.traces-list-panel'),
+    'pai_admin_traces_aside_w',
+    {
+      min: 220,
+      max: () => Math.max(300, window.innerWidth - 420),
+      invert: false,
+    },
+  );
+
+  // Resize the trace detail pane — dragging right narrows it (tree grows).
+  setupSplitter(
+    document.getElementById('splitter-detail'),
+    document.getElementById('trace-detail-pane'),
+    'pai_admin_traces_detail_w',
+    {
+      min: 260,
+      max: () => Math.max(300, window.innerWidth - 500),
+      invert: true,
+    },
+  );
+  
 
   // ============================================================
   // Boot

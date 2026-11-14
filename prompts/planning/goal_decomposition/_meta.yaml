@@ -1,0 +1,28 @@
+id: planning.goal_decomposition
+current: v1.0.0
+description: >
+  Decomposes a user goal into a JSON array of executable TaskSpecs.
+  Expects a pre-fetched capability list, optional memory + history
+  context, and the user's timezone so relative times resolve correctly.
+
+# Declared variables — the loader validates the template references
+# only these. Catches typos in templates before they hit production.
+variables:
+  goal:               "User's goal as plain text (untruncated)"
+  capabilities_block: "Pre-rendered capability list (markdown-ish)"
+  memory_block:       "Relevant memories (empty string if none)"
+  history_block:      "Recent conversation turns (empty string if none)"
+  is_retry:           "True if retrying a previous attempt"
+  user_tz:            "IANA timezone name, e.g. Asia/Kolkata"
+  current_time:       "ISO 8601 UTC timestamp"
+  chat_capability_id: "Sentinel id for conversational fallback"
+  source_device:      "Originating device id (optional)"
+  context_json:       "Pretty-printed context dict (without user_id)"
+
+versions:
+  v1.0.0:
+    created_at: "2026-11-10"
+    notes: "Initial extraction from GoalDecomposer._build_prompt"
+  v1.1.0:
+    created_at: "2026-11-14"
+    notes: "Added timezone context — LLM converts local time to UTC"

@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from pai.devices.manager import DeviceManager
 from pai.devices.models import DeviceStatus
 from pai.observability.tracer import get_tracer
+from pai.orchestration.builtin_capabilities import BuiltinCapabilityRegistry
 from pai.plugins.manager import PluginManager
 from pai.storage.repositories.device_plugin import DevicePluginRepository
 from pai.storage.repositories.plugin import UserPluginRepository
@@ -70,6 +71,7 @@ class CapabilityTarget:
     device_type: str
     is_preferred: bool = False
     score: float = 0.0
+    requires_device: bool = True
 
 
 @dataclass(frozen=True)
@@ -102,10 +104,12 @@ class CapabilityRouter(Manager):
         plugin_manager: PluginManager,
         device_manager: DeviceManager,
         session_factory: Optional[Callable[[], AsyncSession]] = None,
+        builtin_registry: Optional[BuiltinCapabilityRegistry] = None,
     ):
         super().__init__(session_factory=session_factory)   
         self.plugin_manager = plugin_manager
         self.device_manager = device_manager
+        self.builtin_registry = builtin_registry
         self._cache: Dict[str, _CacheEntry] = {}
         # user_id → list of async callbacks fired on invalidate
         self._on_change: list = []
@@ -266,11 +270,23 @@ class CapabilityRouter(Manager):
 
             targets_by_cap = await self.describe_capabilities(user_id)
             catalog = {p.id: p for p in self.plugin_manager.get_catalog()}
+            builtin_schemas = (
+                self.builtin_registry.describe_with_schema()
+                if self.builtin_registry is not None else {}
+            )
 
             out: Dict[str, Dict[str, Any]] = {}
             missing_schema = 0
 
             for cap_id, targets in targets_by_cap.items():
+                # ── Builtin: registry is the source of truth ──
+                if cap_id in builtin_schemas:
+                    entry = dict(builtin_schemas[cap_id])
+                    entry["targets"] = targets      # keep the resolved targets
+                    out[cap_id] = entry
+                    continue
+
+                # ── Plugin: look up schema in the catalog ──
                 schema_entry = None
                 for target in targets:
                     plugin = catalog.get(target["plugin_id"])
@@ -288,8 +304,17 @@ class CapabilityRouter(Manager):
                     "targets": targets,
                 }
 
+            # Defensive: builtins in registry but missing from index (shouldn't
+            # happen now, but if it does, we'd rather list them than drop them).
+            for cap_id, entry in builtin_schemas.items():
+                if cap_id not in out:
+                    out[cap_id] = entry
+
             span.set_attribute("capability_count", len(out))
-            span.set_attribute("missing_schema_count", missing_schema)
+            span.set_attribute("missing_schema_count", missing_schema)      # should be 0
+            span.set_attribute(
+                "builtin_capability_count", len(builtin_schemas),
+            )
             return out
 
     # ------------------------------------------------------------------
@@ -308,13 +333,35 @@ class CapabilityRouter(Manager):
     async def _build_index(self, user_id: str) -> Dict[str, List[CapabilityTarget]]:
         tracer = get_tracer()
         async with tracer.span("router.build_index", user_id=user_id) as span:
+            # ── Built-ins: unconditional, don't need devices or plugins ──
+            index: Dict[str, List[CapabilityTarget]] = {}
+            if self.builtin_registry is not None:
+                for cap_id, entry in self.builtin_registry.describe_with_schema().items():
+                    for t in entry.get("targets", []):
+                        index.setdefault(cap_id, []).append(
+                            CapabilityTarget(
+                                capability=cap_id,
+                                plugin_id=t.get("plugin_id", "builtin"),
+                                device_id=t.get("device_id", "self"),
+                                executor_id=t.get("executor_id", "builtin_executor"),
+                                device_type=t.get("device_type", "server"),
+                                score=100.0,
+                                requires_device=False, # built-ins don't require a device to run
+                            )
+                        )
+                span.set_attribute(
+                    "builtin_capabilities", sorted(
+                        self.builtin_registry.describe_with_schema().keys()
+                    ),
+                )
+
 
             # ---- 1. User-enabled plugins ----
             enabled_ids = await self._user_enabled_plugin_ids(user_id)
             span.set_attribute("user_enabled_plugins", sorted(enabled_ids))
             if not enabled_ids:
                 span.set_attribute("stage", "no_user_plugins")
-                return {}
+                return index
 
             # ---- 2. Those in the catalog with capabilities ----
             catalog = {p.id: p for p in self.plugin_manager.get_catalog()}
@@ -335,8 +382,8 @@ class CapabilityRouter(Manager):
             span.set_attribute("capable_plugins", sorted(capable.keys()))
             if not capable:
                 span.set_attribute("stage", "no_capable_plugins")
-                return {}
-
+                return index
+            
             # ---- 3. User's devices ----
             devices = await self.device_manager.list_devices(user_id)
             online: Dict[str, Any] = {}
@@ -375,7 +422,7 @@ class CapabilityRouter(Manager):
 
             if not online:
                 span.set_attribute("stage", "no_online_devices")
-                return {}
+                return index
 
             # ---- 4. Per-device plugin state ----
             # Only device plugins appear here — server plugins are not
@@ -390,7 +437,6 @@ class CapabilityRouter(Manager):
             )
 
             # ---- 5. Cross-product ----
-            index: Dict[str, List[CapabilityTarget]] = {}
             skipped: List[Dict[str, str]] = []
             server_plugins: List[str] = []
 
@@ -508,6 +554,18 @@ class CapabilityRouter(Manager):
             capability=capability,
             user_id=user_id,
         ) as span:
+
+            # Built-ins should never be missing from the index — if they are,
+            # it's a wiring bug, not a user problem.
+            if self.builtin_registry is not None and self.builtin_registry.has(capability):
+                return CapabilityError(
+                    capability=capability,
+                    reason=(
+                        f"Built-in '{capability}' is registered but missing from "
+                        f"the index — router wiring is broken."
+                    ),
+                    detail={"stage": "builtin_missing_from_index"},
+                )
 
             catalog = self.plugin_manager.get_catalog()
             providers = [p for p in catalog if capability in p.capabilities]

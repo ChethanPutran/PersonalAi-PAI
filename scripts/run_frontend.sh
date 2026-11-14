@@ -1,3 +1,2 @@
 cd frontend/pai_mobile
-flutter pub get
-flutter run 
+GDK_BACKEND=x11 flutter run -d linux
