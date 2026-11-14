@@ -2,7 +2,11 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:pai_mobile/notifications/notification_service.dart';
+import 'package:pai_mobile/notifications/push_service.dart';
 import 'package:pai_mobile/protocol/device_enums.dart';
+import 'package:pai_mobile/schedules/schedule_service.dart';
+import 'package:pai_mobile/ui/schedules/schedules_screen.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'auth/auth_service.dart';
@@ -37,9 +41,8 @@ import 'profile/profile_service.dart';
 import 'profile/settings_service.dart';
 import 'ui/profile/profile_screen.dart';
 
-
-import 'tasks/local_task_runner.dart';             // NEW
-import 'ui/tasks/test_task_screen.dart';           // NEW
+import 'tasks/local_task_runner.dart'; // NEW
+import 'ui/tasks/test_task_screen.dart'; // NEW
 
 class PaiApp extends StatefulWidget {
   const PaiApp({super.key});
@@ -53,6 +56,7 @@ class _PaiAppState extends State<PaiApp> {
   late final ApiClient api;
   ChatService? _chatService;
   TaskService? _taskService;
+  ScheduleService? _scheduleService;
 
   String? deviceId;
   DeviceInfo? _device;
@@ -60,29 +64,30 @@ class _PaiAppState extends State<PaiApp> {
   PluginService? pluginService;
   PluginCommandHandler? pluginCommandHandler;
   DeviceConnectionService? connectionService;
-  CapabilityDispatcher? _dispatcher;    
-  LocalTaskRunner? _testTaskRunner; 
+  CapabilityDispatcher? _dispatcher;
+  LocalTaskRunner? _testTaskRunner;
 
   ProfileService? _profileService;
   // in _PaiAppState, replace the default construction:
-late final SettingsService _settingsService = SettingsService(
-  initial: {'notifications': true, 'auto_sync': true},
-  onChanged: (values) async {
-    final prefs = await SharedPreferences.getInstance();
-    for (final e in values.entries) {
-      await prefs.setBool('settings.${e.key}', e.value);
-    }
-  },
-);
+  late final SettingsService _settingsService = SettingsService(
+    initial: {'notifications': true, 'auto_sync': true},
+    onChanged: (values) async {
+      final prefs = await SharedPreferences.getInstance();
+      for (final e in values.entries) {
+        await prefs.setBool('settings.${e.key}', e.value);
+      }
+    },
+  );
 
   /// Broadcast stream of `task.*` / `plan.*` events received over the WS.
   /// Fed by [_handleDeviceMessage]; consumed by TasksScreen for auto-refresh.
   final _taskEventsController =
-      StreamController<Map<String, dynamic>>.broadcast();   // NEW
+      StreamController<Map<String, dynamic>>.broadcast(); // NEW
 
   bool _booting = true;
   bool _initializing = false;
   String? _initError;
+  static const int _remindersTabIndex = 5;
 
   int page = 0;
 
@@ -91,6 +96,13 @@ late final SettingsService _settingsService = SettingsService(
     super.initState();
     auth = AuthService(baseUrl: AppConfig.baseUrl);
     api = ApiClient(baseUrl: AppConfig.baseUrl, auth: auth);
+
+    PushService.onNotificationTap = (data) {
+  // Reminders tab is index 4 (Chat=0, Tasks=1, Plugins=2, Test=3, Profile=4, Reminders=5)
+  // ← adjust if your order differs.
+  if (mounted) setState(() => page = _remindersTabIndex);
+};
+
     _bootstrap();
   }
 
@@ -103,6 +115,8 @@ late final SettingsService _settingsService = SettingsService(
 
     if (!mounted) return;
     setState(() => _booting = false);
+
+    await NotificationService.init();
 
     if (auth.isAuthenticated) {
       unawaited(_initialize());
@@ -135,9 +149,7 @@ late final SettingsService _settingsService = SettingsService(
       // 2. Plugin runtime + service.
       // --------------------------------------------------------
       final runtime = PluginRuntime();
-      final repository = PluginRepository(
-        baseUrl: AppConfig.pluginRegistryUrl,
-      );
+      final repository = PluginRepository(baseUrl: AppConfig.pluginRegistryUrl);
       final installer = PluginInstaller(repository);
       final registry = PluginRegistry();
 
@@ -153,16 +165,23 @@ late final SettingsService _settingsService = SettingsService(
       final chat = _chatService ??= ChatService(api);
       await chat.restoreSession();
 
+      _scheduleService ??= ScheduleService(api: api);
+
+      // TaskService was never being constructed. `build()` expects it
+      // non-null, but nothing in `_initialize()` ever assigned it — the
+      // `_taskService!` line threw every time the app finished booting.
+      // `??=` matches the ChatService pattern so a Retry after a failed
+      // init reuses the existing instance rather than creating a duplicate.
+      final task = _taskService ??= TaskService(api);
+
+      _profileService ??= ProfileService(api: api);
+
       _profileService ??= ProfileService(api: api);
 
       // --------------------------------------------------------
       // 3. UI-facing manager.
       // --------------------------------------------------------
-      final manager = PluginManager(
-        service: service,
-        api: api,
-        deviceId: id,
-      );
+      final manager = PluginManager(service: service, api: api, deviceId: id);
 
       await manager.loadCatalog();
 
@@ -179,7 +198,7 @@ late final SettingsService _settingsService = SettingsService(
         runtime: runtime,
       );
 
-      final testRunner = LocalTaskRunner(dispatcher: dispatcher);   // NEW
+      final testRunner = LocalTaskRunner(dispatcher: dispatcher); // NEW
 
       // 6. WebSocket.
       final connection = DeviceConnectionService(
@@ -198,11 +217,16 @@ late final SettingsService _settingsService = SettingsService(
         return await _handleDeviceControl(op: op, requestId: requestId);
       });
 
-      // Add the invoke handler to the connection service so that when an 'invoke' message is received, 
+      // Add the invoke handler to the connection service so that when an 'invoke' message is received,
       // it will be dispatched to the CapabilityDispatcher.
       connection.setInvokeHandler(
-      ({required capability, required parameters}) =>
-          dispatcher.invoke(capability: capability, parameters: parameters),
+      ({required capability, required parameters}) async {
+        final result = await _runBuiltinOrDispatch(capability, parameters);
+        // Coerce to Map — matches what the protocol needs.
+        if (result is Map<String, dynamic>) return result;
+        if (result is Map) return result.cast<String, dynamic>();
+        return {'result': result};
+      },
     );
 
       if (!mounted) {
@@ -216,12 +240,16 @@ late final SettingsService _settingsService = SettingsService(
         pluginService = service;
         pluginCommandHandler = commandHandler;
         connectionService = connection;
-        _dispatcher = dispatcher;   
-         _testTaskRunner = testRunner;             
+        _dispatcher = dispatcher;
+        _testTaskRunner = testRunner;
         _initializing = false;
       });
 
       await connection.connect();
+
+      // Register for push (best-effort).
+      unawaited(PushService.init(api: api));
+      unawaited(PushService.registerDevice(id));
 
       debugPrint('[PaiApp] Initialization complete');
     } on UnauthorizedException {
@@ -267,20 +295,21 @@ late final SettingsService _settingsService = SettingsService(
     required String requestId,
   }) async {
     switch (op) {
-    case DeviceControlOp.cancel:
+      case DeviceControlOp.cancel:
         // `DeviceConnectionService._handleControl` already tracks the
         // cancellation internally and will discard the eventual result.
         // We have no atomic-op work to unwind here, so just acknowledge.
         return true;
 
-    case DeviceControlOp.pause:
-    case DeviceControlOp.resume:
-      // No capability currently supports real pause/resume. Return
+      case DeviceControlOp.pause:
+      case DeviceControlOp.resume:
+        // No capability currently supports real pause/resume. Return
         // false so the backend knows to fall back to its wrapper-level
         // checkpoint. When a plugin (e.g. camera.record) starts
         // supporting pause, this handler forwards to it.
         return false;
-  }}
+    }
+  }
 
   // ----------------------------------------------------------------
   // Device messages
@@ -357,25 +386,17 @@ late final SettingsService _settingsService = SettingsService(
     final parameters =
         (message['parameters'] as Map?)?.cast<String, dynamic>() ?? {};
 
-    final dispatcher = _dispatcher;
     final connection = connectionService;
 
-    if (dispatcher == null || connection == null) {
-      debugPrint('[PaiApp] invoke dropped: dispatcher/connection null');
-      return;
-    }
-    if (requestId.isEmpty || capability.isEmpty) {
-      debugPrint('[PaiApp] invoke: missing request_id or capability');
+    if (connection == null) {
+      debugPrint('[PaiApp] invoke dropped: connection null');
       return;
     }
 
     debugPrint('[PaiApp] invoke: $capability (req=$requestId)');
 
     try {
-      final result = await dispatcher.invoke(
-        capability: capability,
-        parameters: parameters,
-      );
+      final result = await _runBuiltinOrDispatch(capability, parameters);
 
       await connection.sendResult(
         requestId: requestId,
@@ -393,6 +414,30 @@ late final SettingsService _settingsService = SettingsService(
     }
   }
 
+  Future<dynamic> _runBuiltinOrDispatch(
+    String capability,
+    Map<String, dynamic> parameters,
+  ) async {
+
+    // --- Built-in capabilities shadow the plugin dispatcher ---
+    switch (capability) {
+      case 'system.notifications.show':
+        await NotificationService.show(
+          title: parameters['title']?.toString() ?? 'PAI reminder',
+          body: parameters['body']?.toString() ?? '',
+          id: DateTime.now().millisecondsSinceEpoch & 0x7fffffff,
+        );
+        return {'shown': true};
+    }
+
+    // ---- Everything else → plugin system ----
+    final dispatcher = _dispatcher;
+    if (dispatcher == null) {
+      throw StateError('No dispatcher available');
+    }
+    return dispatcher.invoke(capability: capability, parameters: parameters);
+  }
+
   // ----------------------------------------------------------------
   // Plugin sync (NEW)
   // ----------------------------------------------------------------
@@ -405,14 +450,16 @@ late final SettingsService _settingsService = SettingsService(
     try {
       final plugins = manager.plugins
           .where((p) => p.isInstalled)
-          .map((p) => {
-                'id': p.id,
-                'version': p.version,
-                'enabled': p.isEnabled,
-                'capabilities': p.capabilityDetails
-                    .map((c) => c.id)
-                    .toList(growable: false),
-              })
+          .map(
+            (p) => {
+              'id': p.id,
+              'version': p.version,
+              'enabled': p.isEnabled,
+              'capabilities': p.capabilityDetails
+                  .map((c) => c.id)
+                  .toList(growable: false),
+            },
+          )
           .toList(growable: false);
 
       await connection.send({
@@ -500,9 +547,17 @@ late final SettingsService _settingsService = SettingsService(
     pluginManager = null;
     pluginService = null;
     pluginCommandHandler = null;
-    _dispatcher = null;                                // NEW
-    _testTaskRunner?.dispose();                        // NEW
-_testTaskRunner = null;                            // NEW
+    _dispatcher = null;
+    _testTaskRunner?.dispose();
+    _testTaskRunner = null;
+
+    // These were not being reset. Without this, a re-login as a
+    // different user reuses the cached ChatService (with the previous
+    // user's `_sessionId`) and TaskService.
+    _chatService = null;
+    _taskService = null;
+    _scheduleService = null;
+    await PushService.unregisterDevice();   
 
     await auth.logout();
 
@@ -520,8 +575,8 @@ _testTaskRunner = null;                            // NEW
 
   @override
   void dispose() {
-    _taskEventsController.close();                     // NEW
-    _testTaskRunner?.dispose();                        // NEW
+    _taskEventsController.close(); // NEW
+    _testTaskRunner?.dispose(); // NEW
     connectionService?.dispose();
     super.dispose();
   }
@@ -536,9 +591,7 @@ _testTaskRunner = null;                            // NEW
     if (_booting) {
       return const MaterialApp(
         debugShowCheckedModeBanner: false,
-        home: Scaffold(
-          body: Center(child: CircularProgressIndicator()),
-        ),
+        home: Scaffold(body: Center(child: CircularProgressIndicator())),
       );
     }
 
@@ -608,9 +661,22 @@ _testTaskRunner = null;                            // NEW
     }
 
     // 4. Still initializing.
+    //
+    // Guard every field that the "full app" section below dereferences
+    // with `!`. Previously only `deviceId`, `pluginManager`, and
+    // `connectionService` were checked — but `_chatService`,
+    // `_taskService`, `_testTaskRunner`, and `_profileService` are also
+    // dereferenced with `!`, so a missing assignment in `_initialize()`
+    // produced a raw "null check operator" crash instead of the
+    // spinner. Better to show "Connecting..." for another frame than to
+    // explode.
     if (deviceId == null ||
         pluginManager == null ||
-        connectionService == null) {
+        connectionService == null ||
+        _chatService == null ||
+        _taskService == null ||
+        _testTaskRunner == null ||
+        _profileService == null) {
       return const MaterialApp(
         debugShowCheckedModeBanner: false,
         home: Scaffold(
@@ -627,34 +693,43 @@ _testTaskRunner = null;                            // NEW
         ),
       );
     }
-
-    // Memoize services — create once, not every build.
-    final chatService = _chatService ??= ChatService(api);
-    final taskService = _taskService ??= TaskService(api);
-
-    
+    // build() — after the "still initializing" guard
+    // By this point _initialize() has completed and set both. The
+    // `??=` fallback was masking a real failure mode (a ChatService
+    // that never restored its session).
+    final chatService = _chatService!;
+    final taskService = _taskService!;
 
     // 5. Full app.
     final screens = <Widget>[
-    ChatScreen(service: chatService, deviceId: deviceId!),
-    TasksScreen(
-      service: taskService,
-      taskEvents: _taskEventsController.stream,
-    ),
-    PluginsScreen(manager: pluginManager!),
-    TestTaskScreen(
-      pluginManager: pluginManager!,
-      runner: _testTaskRunner!,
-    ),
-    ProfileScreen(
-    service: _profileService!,
-    settings: _settingsService,
-    currentDeviceId: deviceId,
-    onLogout: _logout,
-  ),
-  ];
+      ChatScreen(service: chatService, deviceId: deviceId!),
+      TasksScreen(
+        service: taskService,
+        taskEvents: _taskEventsController.stream,
+      ),
+      PluginsScreen(manager: pluginManager!),
+      TestTaskScreen(pluginManager: pluginManager!, runner: _testTaskRunner!),
+      SchedulesScreen(
+       service: _scheduleService!,
+       taskService: taskService,
+  events: _taskEventsController.stream,
+  profileService: _profileService,
+  currentDeviceId: deviceId,
+      ),
+      ProfileScreen(
+        service: _profileService!,
+        settings: _settingsService,
+        currentDeviceId: deviceId,
+        onLogout: _logout,
+      ),
+    ];
 
     return MaterialApp(
+      // When the user changes, Flutter sees a different key → destroys the
+      // old widget tree (calling dispose on ChatScreen, etc.) and builds
+      // fresh. Without this, IndexedStack keeps the old user's ChatScreen
+      // (and its messages, sessions, status WS) alive across logins.
+      key: ValueKey('app-${auth.userId ?? "anon"}'),
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
@@ -672,21 +747,17 @@ _testTaskRunner = null;                            // NEW
           ],
         ),
         // >>> The change <<<
-        body: IndexedStack(
-          index: page,
-          children: screens,
-        ),
+        body: IndexedStack(index: page, children: screens),
         bottomNavigationBar: NavigationBar(
           selectedIndex: page,
           onDestinationSelected: (i) => setState(() => page = i),
           destinations: const [
             NavigationDestination(icon: Icon(Icons.chat), label: 'Chat'),
             NavigationDestination(icon: Icon(Icons.task), label: 'Tasks'),
-            NavigationDestination(
-                icon: Icon(Icons.extension), label: 'Plugins'),
-                NavigationDestination(
-      icon: Icon(Icons.bug_report), label: 'Test'), 
-       NavigationDestination(icon: Icon(Icons.person), label: 'Profile'),
+            NavigationDestination(icon: Icon(Icons.extension),label: 'Plugins'),
+            NavigationDestination(icon: Icon(Icons.bug_report), label: 'Test'),
+            NavigationDestination(icon: Icon(Icons.alarm), label: 'Reminders'),
+            NavigationDestination(icon: Icon(Icons.person), label: 'Profile'),
           ],
         ),
       ),

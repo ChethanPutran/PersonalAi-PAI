@@ -93,6 +93,7 @@ class DeviceConnectionService {
     _invokeHandler = handler;
   }
 
+  
   /// Optional — respond to the backend's plugin reconciliation query.
   void setPluginSyncHandler(PluginSyncHandler handler) {
     _pluginSyncHandler = handler;

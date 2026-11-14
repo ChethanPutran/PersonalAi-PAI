@@ -46,3 +46,23 @@ invoke("pai.camera", "camera.capture") → returns the plugin's map.
 
 If both of those pass, the dynamic plugin system is working end-to-end and you can now write the Dart-side installer to fetch and drop the .so files automatically.
 
+Part 4 — FCM/APNs push
+This is the big one. Setup is required in Firebase console — I'll document that first, then code.
+
+4.0 Prerequisites (one-time)
+Create a Firebase project at https://console.firebase.google.com
+
+Add Android app (package name from android/app/build.gradle → applicationId)
+
+Add iOS app (bundle id from ios/Runner.xcodeproj)
+
+Download google-services.json → android/app/
+
+Download GoogleService-Info.plist → ios/Runner/
+
+Enable Push capability in Xcode → Runner target → Signing & Capabilities → + Push Notifications → + Background Modes → Remote notifications
+
+In Firebase console → Project Settings → Cloud Messaging → upload APNs auth key (.p8) from Apple Developer portal
+
+In Firebase console → Project Settings → Service accounts → Generate new private key → save as service-account.json on the backend, do not commit
+
