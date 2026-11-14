@@ -22,13 +22,31 @@ from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pai.core.lifecycle import Lifecycle
+from pai.event_bus.bus import EventBus
 from pai.session.manager import SessionManager
+
 
 T = TypeVar("T")
 
 
 class Manager(Lifecycle):
-    """Shared base for every manager in PAI."""
+    """Base for all orchestrator-owned components.
+
+    Every subclass gets two event-publishing helpers so none of them
+    reimplement the plumbing:
+
+      • `_publish(event_type, data)` — awaited. Use when the caller
+        needs the event to be *in the queue* before continuing (e.g.
+        before a state change that the consumer might race).
+
+      • `_emit(event_type, data)` — fire-and-forget. Use for status
+        and observability. Spawns a task with a 100ms timeout so a
+        full queue can never stall the component's hot path.
+
+    Neither helper raises if the bus is missing or the queue is full —
+    event publication is always best-effort. If you need delivery
+    guarantees, that's a signal you want a DB write, not an event.
+    """
 
     #: Human-readable identifier, used only for logging and status.
     #: Subclasses should override this — e.g. `name = "plugin_manager"`.
@@ -37,7 +55,10 @@ class Manager(Lifecycle):
     def __init__(
         self,
         *,
-        session_factory: Optional[Callable[[], AsyncSession]] = None
+        event_bus: Optional[EventBus] = None,
+        session_factory: Optional[Callable[[], AsyncSession]] = None,
+         **kwargs: Any
+
     ) -> None:
         self._sessions: Optional[SessionManager] = (
             SessionManager(session_factory) if session_factory else None
@@ -47,6 +68,11 @@ class Manager(Lifecycle):
         self._session_factory = session_factory
         self._initialized = False
         self._init_lock: Optional[asyncio.Lock] = None
+        self._event_bus = event_bus
+        
+    @property
+    def event_bus(self) -> EventBus:
+        return self._event_bus
 
     # ------------------------------------------------------------------
     # Lifecycle (final — subclass hooks live in _on_initialize/_on_shutdown)
@@ -165,3 +191,6 @@ class Manager(Lifecycle):
     def __repr__(self) -> str:
         state = "ready" if self._initialized else "uninitialized"
         return f"<{type(self).__name__} {self.name!r} {state}>"
+
+
+   

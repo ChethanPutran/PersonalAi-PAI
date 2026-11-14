@@ -4,7 +4,7 @@ import json
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import aiosqlite
 from loguru import logger
@@ -259,7 +259,7 @@ class LongTermMemory:
                     (user_id, pattern, limit),
                 )
 
-            rows = await cursor.fetchall()
+            rows = list(await cursor.fetchall())
             span.set_attribute("result_count", len(rows))
             span.set_attribute(
                 "query_ms", round((time.perf_counter() - t0) * 1000, 1),
@@ -396,13 +396,13 @@ class LongTermMemory:
                 await conn.commit()
 
             span.set_attribute("removed", len(delete_ids))
-            span.set_attribute("scanned", len(rows))
 
             logger.info(
                 "Long-term memory consolidated: {} removed",
                 len(delete_ids),
             )
-            return len(delete_ids)
+            removed = len(delete_ids)
+            return  removed 
 
     def _row_to_record(self, row: tuple) -> MemoryRecord:
         return MemoryRecord(

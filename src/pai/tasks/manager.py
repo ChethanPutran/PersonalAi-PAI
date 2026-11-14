@@ -18,6 +18,7 @@ from pai.tasks.models import (
     TaskSource,
     TaskStatus,
 )
+from pai.tasks.store import TaskStoreProtocol
 from pai.tasks.store import TaskStore
 from pai.common.manager import Manager
 
@@ -27,7 +28,7 @@ class TaskManager(Manager):
     def __init__(
         self,
         *,
-        store: TaskStore,
+        store: TaskStoreProtocol,
         scheduler: ExecutorScheduler,
         executor_manager: ExecutorManager,
         event_bus: EventBus,
@@ -46,6 +47,20 @@ class TaskManager(Manager):
             raise RuntimeError("TaskManager has no ExecutorScheduler")
         await self.scheduler.initialize()
 
+        # Recover tasks left RUNNING/QUEUED by a prior process. In-memory
+        # TaskStore doesn't have this method — that's fine, this is a
+        # no-op for it because memory is fresh on restart.
+        recover = getattr(self.store, "recover_orphaned", None)
+        if recover is not None:
+            try:
+                recovered = await recover()
+                if recovered:
+                    logger.warning(
+                        "TaskManager: recovered %d orphaned task(s)",
+                        recovered,
+                    )
+            except Exception:
+                logger.exception("TaskManager: recover_orphaned failed")
 
     async def _on_shutdown(self) -> None:
         running = list(self._running_tasks.values())
@@ -231,6 +246,150 @@ class TaskManager(Manager):
             span.set_attribute("task_id", task.id)
             return task
 
+
+
+    async def complete_via_push(
+        self,
+        task_id: str,
+        *,
+        payload: Dict[str, Any],
+    ) -> Task:
+        """Mark a task completed because delivery happened out-of-band
+        (push notification, SMS, etc.). Walks the lifecycle explicitly so
+        the Task never gets stuck in CREATED."""
+        task = await self.store.require(task_id)
+
+        if task.terminal:
+            logger.debug(
+                "complete_via_push: task %s already %s",
+                task_id, task.status.value,
+            )
+            return task
+
+        TaskLifecycle.queue(task)
+        await self.store.save(task)
+        await self._publish("task.queued", task.to_dict())
+
+        TaskLifecycle.start(task)
+        await self.store.save(task)
+        await self._publish("task.started", task.to_dict())
+
+        result = TaskResult(
+            success=True,
+            output=payload,
+            device_id=task.device_id,
+        )
+        TaskLifecycle.complete(task, result)
+        await self.store.save(task)
+        await self._publish("task.completed", task.to_dict())
+        return task
+
+
+    async def fail_undelivered(
+        self,
+        task_id: str,
+        reason: str,
+        *,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> Task:
+        """Mark a task failed without ever executing it.
+
+        Used when *no* delivery channel is available: push disabled / no
+        push token / WS submit rejected / unexpected send error. The task
+        still walks the normal lifecycle so state history stays coherent
+        and every event a real failure would emit is emitted here too —
+        TasksScreen and the admin dashboard see an ordinary failure, just
+        with `metadata.undelivered = true`.
+
+        Does NOT retry. Delivery failures are retried by the scheduler's
+        `catch_up` policy, not by `TaskManager`. Retrying here would just
+        re-hit the same unavailable channel on the next tick and burn
+        through the task's retry budget.
+        """
+        tracer = get_tracer()
+        async with tracer.span(
+            "task.fail_undelivered",
+            task_id=task_id,
+            reason=reason,
+        ) as span:
+
+            task = await self.store.require(task_id)
+
+            # Terminal or operator-held — respect that, don't override.
+            if task.terminal:
+                span.set_attribute("skipped", "already_terminal")
+                span.set_attribute("status", task.status.value)
+                logger.debug(
+                    "fail_undelivered: task %s already %s",
+                    task_id, task.status.value,
+                )
+                return task
+
+            if task.status == TaskStatus.PAUSED:
+                span.set_attribute("skipped", "paused")
+                logger.debug(
+                    "fail_undelivered: task %s is paused, leaving as-is",
+                    task_id,
+                )
+                return task
+
+            # ----------------------------------------------------------
+            # Walk forward so `fail()` is a legal transition.
+            # Each step is guarded by the current status — no-op when
+            # the task has already moved past that state.
+            # ----------------------------------------------------------
+
+            # CREATED → INITIALIZED
+            if task.status == TaskStatus.CREATED:
+                TaskLifecycle.initialize(
+                    task,
+                    capability=task.capability,
+                    device_id=task.device_id,
+                    executor_id=task.executor_id,
+                )
+                await self._publish("task.initialized", task.to_dict())
+
+            # INITIALIZED or RETRYING → QUEUED
+            # (submit() would do the same; we're mirroring that path.)
+            if task.status in {TaskStatus.INITIALIZED, TaskStatus.RETRYING}:
+                TaskLifecycle.queue(task)
+                await self._publish("task.queued", task.to_dict())
+
+            # QUEUED → RUNNING
+            if task.status == TaskStatus.QUEUED:
+                TaskLifecycle.start(task)
+                await self._publish("task.started", task.to_dict())
+
+            # ----------------------------------------------------------
+            # Fail with a structured result.
+            # ----------------------------------------------------------
+            result = TaskResult(
+                success=False,
+                error=reason,
+                executor_id=task.executor_id,
+                device_id=task.device_id,
+                started_at=task.started_at,
+                completed_at=task.completed_at,
+                metadata={
+                    "undelivered": True,
+                    "reason": reason,
+                    **(extra or {}),
+                },
+            )
+
+            TaskLifecycle.fail(task, reason, result)
+            await self.store.save(task)
+            await self._publish("task.failed", task.to_dict())
+
+            span.set_attribute("status", "failed")
+            span.set_attribute("final_state", task.status.value)
+
+            logger.warning(
+                "Task %s failed (undelivered): %s",
+                task_id, reason,
+            )
+            return task
+    
     # ------------------------------------------------------------------
     # Submit / execute
     # ------------------------------------------------------------------

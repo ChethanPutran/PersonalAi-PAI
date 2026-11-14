@@ -116,7 +116,7 @@ class ContextManager(Manager):
     name = "context_manager"
 
     def __init__(self, max_history: int = 50):
-        super().__init__()
+        super().__init__(event_bus=None)
 
         self.max_history = max_history
 

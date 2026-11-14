@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Protocol
 
 from pai.tasks.models import Task, TaskStatus
 
@@ -9,6 +9,26 @@ from pai.tasks.models import Task, TaskStatus
 class TaskNotFoundError(KeyError):
     """Raised when a task does not exist."""
 
+class TaskStoreProtocol(Protocol):
+    async def create(self, task: Task) -> Task: ...
+    async def save(self, task: Task) -> Task: ...
+    async def upsert(self, task: Task) -> Task: ...
+    async def get(self, task_id: str) -> Optional[Task]: ...
+    async def require(self, task_id: str) -> Task: ...
+    async def delete(self, task_id: str) -> bool: ...
+    async def list(
+        self,
+        *,
+        status: Optional[TaskStatus] = None,
+        user_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> List[Task]: ...
+    async def count(
+        self,
+        *, status: Optional[TaskStatus] = None,
+    ) -> int: ...
+    async def clear(self) -> None: ...
 
 class TaskStore:
     """

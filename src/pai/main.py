@@ -11,6 +11,9 @@ from loguru import logger
 from pai.api.middleware.auth import AuthMiddleware
 from pai.api.middleware.logging import LoggingMiddleware
 from pai.api.routes import auth, chat, devices, plugins, system, tasks
+from pai.api.routes.schedules import router as schedules_router
+from pai.api.routes.push_tokens import router as push_tokens_router
+
 from pai.api.routes import observability as observability_routes
 from pai.app_context import (
     PAIAppContext,
@@ -48,9 +51,41 @@ def create_lifespan(context: PAIAppContext):
         logger.info("Creating database schema...")
         await context.database.initialize()
 
-        
+        # ── 3. Event bus ──
+        #
+        # `EventBus` was being constructed but never started. Nothing
+        # in `orchestrator.initialize()` calls `.start()`, so the
+        # worker task that drains the queue and dispatches to
+        # subscribers was never created. Every `event_bus.publish()`
+        # succeeded — the event went into the queue — but `_dispatch()`
+        # was never called, so subscribers (including the chat status
+        # WS route's `_on_status`) never fired.
+        #
+        # Start it before the orchestrator, so any manager that wants
+        # to subscribe during its own `_on_initialize()` has a live bus.
+        await context.orchestrator._event_bus.start()
+
+
+        # ── 4. Status bridges ──
+        #
+        # Register BEFORE the orchestrator initializes so any events
+        # published during manager `_on_initialize()` are caught. No
+        # manager currently publishes at init, but this is defensive:
+        # moving a publish into an init hook later shouldn't quietly
+        # drop events because the bus subscriber list was still empty.
+        from pai.orchestration.status_bridge import StatusBridge
+        bridge = StatusBridge(
+            event_bus=context.orchestrator._event_bus,
+            device_manager=context.orchestrator.device_manager,
+        )
+        await bridge.start()
+        app.state.status_bridge = bridge
+        logger.info("EventBus started")
+
+            
         # ── 6. Orchestrator final flag ──
         await context.orchestrator.initialize()
+
 
         logger.info(
             "Startup complete: {} plugins, {} devices, {} executors, "
@@ -65,8 +100,19 @@ def create_lifespan(context: PAIAppContext):
         )
         logger.info("Tracing enabled → data/traces")
 
+        context.orchestrator.scheduler_service.start()
         yield
 
+        # ── Shutdown ──
+        # Unsubscribe bridges before tearing down the bus so no dispatch
+        # races the shutdown (a bridge handler firing during bus.shutdown
+        # would try to publish or send through a half-closed context).
+        for sub_id in getattr(app.state, "bridge_subscriptions", []):
+            try:
+                await context.orchestrator.event_bus.unsubscribe(sub_id)
+            except Exception:
+                pass
+        await context.orchestrator.scheduler_service.stop()
         logger.info("Shutting down Personal AI System...")
 
         async def _step(name: str, coro, timeout: float = 5.0):
@@ -91,6 +137,11 @@ def create_lifespan(context: PAIAppContext):
         # 3. Database last — its connections are the session_factory
         #    that the managers above used.
         await _step("database", context.database.close(), timeout=3.0)
+
+
+        # 4. Unsubscribe from task events so the bus can drain and stop.
+        if context._task_event_subscription:
+            context._task_event_subscription = None
 
         logger.info("Shutdown complete")
 
@@ -126,6 +177,8 @@ def create_app(context: PAIAppContext) -> FastAPI:
     app.include_router(chat.router, prefix="/api/v1")
     app.include_router(system.router, prefix="/api/v1")
     app.include_router(observability_routes.router, prefix="/api/v1")
+    app.include_router(schedules_router, prefix="/api/v1")
+    app.include_router(push_tokens_router, prefix="/api/v1")
 
     @app.get("/")
     async def root(context: PAIAppContext = Depends(get_app_context)):

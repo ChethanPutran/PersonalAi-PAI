@@ -14,7 +14,7 @@ from sqlalchemy import (
     UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-
+from uuid import uuid4
 from pai.storage.database import Base
 
 
@@ -234,6 +234,97 @@ class UserPluginModel(Base):
 
     __table_args__ = (
         UniqueConstraint("user_id", "plugin_id", name="uq_user_plugin"),
+    )
+
+
+# ============================================================
+# Schedules
+# ============================================================
+
+class ScheduleModel(Base):
+    __tablename__ = "schedules"
+
+    id: Mapped[str] = mapped_column(
+        String, primary_key=True, default=lambda: str(uuid4()),
+    )
+    user_id: Mapped[str] = mapped_column(
+        String, ForeignKey("users.id", ondelete="CASCADE"), index=True,
+    )
+    target_device_id: Mapped[Optional[str]] = mapped_column(
+        String, nullable=True,
+    )
+
+    title: Mapped[str] = mapped_column(String(255))
+    body: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    kind: Mapped[str] = mapped_column(String(16))
+    fire_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    cron: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    interval_seconds: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True,
+    )
+    timezone: Mapped[str] = mapped_column(String(64), default="UTC")
+
+    capability: Mapped[str] = mapped_column(
+        String(128), default="system.notifications.show",
+    )
+    parameters: Mapped[dict] = mapped_column(JSON, default=dict)
+    catch_up: Mapped[str] = mapped_column(String(8), default="once")
+
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, index=True,
+    )
+    last_fired_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    next_fire_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+    __table_args__ = (Index("ix_schedules_due", "enabled", "next_fire_at"),)
+
+# ============================================================
+# Tasks
+# ============================================================
+class TaskModel(Base):
+    __tablename__ = "tasks"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+
+    # --- indexed query/sort columns (denormalized from payload) ---
+    status: Mapped[str] = mapped_column(String(16), index=True)
+    user_id: Mapped[str | None] = mapped_column(String, index=True, nullable=True)
+    session_id: Mapped[str | None] = mapped_column(String, index=True, nullable=True)
+    parent_task_id: Mapped[str | None] = mapped_column(
+        String, index=True, nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), index=True,
+    )
+
+    # --- full serialized Task — source of truth ---
+    payload: Mapped[dict] = mapped_column(JSON)
+
+    # --- housekeeping ---
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    __table_args__ = (
+        Index("ix_tasks_user_status", "user_id", "status"),
+        Index("ix_tasks_status_created", "status", "created_at"),
     )
 
 

@@ -152,6 +152,17 @@ class Database:
         """
         return self._session_factory()
 
+    @property
+    def sessionmaker(self) -> async_sessionmaker[AsyncSession]:
+        """
+        Expose the async_sessionmaker for services that need their own
+        transaction boundaries (TaskRepository, SchedulerService, …).
+
+        Do NOT pass `database.factory` instead — that returns a single
+        AsyncSession instance, not a factory.
+        """
+        return self._session_factory
+
     # ------------------------------------------------------------------
     # Shutdown
     # ------------------------------------------------------------------

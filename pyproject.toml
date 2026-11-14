@@ -12,14 +12,19 @@ dependencies = [
     "aiosqlite>=0.22.1",
     "chromadb==0.5.5",
     "fastapi==0.110.3",
+    "google-genai>=1.2.0",
     "loguru>=0.7.3",
     "nats-py==2.8.0",
     "neo4j==5.22.0",
     "numpy>=1.26.4",
+    "openai>=3.49.0",
     "pydantic[email]>=2.14.3",
     "pyjwt>=2.15.1",
+    "sentence-transformers>=6.2.0",
     "sqlalchemy==2.0.31",
     "uvicorn==0.27.1",
+    "croniter==2.0.5",
+    "firebase-admin==6.5.0"
 ]
 [project.optional-dependencies]
 dev = [

@@ -8,12 +8,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from pai.agents.manager import AgentManager
 from pai.config import Config
+from pai.notifications.push_service import PushService
 from pai.orchestration.execution_context import ContextManager
 from pai.orchestration.task_runner import TaskRunner
 from pai.orchestration.device_selector import DeviceSelector
 from pai.orchestration.authorization import AuthorizationManager
 from pai.planning.planner import Planner
 from pai.storage.database import Database
+from pai.storage.repositories.chat import ChatRepository
+from pai.storage.repositories.task import TaskRepository
 from pai.tasks.manager import TaskManager
 from pai.devices.manager import DeviceManager
 from pai.plugins.manager import PluginManager
@@ -29,44 +32,7 @@ from pai.planning.dag_scheduler import DAGScheduler
 from pai.orchestration.orchestrator import TaskOrchestrator
 from pai.session.manager import SessionManager
 from pai.llm.router import LLMRouter
-from pai.tasks.store import TaskStore
-import logging
-
-
-def _quiet_sqlalchemy() -> None:
-    """
-    Silence SQLAlchemy's per-statement logging.
-
-    Setting `echo=False` on the engine stops most of it, but SQLAlchemy
-    still emits INFO lines from `sqlalchemy.engine.Engine` for DDL and
-    PRAGMA operations during schema setup. Bumping those loggers to
-    WARNING keeps startup output clean while still surfacing real
-    errors (constraint violations, connection failures).
-    """
-    for name in (
-        "sqlalchemy",
-        "sqlalchemy.engine",
-        "sqlalchemy.engine.Engine",
-        "sqlalchemy.pool",
-        "sqlalchemy.dialects",
-        "aiosqlite",
-        "asyncio",
-    ):
-        logging.getLogger(name).setLevel(logging.WARNING)
-
-    # aiosqlite logs every execute() via the root logger too.
-    # loguru routes Python's standard logging through its own sink
-    # by default, but explicit is better than implicit.
-    try:
-        from loguru import logger
-        import sys
-        logging.getLogger("aiosqlite").propagate = False
-    except Exception:
-        pass
-
-
-# Call it as the very first thing in the process
-_quiet_sqlalchemy()
+from pai.scheduler.scheduler_service import SchedulerService
 
 
 @dataclass
@@ -81,6 +47,7 @@ class PAIAppContext:
     session_id: Optional[str] = None
     request_id: Optional[str] = None
     source_device_id: Optional[str] = None
+    _task_event_subscription: Optional[object] = None  # subscription handle for cleanup
 
 
 def create_app_context(config: Config) -> PAIAppContext:
@@ -107,6 +74,7 @@ def create_app_context(config: Config) -> PAIAppContext:
 
     # ── Memory — fix the _url / _path parameter mismatch ──
     memory_manager = MemoryManager(
+        event_bus=event_bus,
         user_id="default",
         knowledge_graph_enabled=config.memory.knowledge_graph_enabled,
         vector_store_enabled=config.memory.vector_store_enabled,
@@ -125,13 +93,16 @@ def create_app_context(config: Config) -> PAIAppContext:
         knowledge_graph_password=config.memory.neo4j_password,
     )
 
-    device_manager = DeviceManager(session_factory=database.factory)
-    agent_manager = AgentManager()
-    security_manager = SecurityManager(session_factory=database.factory)
+    device_manager = DeviceManager(session_factory=database.factory,
+                                   event_bus=event_bus
+                                   )
+    agent_manager = AgentManager(event_bus=event_bus)
+    security_manager = SecurityManager(session_factory=database.factory,event_bus=event_bus)
 
     plugin_registry = PluginRegistry()
     plugin_manager = PluginManager(
-        plugin_registry,
+        event_bus=event_bus,
+        plugin_registry=plugin_registry,
         session_factory=database.factory,
     )
     capability_router = CapabilityRouter(
@@ -145,20 +116,29 @@ def create_app_context(config: Config) -> PAIAppContext:
     device_manager.set_capability_router(capability_router)
 
     llm_router = LLMRouter(default_config=config.llm_provider)
+
+    chat_repo = ChatRepository(session_factory=database.sessionmaker)
     planning_engine = Planner(
-        llm_router,
+        event_bus=event_bus,
+        llm_router=llm_router,
         capability_router=capability_router,
         memory_manager=memory_manager,
+        chat_repo=chat_repo
     )
 
-    task_store = TaskStore()
+    # ── Task store — in-memory for now, DB-backed later ──
+    # --- dev: in-memory ---
+    # task_store = TaskStore()
+
+    # --- production: DB-backed ---
+    task_store = TaskRepository(session_factory=database.sessionmaker)
 
     # ── ExecutorManager — pass executor URLs from config ──
     # Today ExecutorManager() ignores them. Either it needs an
     # `executors=config.executor.executors` kwarg, or the URLs are
     # supposed to be wired through the scheduler. If it's the latter,
     # pass them to ExecutorScheduler instead.
-    executor_manager = ExecutorManager()
+    executor_manager = ExecutorManager(event_bus=event_bus)
 
     executor_scheduler = ExecutorScheduler(
         llm_service=llm_router,
@@ -168,6 +148,7 @@ def create_app_context(config: Config) -> PAIAppContext:
     )
 
     authorization_manager = AuthorizationManager(
+        event_bus=event_bus,
         security_manager=security_manager,
         plugin_manager=plugin_manager,
         device_manager=device_manager,
@@ -196,7 +177,18 @@ def create_app_context(config: Config) -> PAIAppContext:
         event_bus=event_bus,
     )
 
-    dag_scheduler = DAGScheduler(task_runner=task_runner)
+    dag_scheduler = DAGScheduler(task_runner=task_runner, event_bus=event_bus)
+
+    push_service = PushService()
+
+    scheduler_service = SchedulerService(
+        session_factory=database.sessionmaker,   
+        task_manager=task_manager,
+        executor=executor_manager,
+        device_manager=device_manager,
+        push_service=push_service,
+    )
+
 
     orchestrator = TaskOrchestrator(
         context_manager=context_manager,
@@ -213,9 +205,13 @@ def create_app_context(config: Config) -> PAIAppContext:
         capability_resolver=capability_resolver,
         memory_manager=memory_manager,
         dag_scheduler=dag_scheduler,
+        chat_repo=chat_repo,
         authorization_manager=authorization_manager,
         device_selector=device_selector,
+        scheduler_service=scheduler_service,
+        push_service=push_service
     )
+
     capability_router.register_change_listener(
         orchestrator.sweep_stale_capability_memories,
     )
@@ -250,5 +246,5 @@ def get_orchestrator(request: Request) -> TaskOrchestrator:
 
 async def get_db_session(request: Request) -> AsyncIterator[AsyncSession]:
     ctx = get_app_context(request)
-    async with ctx.database.factory() as session:
+    async with ctx.database.session() as session:
         yield session

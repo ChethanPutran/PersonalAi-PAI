@@ -1,11 +1,16 @@
 from __future__ import annotations
+from enum import Enum
 
 from datetime import datetime, timezone
-from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pai.storage.models import ScheduleModel
+
+
+ScheduleKind = Literal["one_shot", "cron", "interval"]
+CatchUp = Literal["none", "once", "all"]
 
 
 def utc_now() -> datetime:
@@ -22,6 +27,118 @@ def _json_safe(value):
     return value
 
 
+
+# ---------------------------------------------------------------------
+# Pydantic
+# ---------------------------------------------------------------------
+
+class ScheduleBase(BaseModel):
+    title: str = Field(min_length=1, max_length=255)
+    body: Optional[str] = None
+    kind: ScheduleKind
+    fire_at: Optional[datetime] = None
+    cron: Optional[str] = None
+    interval_seconds: Optional[int] = Field(default=None, ge=10)
+    timezone: str = "UTC"
+    capability: str = "system.notifications.show"
+    parameters: Dict[str, Any] = Field(default_factory=dict)
+    catch_up: CatchUp = "once"
+    target_device_id: Optional[str] = None
+
+    @field_validator("timezone")
+    @classmethod
+    def _tz_valid(cls, v: str) -> str:
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+        try:
+            ZoneInfo(v)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError(f"Unknown timezone: {v}") from exc
+        return v
+
+    def model_post_init(self, __context) -> None:
+        if self.kind == "one_shot" and self.fire_at is None:
+            raise ValueError("one_shot requires fire_at")
+        if self.kind == "cron" and not self.cron:
+            raise ValueError("cron requires cron expression")
+        if self.kind == "interval" and not self.interval_seconds:
+            raise ValueError("interval requires interval_seconds")
+
+
+class ScheduleCreate(ScheduleBase):
+    pass
+
+
+class ScheduleUpdate(BaseModel):
+    title: Optional[str] = Field(default=None, min_length=1, max_length=255)
+    body: Optional[str] = None
+    kind: Optional[ScheduleKind] = None
+    fire_at: Optional[datetime] = None
+    cron: Optional[str] = None
+    interval_seconds: Optional[int] = Field(default=None, ge=10)
+    timezone: Optional[str] = None
+    capability: Optional[str] = None
+    parameters: Optional[Dict[str, Any]] = None
+    catch_up: Optional[CatchUp] = None
+    target_device_id: Optional[str] = None
+    enabled: Optional[bool] = None
+
+
+class ScheduleOut(BaseModel):
+    id: str
+    user_id: str
+    target_device_id: Optional[str]
+    title: str
+    body: Optional[str]
+    kind: str
+    fire_at: Optional[str]
+    cron: Optional[str]
+    interval_seconds: Optional[int]
+    timezone: str
+    capability: str
+    parameters: Dict[str, Any]
+    catch_up: str
+    enabled: bool
+    last_fired_at: Optional[str]
+    next_fire_at: Optional[str]
+    created_at: str
+    updated_at: str
+
+    @classmethod
+    def from_row(cls, row: ScheduleModel) -> "ScheduleOut":
+        def iso(v):
+            if v is None:
+                return None
+            # SQLAlchemy `DateTime(timezone=True)` gives back tz-aware
+            # datetimes on most backends, but sqlite (and some Postgres
+            # configs) return naive. Treat naive as UTC — that's how we
+            # wrote it — and re-attach the tzinfo so isoformat() includes
+            # the offset.
+            if v.tzinfo is None:
+                v = v.replace(tzinfo=timezone.utc)
+            return v.isoformat()
+
+        return cls(
+            id=row.id,
+            user_id=row.user_id,
+            target_device_id=row.target_device_id,
+            title=row.title,
+            body=row.body,
+            kind=row.kind,
+            fire_at=iso(row.fire_at),
+            cron=row.cron,
+            interval_seconds=row.interval_seconds,
+            timezone=row.timezone,
+            capability=row.capability,
+            parameters=row.parameters or {},
+            catch_up=row.catch_up,
+            enabled=row.enabled,
+            last_fired_at=iso(row.last_fired_at),
+            next_fire_at=iso(row.next_fire_at),
+            created_at=iso(row.created_at),
+            updated_at=iso(row.updated_at),
+        )
+
+    
 class TaskStatus(str, Enum):
     CREATED = "created"
     INITIALIZED = "initialized"

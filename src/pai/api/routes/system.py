@@ -131,6 +131,7 @@ def _serialize_task(task: Any) -> Dict[str, Any]:
 
     return {
         "id": d.get("id") or d.get("task_id") or "",
+        "title": d.get("title") or d.get("input") or d.get("capability") or "",
         "status": status,
         "user_id": d.get("user_id"),
         "session_id": d.get("session_id"),

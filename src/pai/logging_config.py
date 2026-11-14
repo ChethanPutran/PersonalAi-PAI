@@ -239,10 +239,19 @@ _TAME_TO_WARNING = (
     "uvicorn.access",
     "httpx",
     "httpcore",
-    "asyncio",              # noisy during WS close in dev
-    "sqlalchemy.engine",    # SQL echo already gated by Database(echo=...)
-    "aiosqlite",
+    "httpcore2",          # httpx2 uses httpcore2
+    "chromadb",
+    "sentence_transformers",
+    "huggingface_hub",
+    "sqlalchemy",
+    "sqlalchemy.engine",
+    "sqlalchemy.engine.Engine", # SQL echo already gated by Database(echo=...)
+    "sqlalchemy.pool",
+    "sqlalchemy.dialects",
+    "aiosqlite"
 )
+
+
 
 
 def _tame_stdlib_loggers() -> None:

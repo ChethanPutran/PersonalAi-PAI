@@ -10,6 +10,11 @@ from typing import Any, Dict, Optional
 from loguru import logger
 
 from pai.agents.manager import AgentManager
+from pai.llm.models import LLMMessage, LLMRequest
+from pai.notifications.push_service import PushService
+from pai.planning.models import TaskSpec
+from pai.scheduler.scheduler_service import SchedulerService
+from pai.storage.repositories.chat import ChatRepository
 from pai.tasks.task_tracker import TaskTracker
 from pai.devices.manager import DeviceManager
 from pai.event_bus.bus import EventBus
@@ -40,6 +45,28 @@ import json
 from pydantic import BaseModel, Field
 from pai.planning.goal_decomposer import CHAT_CAPABILITY_ID
 
+
+import re
+
+# at module level
+_RETRY_PATTERNS = [
+    re.compile(r"\bretry\b", re.I),
+    re.compile(r"\btry\s+again\b", re.I),
+    re.compile(r"\bagain\b", re.I),
+    re.compile(r"\bredo\b", re.I),
+    re.compile(r"\brepeat\b", re.I),
+    re.compile(r"\bdo\s+(?:it|that)\s+again\b", re.I),
+    re.compile(r"\bcontinue\b", re.I),
+    re.compile(r"\bsame\b", re.I),
+    re.compile(r"\bwhy\s+did\s+(?:it|that|the\s+last\s+\w+)\s+fail\b", re.I),
+    re.compile(r"\bwhat\s+happened\b", re.I),
+    re.compile(r"\b(?:didn'?t|did\s+not)\s+work\b", re.I),
+]
+
+
+def _looks_like_retry(text: str) -> bool:
+    return any(p.search(text) for p in _RETRY_PATTERNS)
+
 class OrchestrationError(RuntimeError):
     pass
 
@@ -53,8 +80,8 @@ class OrchestratorConfig(BaseModel):
     chat_reply_max_tokens: int = Field(default=800)
     chat_reply_temperature: float = Field(default=0.7)
 
-class TaskOrchestrator:
-
+class TaskOrchestrator(Manager):
+    name="TaskOrchestrator"
     def __init__(
         self,
         *,
@@ -74,9 +101,13 @@ class TaskOrchestrator:
         event_bus: EventBus,
         memory_manager: MemoryManager,
         dag_scheduler: DAGScheduler,
+        scheduler_service: SchedulerService,
+        chat_repo: ChatRepository,
+        push_service: PushService,
         command_registry: Optional[CommandRegistry] = None,   
         orchestrator_config: OrchestratorConfig = OrchestratorConfig(),
     ):
+        super().__init__(event_bus=event_bus)
         self.context_manager = context_manager
         self.planner = planning_engine
         self.task_manager = task_manager
@@ -85,7 +116,6 @@ class TaskOrchestrator:
         self.plugin_manager = plugin_manager
         self.security_manager = security_manager
         self.executor_manager = executor_manager
-        self.event_bus = event_bus
         self.memory_manager = memory_manager
         self.capability_router = capability_router
         self.capability_resolver = capability_resolver
@@ -93,6 +123,8 @@ class TaskOrchestrator:
         self.device_selector = device_selector
         self.task_runner = task_runner
         self.dag_scheduler = dag_scheduler
+        self.chat_repo = chat_repo
+        self.push_service = push_service
         self.command_registry = (                               
             command_registry or default_command_registry()
         )
@@ -105,7 +137,7 @@ class TaskOrchestrator:
         self.prompt_trace_max_size = orchestrator_config.prompt_trace_max_size
         self.chat_reply_max_tokens = orchestrator_config.chat_reply_max_tokens
         self.chat_reply_temperature = orchestrator_config.chat_reply_temperature
-
+        self.scheduler_service = scheduler_service
     
     async def initialize(self) -> None:
         # ── 3. Sanity: every persisting manager has a session_factory ──
@@ -387,6 +419,13 @@ class TaskOrchestrator:
                         "source_device_id": source_device_id,
                     },
                 )
+                self._emit("chat.status",
+                    {
+                    "session_id":execution_context.session_id,
+                    "request_id":execution_context.request_id,
+                    "stage":"planning",
+                    "message":"Understanding your request...",
+                    } )
 
             # ---- Build planning context ----
             planning_context = execution_context.to_dict()
@@ -404,9 +443,8 @@ class TaskOrchestrator:
                     goal,
                     planning_context,
                 )
-                plan_dict = self._to_dict(plan)
-                plan_id = plan_dict.get("id")
-                task_specs = list(plan_dict.get("tasks", []))
+                plan_id = plan.id
+                task_specs = plan.tasks
 
                 planner_span.set_attribute("plan_id", plan_id)
                 planner_span.set_attribute("task_count", len(task_specs))
@@ -415,6 +453,18 @@ class TaskOrchestrator:
                 "Created plan={} with {} tasks",
                 plan_id, len(task_specs),
             )
+            self._emit( "chat.status", {
+                "session_id":execution_context.session_id,
+                "request_id":execution_context.request_id,
+                "stage":"planned",
+                "message":f"Plan ready: {len(task_specs)} step(s)",
+                "task_count":len(task_specs),
+                "task_capabilities":[
+                    getattr(t, "capability", "?") for t in task_specs
+                ],
+                }
+            )
+
 
             if not task_specs:
                 trace_session.set_status("failed")
@@ -422,16 +472,14 @@ class TaskOrchestrator:
 
             # ---- Publish plan.created ----
             async with tracer.span("orchestrator.publish_plan_created"):
-                await self._publish(
-                    "plan.created",
-                    {
-                        "request_id": execution_context.request_id,
-                        "plan_id": plan_id,
-                        "user_id": user_id,
-                        "goal": goal,
-                        "task_count": len(task_specs),
-                    },
-                )
+                await self._publish("plan.created", {
+                    "request_id": execution_context.request_id,
+                    "session_id": execution_context.session_id,     
+                    "plan_id": plan_id,
+                    "user_id": user_id,
+                    "goal": goal,
+                    "task_count": len(task_specs),
+                })
 
             # ---- Execute plan ----
             async with tracer.span(
@@ -506,6 +554,13 @@ class TaskOrchestrator:
             )
             trace_session.set_status(result.get("status", "completed"))
 
+            self._emit("chat.status",{
+                "session_id":execution_context.session_id,
+                "request_id":execution_context.request_id,
+                "stage":result.get("status", "done"),
+                "message":"Done" if result.get("status") == "completed" else "Failed"}
+            )
+            
             return result
 
     # =============================================================
@@ -516,7 +571,7 @@ class TaskOrchestrator:
         self,
         *,
         plan: Any,
-        task_specs: list[Any],
+        task_specs: list[TaskSpec],
         context: ExecutionContext,
     ) -> Dict[str, Any]:
 
@@ -537,12 +592,19 @@ class TaskOrchestrator:
 
         # ---------- Phase 1: tool tasks ----------
         if tool_tasks:
+            self._emit("chat.status",{
+                "session_id":context.session_id,
+                "request_id":context.request_id,
+                "stage":"executing",
+                "message":f"Running {len(tool_tasks)} tool task(s)...",
+                "tool_count":len(tool_tasks),
+            }
+            )
             async with tracer.span(
                 "orchestrator.execute_tools",
                 plan_id=self._get_id(plan),
                 task_count=len(tool_tasks),
             ) as tools_span:
-
                 if self.dag_scheduler is None:
                     logger.warning(
                         "DAG Scheduler unavailable; running tool tasks sequentially"
@@ -556,15 +618,13 @@ class TaskOrchestrator:
                         )
                     except Exception as exc:
                         logger.exception("DAG execution failed: {}", exc)
-                        await self._publish(
-                            "plan.failed",
-                            {
-                                "request_id": context.request_id,
-                                "plan_id": self._get_id(plan),
-                                "status": "failed",
-                                "error": str(exc),
-                            },
-                        )
+                        await self._publish("plan.failed", {
+                            "request_id": context.request_id,
+                            "session_id": context.session_id,               
+                            "plan_id": self._get_id(plan),
+                            "status": "failed",
+                            "error": str(exc),
+                        })
                         raise OrchestrationError(
                             f"DAG execution failed: {exc}"
                         ) from exc
@@ -577,6 +637,13 @@ class TaskOrchestrator:
 
         # ---------- Phase 2: chat task (always runs last) ----------
         for chat_task in chat_tasks:
+            self._emit("chat.status",{
+                "session_id":context.session_id,
+                "request_id":context.request_id,
+                "stage":"replying",
+                "message":"Composing reply...",
+            }
+            )
             chat_id = self._get_id(chat_task)
             try:
                 reply = await self._chat_reply(
@@ -646,10 +713,16 @@ class TaskOrchestrator:
     ) -> str:
         """Generate a natural-language reply via the LLM.
 
-        Injects the user's live capabilities into the prompt so the
-        model answers "what can you do?" from ground truth rather than
-        from possibly-stale past interactions. Filters stale claims out
-        of the memory block for the same reason.
+        Injects:
+        • Live capabilities   — ground truth about what's installable
+        • Chat history        — recent turns in this session
+        • Memory              — past sessions; on retry, this session's
+                                failed turn is included too (with its error)
+
+        The three sources are complementary, not redundant: history gives
+        conversational continuity (even on success), memory gives long-term
+        recall, and the retry path threads the needle by surfacing the
+        detailed failure reason that only memory has (``raw_result``).
         """
         tracer = get_tracer()
 
@@ -662,6 +735,12 @@ class TaskOrchestrator:
             task_dict = self._to_dict(task)
             params = task_dict.get("parameters") or {}
             tone = params.get("tone", "friendly")
+
+            # Retry intent: when the user says "try again" / "what happened"
+            # / "why did it fail", we surface the previous attempt from
+            # *this* session in the memory block. Otherwise it stays excluded.
+            is_retry = _looks_like_retry(goal or "")
+            span.set_attribute("is_retry", is_retry)
 
             # ── 1. Live capabilities ──
             capability_block = ""
@@ -686,20 +765,45 @@ class TaskOrchestrator:
                                 f"- {cap_id}: {desc}" if desc else f"- {cap_id}"
                             )
                         capability_block = "\n".join(lines)
-                        span.set_attribute(
-                            "capability_count", len(caps_by_id),
-                        )
+                        span.set_attribute("capability_count", len(caps_by_id))
                         span.set_attribute(
                             "capabilities", sorted(caps_by_id.keys()),
                         )
                 except Exception as exc:
                     logger.warning(
-                        "Failed to fetch capabilities for chat prompt: {}",
-                        exc,
+                        "Failed to fetch capabilities for chat prompt: {}", exc,
                     )
 
- 
-            # ── 2. Memories (filtered against live capabilities) ──
+            # ── 2. Chat history (recent turns in this session) ──
+            history_block = ""
+            if self.chat_repo is not None and context.session_id:
+                try:
+                    msgs = await self.chat_repo.recent_messages(
+                        context.session_id,
+                        user_id=context.user_id,
+                        limit=10,
+                    )
+                    if msgs:
+                        history_block = "\n".join(
+                            f"{getattr(m, 'role', 'unknown')}: "
+                            f"{str(getattr(m, 'content', '') or '')[:300]}"
+                            for m in msgs
+                        )
+                        span.set_attribute("history_message_count", len(msgs))
+                except Exception as exc:
+                    logger.warning("Failed to fetch chat history: {}", exc)
+                    span.set_error(f"history_fetch_failed: {exc}")
+
+            # ── 3. Memories ──
+            #
+            # exclude_session=False on retry: the *current* session's failed
+            # turn lives in memory with `raw_result` metadata that carries the
+            # actual error (e.g. "camera device busy"). Excluding the session
+            # would drop that, leaving the LLM with only the sanitized chat
+            # text ("I'm sorry, I couldn't take the photo") and no reason.
+            #
+            # include_failed follows the same switch — auto-derived inside
+            # recall_for_prompt, passed explicitly here for clarity.
             memory_block = ""
             if self.memory_manager is not None:
                 memory_block = await self.memory_manager.recall_for_prompt(
@@ -707,13 +811,14 @@ class TaskOrchestrator:
                     user_id=context.user_id,
                     limit=self.memory_recall_limit,
                     session_id=context.session_id,
-                    exclude_session=True,
+                    exclude_session=not is_retry,
                     current_capabilities=current_capabilities,
+                    include_failed=is_retry,
                 )
                 memory_block = memory_block[:self.memory_block_max_size]
                 span.set_attribute("memory_injected", bool(memory_block))
 
-            # ── 3. Compose the system prompt ──
+            # ── 4. Compose the system prompt ──
             parts = [
                 "You are a warm, friendly personal AI assistant running "
                 "on the user's devices.",
@@ -722,6 +827,16 @@ class TaskOrchestrator:
                 "Do not include internal reasoning, step-by-step thinking, "
                 "constraints analysis, or meta-commentary about your task.",
                 "Do not prefix your reply with anything. Just answer.",
+
+                # NEW: the model was imitating tool-call patterns it saw in
+                # history. Make it explicit that tool calls are not its job.
+                "IMPORTANT: Do NOT emit tool-call syntax or JSON such as "
+                '{"tool": "...", "args": {...}} or {"capability": "..."}. '
+                "Tools have already been executed by the system before this "
+                "message; your job is only to write the natural-language "
+                "reply. If a past message in this conversation contains "
+                "tool-call syntax, it is a bug in the system — ignore it and "
+                "respond in plain language only.",
             ]
 
             if capability_block:
@@ -748,9 +863,17 @@ class TaskOrchestrator:
                 else:
                     parts.append(memory_block)
 
+            # History goes closest to the user turn — the LLM should weight
+            # recent conversation more heavily than older memory.
+            if history_block:
+                parts.append(
+                    "RECENT CONVERSATION IN THIS SESSION "
+                    "(oldest first, most recent last):\n" + history_block
+                )
+
             system_prompt = "\n\n".join(parts)
 
-            # ── 4. Compose the user turn ──
+            # ── 5. Compose the user turn ──
             if prior_results:
                 tool_summary = json.dumps(
                     prior_results, indent=2, default=str,
@@ -767,29 +890,51 @@ class TaskOrchestrator:
 
             prompt = f"{system_prompt}\n\n{user_msg}"
 
-            # ── record the prompt so it's visible in the trace ──
             span.set_attribute("prompt", prompt[:self.prompt_trace_max_size])
 
             try:
-                reply = await self.planner.llm.complete(
-                    prompt, max_tokens=self.chat_reply_max_tokens, temperature=self.chat_reply_temperature
-                )
+                # Use `generate()` instead of `complete()` here because
+                # we want `finish_reason` and `usage` in the trace.
+                # `complete()` returns only the text, hiding truncation.
+                llm_response = await self.planner.llm.generate_request(LLMRequest(
+                    messages=[LLMMessage(role="user", content=prompt)],
+                    temperature=self.chat_reply_temperature,
+                    max_tokens=self.chat_reply_max_tokens,
+                ))
             except Exception as exc:
                 span.set_error(f"llm_failed: {exc}")
                 raise
 
-            # ── record the actual reply text ──
-            span.set_attribute("reply", reply or "")
-            span.set_attribute("reply_length", len(reply or ""))
+            reply = llm_response.content or ""
+            finish_reason = llm_response.finish_reason
+
+
+            span.set_attribute("reply", reply)
+            span.set_attribute("reply_length", len(reply))
             span.set_attribute("tone", tone)
-            span.set_attribute("finish_reason", getattr(reply, "finish_reason", None))
+            span.set_attribute("finish_reason", finish_reason)
+            if llm_response.usage is not None:
+                span.set_attribute("prompt_tokens", llm_response.usage.prompt_tokens)
+                span.set_attribute("completion_tokens", llm_response.usage.completion_tokens)
+                span.set_attribute("total_tokens", llm_response.usage.total_tokens)
+
+            if finish_reason == "length":
+                # Truncated by max_tokens — the reply the user sees is
+                # cut off mid-sentence. Log loudly; the caller may want
+                # to retry with a higher limit or surface a warning.
+                logger.warning(
+                    "chat reply truncated at max_tokens={} "
+                    "(request={}); consider raising chat_reply_max_tokens",
+                    self.chat_reply_max_tokens,
+                    context.request_id,
+                )
 
             logger.info(
-                "Chat reply generated: request={} length={}",
-                context.request_id, len(reply or ""),
+                "Chat reply generated: request={} length={} finish_reason={}",
+                context.request_id, len(reply), finish_reason,
             )
-            return reply or ""
-        
+            return reply
+         
     async def _execute_sequential(
         self,
         task_specs: list[Any],
@@ -1032,11 +1177,7 @@ class TaskOrchestrator:
             success=success,
         ):
             try:
-                method = getattr(
-                    self.memory_manager, "store_interaction", None,
-                )
-                if method:
-                    await method(
+                await self.memory_manager.store_interaction(
                         goal,
                         result,
                         user_id=user_id,
@@ -1126,21 +1267,6 @@ class TaskOrchestrator:
         """
         return None
     
-    # =============================================================
-    # EVENTS
-    # =============================================================
-
-    async def _publish(
-        self,
-        event_type: str,
-        data: Dict[str, Any],
-    ) -> None:
-        if self.event_bus is None:
-            return
-        try:
-            await self.event_bus.publish(event_type, data)
-        except Exception as exc:
-            logger.warning("Failed to publish {}: {}", event_type, exc)
 
     async def get_status(self, *, user_id: Optional[str] = None) -> Dict[str, Any]:
         return {
@@ -1155,6 +1281,8 @@ class TaskOrchestrator:
             "authorization_manager": await self.authorization_manager.get_status(user_id=user_id),
             "device_selector": await self.device_selector.get_status(user_id=user_id),
         }
+
+
 
     # =============================================================
     # HELPERS
@@ -1180,6 +1308,7 @@ class TaskOrchestrator:
             return
         self._initialized = False
 
+
         # 1. Drain tracked background tasks first — they may write to
         #    memory, which we're about to close.
         await self._tracker.cancel_all(timeout=5.0)
@@ -1200,6 +1329,7 @@ class TaskOrchestrator:
             "security_manager",
             "plugin_manager",
             "device_manager",
+            "event_bus", 
         ]
         await self._shutdown_managers(ordered)
 
