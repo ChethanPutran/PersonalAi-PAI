@@ -5,6 +5,7 @@
 
 #include <cstring>
 #include <string>
+#include <vector>
 
 #include "pai_plugin_abi.h"
 

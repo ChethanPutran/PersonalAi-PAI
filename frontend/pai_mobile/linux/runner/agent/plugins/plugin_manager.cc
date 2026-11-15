@@ -19,22 +19,19 @@ std::map<std::string, std::string> PluginManager::Invoke(
     return {{"ok", "false"}, {"error", "capability_not_supported"}};
   }
 
-  try {
-    return m->Invoke(capability, params);
-  } catch (const std::exception& e) {
-    return {{"ok", "false"}, {"error", e.what()}};
-  }
+  // Re-check permissions right before invoking — cheap, and catches
+  // the "user unplugged the camera between install and use" case.
+  const auto check = permissions_->Request(m->Permissions());
+if (check.at("ok") != "true") {
+  return {
+      {"ok", "false"},
+      {"error", "permission_not_granted"},
+      {"denied", check.at("denied")},
+  };
 }
 
-std::map<std::string, std::string> PluginManager::RequestPermissions(
-    const std::string& native_module,
-    const std::vector<std::string>& permissions) {
-  auto m = registry_->Get(native_module);
-  if (!m) {
-    return {{"ok", "false"}, {"error", "module_not_available"}};
-  }
   try {
-    return m->RequestPermissions(permissions);
+    return m->Invoke(capability, params);
   } catch (const std::exception& e) {
     return {{"ok", "false"}, {"error", e.what()}};
   }

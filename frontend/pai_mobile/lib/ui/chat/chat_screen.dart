@@ -39,13 +39,18 @@ class _ChatScreenState extends State<ChatScreen> {
   // Lifecycle
   // -------------------------------------------------------------------
 
-  @override
-  void initState() {
-    super.initState();
-    _initStatusService();
-    _loadSessionsAndCurrent();
-  }
-
+@override
+void initState() {
+  super.initState();
+  // Load (and validate) the session before opening a WS to it.
+  // If the stored id is stale, _loadSessionsAndCurrent clears it and
+  // _initStatusService becomes a no-op.
+  _bootstrap();
+}
+Future<void> _bootstrap() async {
+  await _loadSessionsAndCurrent();
+  await _initStatusService();
+}
   @override
   void dispose() {
     _authListener?.removeListener(_onAuthChanged);
@@ -62,12 +67,24 @@ class _ChatScreenState extends State<ChatScreen> {
 ///     current token (WsClient.connect reads `api.authToken` at
 ///     connect time, so this is the right moment)
 Future<void> _initStatusService() async {
-  if (widget.service.sessionId == null) {
-    await widget.service.startNewSession();
-  }
   final sid = widget.service.sessionId;
+
+  // No id → nothing to subscribe to. The first sendMessage() will
+  // create one, and _send() will reconnect the status service.
   if (sid == null) return;
 
+  // Verify the session actually exists on the server before opening
+  // a WS to it. This is what kills the 403 storm after a stale id
+  // survives an app restart, and it fixes the 404 on load.
+  try {
+    await widget.service.loadSession(sid);
+  } catch (e) {
+    debugPrint('[ChatScreen] session $sid not on server, clearing: $e');
+    await widget.service.clearSession();
+    return;
+  }
+
+  _statusService?.dispose();
   _statusService = ChatStatusService(
     api: widget.service.api,
     sessionId: sid,
@@ -75,8 +92,12 @@ Future<void> _initStatusService() async {
 
   final auth = widget.service.api.auth;
   if (auth != null) {
-    _authListener ??= auth;
-    auth.addListener(_onAuthChanged);
+    // Register ONCE. The old code called addListener on every
+    // reconnect, so N reconnects → N listeners → N sockets.
+    if (_authListener == null) {
+      _authListener = auth;
+      auth.addListener(_onAuthChanged);
+    }
   }
 
   if (auth == null || auth.token != null) {
@@ -93,15 +114,11 @@ void _onAuthChanged() {
   if (auth == null) return;
 
   if (auth.token == null) {
-    // Logged out. Dispose the status WS — no token means every
-    // reconnect attempt would 4401 loop.
     _statusService?.dispose();
     _statusService = null;
     if (mounted) setState(() {});
     return;
   }
-  // Token just appeared or was refreshed. Open the WS (idempotent —
-  // connect() cancels any prior sub before reconnecting).
   _statusService?.connect();
 }
 
@@ -118,24 +135,29 @@ void _onAuthChanged() {
   // Data loading
   // -------------------------------------------------------------------
 
-  Future<void> _loadSessionsAndCurrent() async {
-    try {
-      sessions = await widget.service.listSessions();
-      final current = widget.service.sessionId;
+Future<void> _loadSessionsAndCurrent() async {
+  try {
+    sessions = await widget.service.listSessions();
+    final current = widget.service.sessionId;
+    if (!mounted) return;
+    if (current != null) {
+      final detail = await widget.service.loadSession(current);
       if (!mounted) return;
-      if (current != null) {
-        final detail = await widget.service.loadSession(current);
-        if (!mounted) return;
-        setState(() => messages
-          ..clear()
-          ..addAll(detail.messages));
-        _scrollToBottom();
-      }
-      if (mounted) setState(() {});
-    } catch (e) {
-      debugPrint('[ChatScreen] loadSessions failed: $e');
+      setState(() => messages
+        ..clear()
+        ..addAll(detail.messages));
+      _scrollToBottom();
+    }
+    if (mounted) setState(() {});
+  } catch (e) {
+    debugPrint('[ChatScreen] loadSessions failed: $e');
+    // Server says the session is gone — don't keep retrying it.
+    final msg = e.toString();
+    if (msg.contains('404') || msg.contains('Session not found')) {
+      await widget.service.clearSession();
     }
   }
+}
 
   Future<void> _openSession(ChatSessionSummary s) async {
     await widget.service.setSessionId(s.id);

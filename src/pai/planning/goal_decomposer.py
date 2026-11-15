@@ -21,6 +21,7 @@ import re
 
 from pai.prompts.registry import PromptRegistry, PromptTemplate
 from pai.prompts.tracker import PromptVersionTracker
+from pai.security.llm_guard import PromptGuard
 from pai.storage.repositories.chat import ChatRepository
 
 # Sentinel used end-to-end. Never gets a DB row; orchestrator handles it.
@@ -65,6 +66,8 @@ class GoalDecomposer(Lifecycle):
         chat_repo: ChatRepository,
         prompt_registry: PromptRegistry,
         prompt_tracker: PromptVersionTracker,
+        prompt_guard: PromptGuard
+
     ):
         self.llm = llm
         self.capability_router = capability_router
@@ -72,6 +75,7 @@ class GoalDecomposer(Lifecycle):
         self.chat_repo = chat_repo
         self.prompts = prompt_registry
         self.prompt_tracker = prompt_tracker
+        self.prompt_guard = prompt_guard
 
     async def initialize(self) -> None:
         logger.info("GoalDecomposer initialized")
@@ -221,6 +225,14 @@ class GoalDecomposer(Lifecycle):
             )
             span.set_attribute("user_timezone", user_tz)
 
+            inspection = self.prompt_guard.inspect_request(
+                user_text=goal,
+                memory_block=memory_block,
+                history_block=history_block,
+                tool_results_block="",
+                span=span,
+            )
+
             # 4. Build prompt
             t0 = time.perf_counter()
 
@@ -228,8 +240,8 @@ class GoalDecomposer(Lifecycle):
                 goal=goal,
                 context=context,
                 capabilities=capabilities,
-                memory_block=memory_block,
-                history_block=history_block,
+                memory_block=inspection.memory_block,
+                history_block=inspection.history_block,
                 user_tz=user_tz,
             )
             span.set_attribute("prompt_length", len(prompt))
@@ -261,7 +273,15 @@ class GoalDecomposer(Lifecycle):
                 span.set_attribute(
                     "finish_reason", llm_response.finish_reason,
                 )
-                response = llm_response.content or ""
+
+                # Sanitize the LLM response to remove any sensitive information before logging or further processing.
+                sanitized = self.prompt_guard.sanitize_response(
+                    raw_text=llm_response.content or "",
+                    span=span,
+                    request_id=context.get("request_id"),
+                )
+                response = sanitized.clean_text
+
                 span.set_attribute("response_length", len(response))
                 span.set_attribute("response", response)
             except Exception as exc:

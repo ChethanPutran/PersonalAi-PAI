@@ -6,12 +6,14 @@
 #include <vector>
 
 #include "native_module_registry.h"
+#include "permission_manager.h"
 
 namespace pai::agent {
 
 class PluginManager {
  public:
-  explicit PluginManager(NativeModuleRegistry* registry) : registry_(registry) {}
+  PluginManager(NativeModuleRegistry* registry, PermissionManager* permissions)
+      : registry_(registry), permissions_(permissions) {}
 
   std::map<std::string, std::string> Invoke(
       const std::string& native_module,
@@ -22,8 +24,9 @@ class PluginManager {
       const std::string& native_module,
       const std::vector<std::string>& permissions);
 
- private:
+private:
   NativeModuleRegistry* registry_;
+  PermissionManager* permissions_;
 };
 
 }  // namespace pai::agent

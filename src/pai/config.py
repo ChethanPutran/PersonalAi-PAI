@@ -11,6 +11,36 @@ from dotenv import load_dotenv
 from pai.llm.models import LLMProviderConfig
 from pai.orchestration.orchestrator import OrchestratorConfig
 
+
+# ---------------------------------------------------------------------------
+# Must run BEFORE importing chromadb / sentence_transformers.
+#
+# 1. ChromaDB's `Settings(anonymized_telemetry=False)` is broken in recent
+#    versions — posthog is still initialized and its `capture()` raises
+#    "takes 1 positional argument but 3 were given". The env var works.
+#
+# 2. HuggingFace metadata probes make ~5 HTTP calls per model load.
+#    `HF_HUB_OFFLINE=1` skips them entirely once weights are cached.
+#
+# 3. Pin the cache to a directory the app actually owns, so restarts /
+#    different users / containers don't trigger a fresh download.
+# ---------------------------------------------------------------------------
+import os
+
+os.environ.setdefault("ANONYMIZED_TELEMETRY", "False")
+os.environ.setdefault("CHROMA_TELEMETRY_ENABLED", "False")
+os.environ.setdefault("POSTHOG_DISABLED", "1")
+
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+os.environ.setdefault("HF_DATASETS_OFFLINE", "1")
+
+_hf_home = os.environ.setdefault(
+    "HF_HOME",
+    os.path.abspath(os.environ.get("PAI_DATA_DIR", "./data")) + "/huggingface",
+)
+os.environ.setdefault("TRANSFORMERS_CACHE", _hf_home + "/hub")
+
 load_dotenv()
 
 def _require(name: str, purpose: str = "") -> str:
@@ -73,6 +103,8 @@ def _validate_llm_provider(cfg: "LLMProviderConfig") -> None:
             f"Unknown LLM provider {provider!r}. "
             f"Valid values: gemini, openai, openrouter, kimi, local"
         )
+
+
 
 class ExecutorConfig(BaseModel):
     """Executor configuration."""

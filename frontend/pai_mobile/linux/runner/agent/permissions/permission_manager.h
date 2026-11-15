@@ -7,10 +7,17 @@
 
 namespace pai::agent {
 
+// linux/runner/agent/permissions/permission_manager.h
 class PermissionManager {
  public:
-  /// On Linux the OS handles most permissions via device nodes / polkit.
-  /// This is a placeholder that returns granted for known logical permissions.
+  /// Linux has no runtime permission dialogs. This returns the *current*
+  /// availability of each logical permission by probing device nodes,
+  /// sockets, and the filesystem. No user interaction occurs.
+  ///
+  /// Returns:
+  ///   ok      — "true" iff every requested permission is available
+  ///   granted — comma-separated list of available permissions
+  ///   denied  — comma-separated list of unavailable ones
   std::map<std::string, std::string> Request(
       const std::vector<std::string>& permissions);
 

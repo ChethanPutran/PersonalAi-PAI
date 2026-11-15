@@ -75,6 +75,17 @@ void ReplyVoid(FlMethodCall* call) {
   fl_method_call_respond(call, resp, nullptr);
 }
 
+std::string JoinList(const std::vector<std::string>& v) {
+  std::string s;
+  for (size_t i = 0; i < v.size(); ++i) {
+    if (i) s += ",";
+    s += v[i];
+  }
+  return s;
+}
+
+std::string JoinList(const std::string& s) { return s; }   // overload for already-joined
+
 void MethodCallHandler(FlMethodChannel* /*channel*/,
                        FlMethodCall* call,
                        gpointer user_data) {
@@ -104,28 +115,64 @@ void MethodCallHandler(FlMethodChannel* /*channel*/,
   }
 
   if (std::strcmp(method, "loadNativeModule") == 0) {
-    std::string path,name;
-    if (args && fl_value_get_type(args) == FL_VALUE_TYPE_MAP) {
-      name = GetStr(fl_value_lookup_string(args, "nativeModule"));
-      path = GetStr(fl_value_lookup_string(args, "artifactPath"));
-    }
+  std::string path, name;
+  if (args && fl_value_get_type(args) == FL_VALUE_TYPE_MAP) {
+    name = GetStr(fl_value_lookup_string(args, "nativeModule"));
+    path = GetStr(fl_value_lookup_string(args, "artifactPath"));
+  }
 
-    if (name.empty() || path.empty()) {
+  if (name.empty() || path.empty()) {
     ReplyError(call, "INVALID_ARGS",
-                "nativeModule and artifactPath are required");
-    return;
-    }
-    try {
-      auto mod = DynamicLoader::Load(path);
-
-      // Register under the Flutter-provided key
-      self->registry.Register(name, std::move(mod));
-      ReplyBool(call, true);
-    } catch (const std::exception& e) {
-      ReplyError(call, "LOAD_FAILED", e.what());
-    }
+               "nativeModule and artifactPath are required");
     return;
   }
+
+  // 1. Load the .so
+  std::shared_ptr<PluginModule> mod;
+  try {
+    mod = DynamicLoader::Load(path);
+  } catch (const std::exception& e) {
+    ReplyMap(call, {
+        {"ok", "false"},
+        {"error", "load_failed"},
+        {"message", e.what()},
+    });
+    return;
+  }
+
+  // 2. Ask the plugin what it needs, check availability
+  const auto manifest_perms = mod->Permissions();
+  const auto perm_result = self->permissions.Request(manifest_perms);
+  const bool granted = perm_result.at("ok") == "true";
+
+  if (!granted) {
+    // 3. Rollback — module is on the stack, its shared_ptr dtor
+    //    will call destroy() when `mod` goes out of scope.
+    //    Report which were denied.
+    ReplyMap(call, {
+        {"ok",          "false"},
+        {"error",       "permissions_denied"},
+        {"name",        mod->Name()},
+        {"permissions", JoinList(manifest_perms)},
+        {"denied",      perm_result.at("denied")},
+    });
+    return;
+  }
+
+  // 4. Success — register and report
+  const std::string self_name = mod->Name();
+  const std::string registered_name = self_name.empty() ? name : self_name;
+
+  self->registry.Register(registered_name, std::move(mod));
+
+  ReplyMap(call, {
+      {"ok",           "true"},
+      {"name",         registered_name},
+      {"capabilities", JoinList(self->registry.Get(registered_name)->Capabilities())},
+      {"permissions",  perm_result.at("granted")},
+  });
+  return;
+}
 
   if (std::strcmp(method, "debugRegistry") == 0) {
     ReplyMap(call, self->registry.DebugKeys());

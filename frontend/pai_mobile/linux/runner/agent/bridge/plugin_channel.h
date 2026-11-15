@@ -17,8 +17,9 @@ class PluginChannel {
   explicit PluginChannel(FlBinaryMessenger* messenger);
 
   NativeModuleRegistry registry;
-  PluginManager manager{&registry};
   PermissionManager permissions;
+  PluginManager manager{&registry, &permissions};
+  
 
  private:
   FlMethodChannel* channel_ = nullptr;

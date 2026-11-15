@@ -728,7 +728,10 @@ class DeviceManager(Manager):
             if self._session_factory is not None:
                 async def _do(session):
                     repo = DeviceRepository(session)
-                    await repo.upsert(
+                    # Only overwrite user_id when one is explicitly supplied.
+                    # Previously this passed user_id=None on every refresh, which
+                    # nulled the owner column and broke WS ownership checks.
+                    kwargs = dict(
                         device_id=device_id,
                         name=update.get("name") or getattr(device, "name", ""),
                         device_type=update.get("device_type") or getattr(device, "device_type", "unknown"),
@@ -739,8 +742,11 @@ class DeviceManager(Manager):
                         hostname=update.get("hostname") or getattr(device, "hostname", ""),
                         app_version=update.get("app_version") or getattr(device, "app_version", ""),
                         runtime_version=update.get("runtime_version") or getattr(device, "runtime_version", ""),
-                        user_id=user_id,
                     )
+                    if user_id is not None:
+                        kwargs["user_id"] = user_id
+                    await repo.upsert(**kwargs)
+                    
                 await self._with_session(_do)
                 self._emit("device.metadata_refreshed", {
                     "device_id": device_id,

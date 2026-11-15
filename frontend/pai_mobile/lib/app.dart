@@ -83,12 +83,12 @@ class _PaiAppState extends State<PaiApp> {
   /// Fed by [_handleDeviceMessage]; consumed by TasksScreen for auto-refresh.
   final _taskEventsController =
       StreamController<Map<String, dynamic>>.broadcast(); // NEW
-
+	String? _initialUserId;
   bool _booting = true;
   bool _initializing = false;
   String? _initError;
   static const int _remindersTabIndex = 5;
-
+	
   int page = 0;
 
   @override
@@ -98,10 +98,10 @@ class _PaiAppState extends State<PaiApp> {
     api = ApiClient(baseUrl: AppConfig.baseUrl, auth: auth);
 
     PushService.onNotificationTap = (data) {
-  // Reminders tab is index 4 (Chat=0, Tasks=1, Plugins=2, Test=3, Profile=4, Reminders=5)
-  // ← adjust if your order differs.
-  if (mounted) setState(() => page = _remindersTabIndex);
-};
+      // Reminders tab is index 4 (Chat=0, Tasks=1, Plugins=2, Test=3, Profile=4, Reminders=5)
+      // ← adjust if your order differs.
+      if (mounted) setState(() => page = _remindersTabIndex);
+    };
 
     _bootstrap();
   }
@@ -219,15 +219,16 @@ class _PaiAppState extends State<PaiApp> {
 
       // Add the invoke handler to the connection service so that when an 'invoke' message is received,
       // it will be dispatched to the CapabilityDispatcher.
-      connection.setInvokeHandler(
-      ({required capability, required parameters}) async {
+      connection.setInvokeHandler(({
+        required capability,
+        required parameters,
+      }) async {
         final result = await _runBuiltinOrDispatch(capability, parameters);
         // Coerce to Map — matches what the protocol needs.
         if (result is Map<String, dynamic>) return result;
         if (result is Map) return result.cast<String, dynamic>();
         return {'result': result};
-      },
-    );
+      });
 
       if (!mounted) {
         connection.dispose();
@@ -358,9 +359,11 @@ class _PaiAppState extends State<PaiApp> {
         return;
 
       case 'connected':
-        debugPrint('[PaiApp] Backend connection confirmed');
-        unawaited(_reconcilePlugins());
-        return;
+	  debugPrint('[PaiApp] Backend connection confirmed');
+	  unawaited(_reconcilePlugins().catchError((e, st) {
+	    debugPrint('[PaiApp] reconcile failed: $e\n$st');
+	  }));
+	  return;
 
       case 'heartbeat_ack':
         return;
@@ -418,7 +421,6 @@ class _PaiAppState extends State<PaiApp> {
     String capability,
     Map<String, dynamic> parameters,
   ) async {
-
     // --- Built-in capabilities shadow the plugin dispatcher ---
     switch (capability) {
       case 'system.notifications.show':
@@ -550,6 +552,7 @@ class _PaiAppState extends State<PaiApp> {
     _dispatcher = null;
     _testTaskRunner?.dispose();
     _testTaskRunner = null;
+    _initialUserId = null;
 
     // These were not being reset. Without this, a re-login as a
     // different user reuses the cached ChatService (with the previous
@@ -557,7 +560,7 @@ class _PaiAppState extends State<PaiApp> {
     _chatService = null;
     _taskService = null;
     _scheduleService = null;
-    await PushService.unregisterDevice();   
+    await PushService.unregisterDevice();
 
     await auth.logout();
 
@@ -708,13 +711,12 @@ class _PaiAppState extends State<PaiApp> {
         taskEvents: _taskEventsController.stream,
       ),
       PluginsScreen(manager: pluginManager!),
-      TestTaskScreen(pluginManager: pluginManager!, runner: _testTaskRunner!),
       SchedulesScreen(
-       service: _scheduleService!,
-       taskService: taskService,
-  events: _taskEventsController.stream,
-  profileService: _profileService,
-  currentDeviceId: deviceId,
+        service: _scheduleService!,
+        taskService: taskService,
+        events: _taskEventsController.stream,
+        profileService: _profileService,
+        currentDeviceId: deviceId,
       ),
       ProfileScreen(
         service: _profileService!,
@@ -722,14 +724,16 @@ class _PaiAppState extends State<PaiApp> {
         currentDeviceId: deviceId,
         onLogout: _logout,
       ),
+      TestTaskScreen(pluginManager: pluginManager!, runner: _testTaskRunner!),
     ];
-
+	// Capture once; keep stable across frames.
+final appKey = _initialUserId ??= auth.userId;
     return MaterialApp(
       // When the user changes, Flutter sees a different key → destroys the
       // old widget tree (calling dispose on ChatScreen, etc.) and builds
       // fresh. Without this, IndexedStack keeps the old user's ChatScreen
       // (and its messages, sessions, status WS) alive across logins.
-      key: ValueKey('app-${auth.userId ?? "anon"}'),
+      key: ValueKey('app-${appKey ?? "anon"}'),
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
@@ -748,16 +752,36 @@ class _PaiAppState extends State<PaiApp> {
         ),
         // >>> The change <<<
         body: IndexedStack(index: page, children: screens),
-        bottomNavigationBar: NavigationBar(
-          selectedIndex: page,
-          onDestinationSelected: (i) => setState(() => page = i),
-          destinations: const [
-            NavigationDestination(icon: Icon(Icons.chat), label: 'Chat'),
-            NavigationDestination(icon: Icon(Icons.task), label: 'Tasks'),
-            NavigationDestination(icon: Icon(Icons.extension),label: 'Plugins'),
-            NavigationDestination(icon: Icon(Icons.bug_report), label: 'Test'),
-            NavigationDestination(icon: Icon(Icons.alarm), label: 'Reminders'),
-            NavigationDestination(icon: Icon(Icons.person), label: 'Profile'),
+        bottomNavigationBar: BottomNavigationBar(
+          currentIndex: page,
+          onTap: (i) => setState(() => page = i),
+          type: BottomNavigationBarType.fixed,
+          items: [
+            const BottomNavigationBarItem(
+              icon: Icon(Icons.chat),
+              label: 'Chat',
+            ),
+            const BottomNavigationBarItem(
+              icon: Icon(Icons.task),
+              label: 'Tasks',
+            ),
+            const BottomNavigationBarItem(
+              icon: Icon(Icons.extension),
+              label: 'Plugins',
+            ),
+            const BottomNavigationBarItem(
+              icon: Icon(Icons.alarm),
+              label: 'Reminders',
+            ),
+            const BottomNavigationBarItem(
+              icon: Icon(Icons.person),
+              label: 'Profile',
+            ),
+            if (kDebugMode)
+              const BottomNavigationBarItem(
+                icon: Icon(Icons.bug_report),
+                label: 'Test',
+              ),
           ],
         ),
       ),

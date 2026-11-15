@@ -19,16 +19,6 @@ class ChatService {
       'chat_session_id_${api.auth?.userId ?? "anon"}';
 
 
-  /// Cryptographically-random 32-char hex id.
-  /// 128 bits of entropy — collision probability is astronomically low
-  /// for any realistic number of sessions.
-  static String _generateSessionId() {
-    final rand = Random.secure();
-    final bytes = List<int>.generate(16, (_) => rand.nextInt(256));
-    return bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
-  }
-
-
   Future<void> setSessionId(String? id) async {
     _sessionId = id;
     await _persistSession();
@@ -37,6 +27,10 @@ class ChatService {
     final prefs = await SharedPreferences.getInstance();
     _sessionId = prefs.getString(_sessionKey);
   }
+  Future<void> clearSession() async {
+  _sessionId = null;
+  await _persistSession();
+}
 
   Future<void> _persistSession() async {
     final prefs = await SharedPreferences.getInstance();
@@ -89,10 +83,10 @@ class ChatService {
 
 
   Future<void> startNewSession() async {
-    // Was `setSessionId(null)` — that left the client with no id, so
-    // ChatStatusService had nothing to subscribe to. Mint the id here
-    // so the WS can open *before* the first POST.
-    _sessionId = _generateSessionId();
-    await _persistSession();
+    // Do NOT mint a local id. The server assigns the real session id
+  // on the first POST /chat; until then there is no session to
+  // subscribe to, and opening a WS on a fake id gets a 403.
+  _sessionId = null;
+  await _persistSession();   // removes the key
   }
 }

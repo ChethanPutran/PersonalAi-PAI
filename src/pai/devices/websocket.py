@@ -1,4 +1,5 @@
 """WebSocket-backed device connection."""
+# src/pai/devices/websocket.py
 from __future__ import annotations
 
 import asyncio

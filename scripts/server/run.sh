@@ -1,0 +1,1 @@
+source .env && python -m server.main

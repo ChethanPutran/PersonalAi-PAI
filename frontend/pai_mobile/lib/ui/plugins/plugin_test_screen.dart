@@ -475,43 +475,73 @@ class _CapabilityTestSheetState extends State<_CapabilityTestSheet> {
   // Actions — local
   // ------------------------------------------------------------------
 
-  Future<void> _loadModule() async {
-    if (widget.runtime == null) return;
-    setState(() {
-      _busy = true;
-      _error = null;
-    });
-    try {
-      final wasLoaded =
+Future<void> _loadModule() async {
+  if (widget.runtime == null) return;
+  setState(() {
+    _busy = true;
+    _error = null;
+    _permResult = null;
+  });
+  try {
+    final wasLoaded =
+        await widget.runtime!.isModuleAvailable(_nativeModule!);
+
+    final result = await widget.runtime!.loadNativeModule(
+      nativeModule: _nativeModule!,
+      artifactPath: _artifactPath!,
+      entrypoint: _entrypoint!,
+      capabilities: _allCapabilityIds,
+      permissions: _allPermissions,
+    );
+
+    final ok = result['ok'] == true;
+    if (ok && !wasLoaded) _loadedByUs = true;
+    _moduleLoaded = ok;
+
+    if (ok) {
+      // Sanity check — the registry should have it now.
+      final stillThere =
           await widget.runtime!.isModuleAvailable(_nativeModule!);
-
-      final ok = await widget.runtime!.loadNativeModule(
-        nativeModule: _nativeModule!,
-        artifactPath: _artifactPath!,
-        entrypoint: _entrypoint!,
-        capabilities: _allCapabilityIds,
-        permissions: _allPermissions,
-      );
-
-      if (ok && !wasLoaded) _loadedByUs = true;
-      _moduleLoaded = ok;
-
-      if (ok) {
-        final stillThere =
-            await widget.runtime!.isModuleAvailable(_nativeModule!);
-        if (!stillThere) {
-          _error = 'Host reported load success, but isModuleAvailable '
-              'returns false — the native registry is not persistent.';
-        }
-      } else {
-        _error = 'Native module load returned false';
+      if (!stillThere) {
+        _error = 'Host reported load success, but isModuleAvailable '
+            'returns false — the native registry is not persistent.';
       }
-    } catch (e) {
-      _error = e.toString();
-    } finally {
-      if (mounted) setState(() => _busy = false);
+      return;
     }
+
+    // ---- Failure path — distinguish denial from other errors ----
+    final denied = _asStringList(result['denied']);
+    if (denied.isNotEmpty) {
+      _error = 'Permissions denied: ${denied.join(", ")}. '
+          'Grant them from the system settings and retry.';
+      // Also populate _permResult so the same JSON box the "Request
+      // permissions" button uses displays the denial detail.
+      _permResult = {
+        'ok': false,
+        'denied': denied,
+        'permissions': result['permissions'] ?? _allPermissions,
+      };
+    } else {
+      _error = 'Native module load failed: '
+          '${result['error'] ?? 'unknown_error'}';
+    }
+  } catch (e) {
+    _error = e.toString();
+  } finally {
+    if (mounted) setState(() => _busy = false);
   }
+}
+
+/// Android sends `List<String>`; Linux sends a comma-separated `String`.
+List<String> _asStringList(dynamic v) {
+  if (v == null) return const [];
+  if (v is List) return v.map((e) => e.toString()).toList();
+  if (v is String) {
+    if (v.isEmpty) return const [];
+    return v.split(',').map((s) => s.trim()).where((s) => s.isNotEmpty).toList();
+  }
+  return const [];
+}
 
   Future<void> _requestPermissions() async {
     if (widget.runtime == null) return;

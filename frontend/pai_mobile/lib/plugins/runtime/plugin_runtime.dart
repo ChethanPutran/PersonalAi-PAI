@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
@@ -9,54 +11,73 @@ class PluginRuntime {
   // Load / unload
   // ---------------------------------------------------------------
 
-  Future<bool> loadNativeModule({
-    required String nativeModule,
-    required String artifactPath,
-    required String entrypoint,
-    required List<String> capabilities,
-    required List<String> permissions,
-  }) async {
-    debugPrint('$_tag loadNativeModule:');
-    debugPrint('$_tag   nativeModule = $nativeModule');
-    debugPrint('$_tag   artifactPath = $artifactPath');
-    debugPrint('$_tag   entrypoint   = $entrypoint');
-    debugPrint('$_tag   capabilities = $capabilities');
-    debugPrint('$_tag   permissions  = $permissions');
+  Future<Map<String, dynamic>> loadNativeModule({
+  required String nativeModule,
+  required String artifactPath,
+  required String entrypoint,
+  required List<String> capabilities,
+  required List<String> permissions,
+}) async {
+  debugPrint('$_tag loadNativeModule:');
+  debugPrint('$_tag   nativeModule = $nativeModule');
+  debugPrint('$_tag   artifactPath = $artifactPath');
 
-    try {
-      final r = await _channel.invokeMethod<bool>('loadNativeModule', {
+  try {
+    final r = await _channel.invokeMethod<Map<dynamic, dynamic>>(
+      'loadNativeModule',
+      {
         'nativeModule': nativeModule,
         'artifactPath': artifactPath,
         'entrypoint': entrypoint,
         'capabilities': capabilities,
         'permissions': permissions,
-      });
+      },
+    );
 
-      if (r == true) {
-        debugPrint('$_tag loadNativeModule($nativeModule) → true');
-        return true;
-      }
-      debugPrint('$_tag loadNativeModule($nativeModule) → false/null');
-      return false;
-    } on MissingPluginException catch (e) {
-      debugPrint(
-          '$_tag loadNativeModule($nativeModule) → MissingPluginException: $e');
-      debugPrint(
-          '$_tag   the native host has no handler for "pai/plugin_runtime". '
-          'Check that PluginChannel is wired into my_application.cc.');
-      return false;
-    } on PlatformException catch (e) {
-      debugPrint('$_tag loadNativeModule($nativeModule) → PlatformException:');
-      debugPrint('$_tag   code    = ${e.code}');
-      debugPrint('$_tag   message = ${e.message}');
-      debugPrint('$_tag   details = ${e.details}');
-      return false;
-    } catch (e, st) {
-      debugPrint('$_tag loadNativeModule($nativeModule) → unexpected: $e');
-      debugPrintStack(stackTrace: st);
-      return false;
+    final map = (r ?? const <dynamic, dynamic>{}).cast<String, dynamic>();
+    if (map.isEmpty) {
+      return {'ok': false, 'error': 'empty_response_from_native'};
     }
+
+    // Normalise: Linux sends CSV, Android sends List.
+    List<String> asList(dynamic v) {
+      if (v == null) return const [];
+      if (v is List) return List<String>.from(v);
+      if (v is String) {
+        return v.isEmpty ? const [] : v.split(',').map((s) => s.trim()).toList();
+      }
+      return const [];
+    }
+
+    if (map['denied'] != null) {
+      map['denied'] = asList(map['denied']);
+    }
+    if (map['permissions'] != null) {
+      map['permissions'] = asList(map['permissions']);
+    }
+    if (map['capabilities'] != null) {
+      map['capabilities'] = asList(map['capabilities']);
+    }
+
+    debugPrint('$_tag loadNativeModule($nativeModule) → $map');
+    return map;
+  } on MissingPluginException catch (e) {
+    debugPrint('$_tag loadNativeModule → MissingPluginException: $e');
+    return {'ok': false, 'error': 'native_channel_missing'};
+  } on PlatformException catch (e) {
+    debugPrint('$_tag loadNativeModule → PlatformException: '
+        'code=${e.code} message=${e.message}');
+    return {
+      'ok': false,
+      'error': e.message ?? 'platform_exception',
+      'code': e.code,
+    };
+  } catch (e, st) {
+    debugPrint('$_tag loadNativeModule → unexpected: $e');
+    debugPrintStack(stackTrace: st);
+    return {'ok': false, 'error': e.toString()};
   }
+}
 
   Future<void> unloadNativeModule(String nativeModule) async {
     debugPrint('$_tag unloadNativeModule($nativeModule)');
@@ -70,6 +91,20 @@ class PluginRuntime {
           'code=${e.code} message=${e.message}');
     }
   }
+
+  // PluginRuntime — replace body
+Future<String> getAbi() async {
+  if (!Platform.isAndroid) {
+    // Native platforms: read from Platform.operatingSystemVersion
+    // if needed; on Linux/Windows desktop x86_64 is the norm.
+    return Platform.version.contains('arm64') ? 'arm64' : 'x86_64';
+  }
+  try {
+    return await _channel.invokeMethod<String>('getAbi') ?? 'unknown';
+  } catch (e) {
+    return 'unknown';
+  }
+}
 
   // ---------------------------------------------------------------
   // Introspection

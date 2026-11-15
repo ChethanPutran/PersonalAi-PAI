@@ -42,6 +42,13 @@ class DeviceConnectionService {
   final String baseUrl;
   final String deviceId;
 
+  // Give up after this many consecutive failures with no successful
+  // handshake / `connected` frame in between.
+  static const _maxConsecutiveFailures = 5;
+  int _consecutiveFailures = 0;
+
+  StreamSubscription? _streamSub;
+
   /// JWT sent as `?token=` on the WebSocket URL.
   /// The WS endpoint validates it before accepting the connection.
   final String? token;
@@ -120,22 +127,47 @@ class DeviceConnectionService {
     if (token != null && token!.isNotEmpty) {
       params['token'] = token!;
     }
-
+    
+    // baseUrl is the bare host (e.g. http://10.217.53.74:8000).
+    // The backend mounts devices under /api/v1, so the WS path must
+    // include that prefix. Previously the WS URL omitted it and the
+    // request never matched a route — 403 from middleware, 404 from
+    // routing, neither recoverable.
+    final basePath = uri.path; // '' when baseUrl has no path
     return Uri(
       scheme: scheme,
       host: uri.host,
       port: uri.hasPort ? uri.port : null,
-      path: '${uri.path}/devices/$deviceId/ws',
+      path: '$basePath/api/v1/devices/$deviceId/ws',
       queryParameters: params.isEmpty ? null : params,
     ).toString();
   }
+
+
 
   // -----------------------------------------------------------------
   // Connect / disconnect
   // -----------------------------------------------------------------
 
+  String _safeLogUri(Uri uri) {
+    final qp = Map<String, String>.from(uri.queryParameters);
+    final t = qp['token'];
+    if (t != null && t.length > 16) {
+      qp['token'] = '${t.substring(0, 6)}…${t.substring(t.length - 4)} '
+                     '(${t.length} chars)';
+    }
+    return uri.replace(queryParameters: qp).toString();
+  }
+
   Future<void> connect() async {
     if (_disposed) return;
+
+    // Don't even try without a token — every attempt would be rejected
+    // with 4401 and just burn the failure budget.
+    if (token == null || token!.isEmpty) {
+      debugPrint('[DeviceConnection] no token; deferring connect');
+      return;
+    }
 
     if (_state == DeviceConnectionState.connected ||
         _state == DeviceConnectionState.connecting) {
@@ -145,9 +177,15 @@ class DeviceConnectionService {
     _manualDisconnect = false;
     _setState(DeviceConnectionState.connecting);
 
+    // Drop any prior subscription before the new attempt so a
+    // reconnect doesn't leave two listeners feeding _handleMessage.
+    await _streamSub?.cancel();
+    _streamSub = null;
+    _channel = null;
+
     try {
       final uri = Uri.parse(_webSocketUrl);
-      print('[DeviceConnection] Connecting to $uri');
+      debugPrint('[DeviceConnection] Connecting to ${_safeLogUri(uri)}');
 
       final channel = WebSocketChannel.connect(uri);
       _channel = channel;
@@ -156,23 +194,35 @@ class DeviceConnectionService {
 
       if (_disposed || _manualDisconnect) {
         await channel.sink.close();
+        _channel = null;
         return;
       }
 
       _setState(DeviceConnectionState.connected);
-      print('[DeviceConnection] Connected device=$deviceId');
+      _consecutiveFailures = 0;   // ← successful handshake resets the budget
+      debugPrint('[DeviceConnection] Connected device=$deviceId');
 
       _startHeartbeat();
 
-      channel.stream.listen(
+      _streamSub = channel.stream.listen(
         _handleMessage,
         onError: _handleError,
         onDone: _handleDisconnected,
-        cancelOnError: false,
+        cancelOnError: true,      // ← was false
       );
     } catch (e) {
-      print('[DeviceConnection] Connection failed: $e');
+      debugPrint('[DeviceConnection] Connection failed: $e');
+      _channel = null;
       _setState(DeviceConnectionState.disconnected);
+
+      _consecutiveFailures++;
+      if (_consecutiveFailures >= _maxConsecutiveFailures) {
+        debugPrint(
+          '[DeviceConnection] giving up after $_maxConsecutiveFailures '
+          'failed attempts (last: $e)',
+        );
+        return;
+      }
       _scheduleReconnect();
     }
   }
@@ -285,6 +335,7 @@ class DeviceConnectionService {
         // ---- Lifecycle ----
         case DeviceMessageType.connected:
           debugPrint('[DeviceConnection] Backend handshake: $message');
+          _consecutiveFailures = 0;    // ← add this
           break;
 
         case DeviceMessageType.ping:
@@ -531,23 +582,59 @@ class DeviceConnectionService {
   // -----------------------------------------------------------------
 
   void _handleError(Object error, StackTrace stackTrace) {
-    print('[DeviceConnection] WebSocket error: $error');
+    debugPrint('[DeviceConnection] WebSocket error: $error');
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer = null;
+    _channel = null;
+    _streamSub = null;
     _setState(DeviceConnectionState.disconnected);
+
+    if (_manualDisconnect || _disposed) return;
+
+    _consecutiveFailures++;
+    if (_consecutiveFailures >= _maxConsecutiveFailures) {
+      debugPrint(
+        '[DeviceConnection] giving up after $_maxConsecutiveFailures '
+        'failures (last: $error)',
+      );
+      return;
+    }
     _scheduleReconnect();
   }
 
   void _handleDisconnected() {
-    print('[DeviceConnection] WebSocket closed');
+    // Read closeCode BEFORE nulling the channel — it's gone afterwards.
+    final closeCode = _channel?.closeCode;
+    debugPrint('[DeviceConnection] WebSocket closed (code=$closeCode)');
 
     _heartbeatTimer?.cancel();
     _heartbeatTimer = null;
     _channel = null;
-
+    _streamSub = null;
     _setState(DeviceConnectionState.disconnected);
 
-    if (!_manualDisconnect && !_disposed) {
-      _scheduleReconnect();
+    // Auth/ownership rejections: retrying with the same credentials
+    // would just loop. The backend now accepts-then-closes with these
+    // codes (see routes.py), so they DO arrive here.
+    if (closeCode == 4401 || closeCode == 4403 || closeCode == 4003) {
+      debugPrint(
+        '[DeviceConnection] terminal close ($closeCode); '
+        'not reconnecting',
+      );
+      return;
     }
+
+    if (_manualDisconnect || _disposed) return;
+
+    _consecutiveFailures++;
+    if (_consecutiveFailures >= _maxConsecutiveFailures) {
+      debugPrint(
+        '[DeviceConnection] giving up after $_maxConsecutiveFailures '
+        'failures',
+      );
+      return;
+    }
+    _scheduleReconnect();
   }
 
   void _startHeartbeat() {
@@ -601,6 +688,9 @@ class DeviceConnectionService {
 
     _heartbeatTimer = null;
     _reconnectTimer = null;
+
+    _streamSub?.cancel();          
+    _streamSub = null;   
 
     try {
       _channel?.sink.close();

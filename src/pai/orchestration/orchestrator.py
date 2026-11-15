@@ -17,6 +17,7 @@ from pai.prompts.registry import PromptRegistry
 from pai.prompts.registry import PromptRegistry
 from pai.prompts.tracker import PromptVersionTracker
 from pai.scheduler.scheduler_service import SchedulerService
+from pai.security.llm_guard import PromptGuard
 from pai.storage.repositories.chat import ChatRepository
 from pai.tasks.task_tracker import TaskTracker
 from pai.devices.manager import DeviceManager
@@ -111,6 +112,7 @@ class TaskOrchestrator(Manager):
         prompt_tracker: PromptVersionTracker,    
         command_registry: Optional[CommandRegistry] = None,   
         orchestrator_config: OrchestratorConfig = OrchestratorConfig(),
+        prompt_guard: Optional[PromptGuard] = None,
 
     ):
         super().__init__(event_bus=event_bus)
@@ -146,6 +148,7 @@ class TaskOrchestrator(Manager):
         self.chat_reply_max_tokens = orchestrator_config.chat_reply_max_tokens
         self.chat_reply_temperature = orchestrator_config.chat_reply_temperature
         self.scheduler_service = scheduler_service
+        self.prompt_guard = prompt_guard or PromptGuard()
     
     async def initialize(self) -> None:
         # ── 3. Sanity: every persisting manager has a session_factory ──
@@ -834,6 +837,16 @@ class TaskOrchestrator(Manager):
                     prior_results, indent=2, default=str,
                 )[:self.tool_summary_block_max_size]
 
+
+            # ── 4b. INSPECT + SANITIZE INPUTS (pre-LLM) ──
+            inspection = self.prompt_guard.inspect_request(
+                user_text=goal,
+                memory_block=memory_block,
+                history_block=history_block,
+                tool_results_block=prior_results_block,
+                span=span,
+            )
+
             # ── 5. Render via registry (was: inline system_prompt + user_msg) ──
             template = self.prompts.get("chat.reply")
             prompt = template.render(
@@ -859,6 +872,7 @@ class TaskOrchestrator(Manager):
                     "is_retry": is_retry,
                     "tone": tone,
                     "prior_result_count": len(prior_results),
+                    "injection_tags": [t for t, _ in inspection.injection_tags],
                 },
             )
             
@@ -876,13 +890,19 @@ class TaskOrchestrator(Manager):
                 span.set_error(f"llm_failed: {exc}")
                 raise
 
-            reply = llm_response.content or ""
+            raw_reply = llm_response.content or ""
+
+            # ── 6b. SANITIZE THE RESPONSE (post-LLM) ──
+            sanitized = self.prompt_guard.sanitize_response(
+                raw_text=raw_reply,
+                span=span,
+                request_id=context.request_id,
+            )
+            reply = sanitized.clean_text
+
             finish_reason = llm_response.finish_reason
-
-
             span.set_attribute("reply", reply)
             span.set_attribute("reply_length", len(reply))
-            span.set_attribute("tone", tone)
             span.set_attribute("finish_reason", finish_reason)
             if llm_response.usage is not None:
                 span.set_attribute("prompt_tokens", llm_response.usage.prompt_tokens)
@@ -890,19 +910,16 @@ class TaskOrchestrator(Manager):
                 span.set_attribute("total_tokens", llm_response.usage.total_tokens)
 
             if finish_reason == "length":
-                # Truncated by max_tokens — the reply the user sees is
-                # cut off mid-sentence. Log loudly; the caller may want
-                # to retry with a higher limit or surface a warning.
                 logger.warning(
-                    "chat reply truncated at max_tokens={} "
-                    "(request={}); consider raising chat_reply_max_tokens",
-                    self.chat_reply_max_tokens,
-                    context.request_id,
+                    "chat reply truncated at max_tokens={} (request={})",
+                    self.chat_reply_max_tokens, context.request_id,
                 )
 
             logger.info(
-                "Chat reply generated: request={} length={} finish_reason={}",
+                "Chat reply generated: request={} length={} finish_reason={} "
+                "sanitized=%s",
                 context.request_id, len(reply), finish_reason,
+                sanitized.tool_calls_stripped or sanitized.secrets_redacted,
             )
             return reply
          

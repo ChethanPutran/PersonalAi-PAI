@@ -4,12 +4,10 @@ import asyncio
 import time
 import uuid
 from typing import Any, Dict, List, Optional
-
+from loguru import logger
 import chromadb
 from chromadb.config import Settings
 from chromadb.utils import embedding_functions
-from loguru import logger
-
 from pai.memory.utils import _matches_where
 from pai.observability.tracer import get_tracer
 
@@ -66,7 +64,7 @@ class VectorStore:
                 )
                 if embedding_fn_class:
                     self.embed_fn = embedding_fn_class(
-                        model_name=self.embedding_model,
+                        model_name=self.embedding_model
                     )
                 else:
                     self.embed_fn = embedding_functions.DefaultEmbeddingFunction()

@@ -27,6 +27,8 @@ from pai.observability import TraceStore, Tracer, set_tracer
 from pai.observability.tracer import get_tracer
 
 
+API_PREFIX = "/api/v1"
+
 # ── Configure logging BEFORE anything else that might log ──
 configure_logging(
     log_dir=Path("logs"),
@@ -101,6 +103,19 @@ def create_lifespan(context: PAIAppContext):
         logger.info("Tracing enabled → data/traces")
 
         context.orchestrator.scheduler_service.start()
+
+        # ── 7. Embedded device agent (optional) ──
+        # Runs the PAI DeviceAgent as a supervised background task in
+        # this same event loop. Skips itself if PAI_EMBED_AGENT is false
+        # or the credentials are not set. Delay in EmbeddedAgent gives
+        # uvicorn time to bind its socket before the agent's login.
+        # from pai.agent_runtime import EmbeddedAgent
+        # embedded_agent = EmbeddedAgent()
+        # await embedded_agent.start()
+        # app.state.embedded_agent = embedded_agent
+
+
+
         yield
 
         # ── Shutdown ──
@@ -112,6 +127,19 @@ def create_lifespan(context: PAIAppContext):
                 await context.orchestrator.event_bus.unsubscribe(sub_id)
             except Exception:
                 pass
+
+        # Stop the embedded agent BEFORE the scheduler — the agent is a
+        # client of the backend and should disconnect before the server
+        # side stops firing notifications through its WS / push paths.
+        if getattr(app.state, "embedded_agent", None) is not None:
+            try:
+                await asyncio.wait_for(
+                    app.state.embedded_agent.stop(),
+                    timeout=10.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("embedded_agent stop timed out")
+                
         await context.orchestrator.scheduler_service.stop()
         logger.info("Shutting down Personal AI System...")
 
@@ -170,15 +198,15 @@ def create_app(context: PAIAppContext) -> FastAPI:
     app.add_middleware(LoggingMiddleware)
 
     # Routers
-    app.include_router(auth.router, prefix="/api/v1")
-    app.include_router(devices.router, prefix="/api/v1")
-    app.include_router(plugins.router, prefix="/api/v1")
-    app.include_router(tasks.router, prefix="/api/v1")
-    app.include_router(chat.router, prefix="/api/v1")
-    app.include_router(system.router, prefix="/api/v1")
-    app.include_router(observability_routes.router, prefix="/api/v1")
-    app.include_router(schedules_router, prefix="/api/v1")
-    app.include_router(push_tokens_router, prefix="/api/v1")
+    app.include_router(auth.router, prefix=API_PREFIX)
+    app.include_router(devices.router, prefix=API_PREFIX)
+    app.include_router(plugins.router, prefix=API_PREFIX)
+    app.include_router(tasks.router, prefix=API_PREFIX)
+    app.include_router(chat.router, prefix=API_PREFIX)
+    app.include_router(system.router, prefix=API_PREFIX)
+    app.include_router(observability_routes.router, prefix=API_PREFIX)
+    app.include_router(schedules_router, prefix=API_PREFIX)
+    app.include_router(push_tokens_router, prefix=API_PREFIX)
 
     @app.get("/")
     async def root(context: PAIAppContext = Depends(get_app_context)):
@@ -192,8 +220,22 @@ def create_app(context: PAIAppContext) -> FastAPI:
             "source_device_id": context.source_device_id,
             "kernel": context.orchestrator.get_status(user_id=context.user_id),
         }
+        
+    @app.middleware("http")
+    async def _log_ws_rejections(request, call_next):
+        response = await call_next(request)
+        if (
+            request.headers.get("upgrade", "").lower() == "websocket"
+            and response.status_code != 101
+        ):
+            logger.warning(
+                "WS upgrade rejected: path=%s status=%d",
+                request.url.path, response.status_code,
+            )
+        return response
 
     return app
+
 
 
 default_context = create_app_context(config)

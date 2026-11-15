@@ -1,13 +1,15 @@
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+
 plugins {
     id("com.android.application")
     id("kotlin-android")
-    // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
+    // The Flutter Gradle Plugin must be applied after the Android and
+    // Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
 
-    // Add the Google services Gradle plugin
+    // Google services (Firebase). Requires android/app/google-services.json.
     id("com.google.gms.google-services")
 }
-
 
 android {
     namespace = "com.example.pai_mobile"
@@ -17,17 +19,11 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
-    }
-
-    kotlinOptions {
-        jvmTarget = JavaVersion.VERSION_17.toString()
+        isCoreLibraryDesugaringEnabled = true 
     }
 
     defaultConfig {
-        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
         applicationId = "com.example.pai_mobile"
-        // You can update the following values to match your application needs.
-        // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
@@ -36,41 +32,53 @@ android {
         // host JNI lib
         externalNativeBuild {
             cmake {
-                cppFlags "-std=c++17 -fexceptions"
+                // Kotlin DSL: method call with parentheses, comma-separated.
+                cppFlags("-std=c++17", "-fexceptions")
             }
         }
 
         ndk {
-            abiFilters "arm64-v8a", "armeabi-v7a", "x86_64"
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
         }
     }
 
     externalNativeBuild {
         cmake {
-            path "src/main/cpp/CMakeLists.txt"
-            version "3.22.1"
+            // `path` is File? — wrap in file(...) explicitly.
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
         }
     }
 
-    // Extract .so from APK so dlopen can find the host lib
-    packagingOptions {
+    // `packagingOptions` was deprecated in AGP 8; the new name is `packaging`.
+    packaging {
         jniLibs {
             useLegacyPackaging = true
         }
     }
 
     sourceSets {
-        main {
-            jniLibs.srcDirs += ["src/main/jniLibs"]
+        // `main` on the container isn't callable in Kotlin DSL —
+        // resolve it by name.
+        getByName("main") {
+            // `srcDir` (singular) accepts a path string.
+            jniLibs.srcDir("src/main/jniLibs")
         }
     }
 
     buildTypes {
         release {
             // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
             signingConfig = signingConfigs.getByName("debug")
         }
+    }
+}
+
+// Migrated from `android.kotlinOptions { jvmTarget = ... }`, which is
+// deprecated. Equivalent, but uses the typed enum.
+kotlin {
+    compilerOptions {
+        jvmTarget.set(JvmTarget.JVM_17)
     }
 }
 
@@ -79,15 +87,7 @@ flutter {
 }
 
 dependencies {
-  // Import the Firebase BoM
-  implementation(platform("com.google.firebase:firebase-bom:35.2.0"))
-
-
-  // TODO: Add the dependencies for Firebase products you want to use
-  // When using the BoM, don't specify versions in Firebase dependencies
-  implementation("com.google.firebase:firebase-analytics")
-
-
-  // Add the dependencies for any other desired Firebase products
-  // https://firebase.google.com/docs/android/setup#available-libraries
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4") 
+    implementation(platform("com.google.firebase:firebase-bom:35.2.0"))
+    implementation("com.google.firebase:firebase-analytics")
 }

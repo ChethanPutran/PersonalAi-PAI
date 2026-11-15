@@ -36,6 +36,7 @@ const char** Permissions(size_t* n) {
 
 char* Dup(const std::string& s) {
     char* p = static_cast<char*>(std::malloc(s.size() + 1));
+    if (!p) throw std::bad_alloc();
     std::memcpy(p, s.c_str(), s.size() + 1);
     return p;
 }
@@ -65,6 +66,7 @@ std::map<std::string, std::string> ParamsFromAbi(const pai_kv_list_t* params) {
 
 void ResultToAbi(const std::map<std::string, std::string>& m, pai_kv_list_t* out) {
     auto* items = static_cast<pai_kv_t*>(std::malloc(sizeof(pai_kv_t) * m.size()));
+    if (!items) throw std::bad_alloc();
     size_t i = 0;
     for (const auto& [k, v] : m) {
         items[i].key = Dup(k);
@@ -129,8 +131,32 @@ pai_plugin_module_t g_module = {
 
 }  // namespace
 
-extern "C" pai_plugin_module_t* pai_plugin_module_create(void) {
+// ---------------------------------------------------------------------------
+// Entry points — must survive TWO independent stripping passes:
+//
+//   * visibility("default") — counteracts `-fvisibility=hidden` on the
+//     build. Without it, the symbols are visible inside the .so but not
+//     from dlsym() on the host.
+//
+//   * used — counteracts `-Wl,--gc-sections`. These functions have no
+//     internal caller (only dlsym() references them at runtime), so the
+//     linker sees them as unreachable and removes their section unless
+//     the compiler is told otherwise.
+//
+// Both were missing on the previous build. The .so loaded fine (dlopen
+// succeeded), but dlsym() for "pai_plugin_module_create" returned null
+// — "missing create/destroy symbols" from DynamicLoader.
+// ---------------------------------------------------------------------------
+#if defined(_WIN32)
+  #define PAI_EXPORT __declspec(dllexport)
+#else
+  #define PAI_EXPORT __attribute__((visibility("default"))) __attribute__((used))
+#endif
+
+extern "C" PAI_EXPORT pai_plugin_module_t* pai_plugin_module_create(void) {
     return &g_module;
 }
 
-extern "C" void pai_plugin_module_destroy(pai_plugin_module_t* /*m*/) {}
+extern "C" PAI_EXPORT void pai_plugin_module_destroy(pai_plugin_module_t* /*m*/) {
+    // Static module — nothing to free.
+}

@@ -25,6 +25,7 @@ from pai.orchestration.authorization import AuthorizationManager
 from pai.planning.planner import Planner
 from pai.prompts.registry import PromptRegistry
 from pai.prompts.tracker import PromptVersionTracker
+from pai.security.llm_guard import PromptGuard
 from pai.storage.database import Database
 from pai.storage.repositories.chat import ChatRepository
 from pai.storage.repositories.task import TaskRepository
@@ -152,6 +153,13 @@ def create_app_context(config: Config) -> PAIAppContext:
     llm_router = LLMRouter(default_config=config.llm_provider)
 
     chat_repo = ChatRepository(session_factory=database.sessionmaker)
+
+
+    prompt_guard = PromptGuard(
+        request_mode="warn",     # "warn" in dev, "reject" only if you want to block
+        response_mode="sanitize",
+    )
+
     planning_engine = Planner(
         event_bus=event_bus,
         llm_router=llm_router,
@@ -159,7 +167,8 @@ def create_app_context(config: Config) -> PAIAppContext:
         memory_manager=memory_manager,
         chat_repo=chat_repo,
         prompt_registry=prompt_registry, 
-        prompt_tracker=prompt_tracker,        
+        prompt_tracker=prompt_tracker,      
+        prompt_guard=prompt_guard  
     )
 
     # ── Task store — in-memory for now, DB-backed later ──
@@ -234,7 +243,7 @@ def create_app_context(config: Config) -> PAIAppContext:
         scheduler_service=scheduler_service,
     ):
         builtin_registry.register(cap)
-        
+
     for cap in build_task_capabilities(task_manager):
         builtin_registry.register(cap)
 
@@ -242,6 +251,7 @@ def create_app_context(config: Config) -> PAIAppContext:
     # Executor — registered under the name the router will route to
     builtin_executor = BuiltinExecutor(builtin_registry)
     executor_manager.register(builtin_executor)
+
 
 
     orchestrator = TaskOrchestrator(
@@ -265,7 +275,8 @@ def create_app_context(config: Config) -> PAIAppContext:
         scheduler_service=scheduler_service,
         push_service=push_service,
         prompt_registry=prompt_registry,
-        prompt_tracker=prompt_tracker
+        prompt_tracker=prompt_tracker,
+        prompt_guard=prompt_guard
     )
 
     capability_router.register_change_listener(

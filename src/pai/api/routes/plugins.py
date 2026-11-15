@@ -100,19 +100,75 @@ def _sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+_KNOWN_ABIS = {"arm64-v8a", "armeabi-v7a", "x86_64", "x86", "arm64"}
+
+
+def _enumerate_abis(version_dir: Path, platform: str) -> List[str]:
+    """
+    Return the ABI directories present under `<version_dir>/<platform>/`.
+
+    Only meaningful for platforms that ship per-ABI binaries (Android).
+    Returns `[]` for platforms like Linux/macOS/Windows that have a
+    single artifact per platform.
+    """
+    base = version_dir / platform
+    if not base.is_dir():
+        return []
+    return sorted(
+        d.name for d in base.iterdir()
+        if d.is_dir() and d.name in _KNOWN_ABIS
+    )
+
 def _artifact_for_platform(
     version_dir: Path,
     platform: str,
     manifest: Dict[str, Any],
+    abi: Optional[str] = None,
 ) -> Optional[Path]:
-    spec = (manifest.get("platforms") or {}).get(platform)
-    if isinstance(spec, dict):
-        rel = spec.get("artifact")
-        if rel:
-            p = version_dir / rel
-            if p.exists():
-                return p
+    """
+    Resolve the artifact file for a platform, optionally ABI-specific.
 
+    Resolution order:
+      1. Manifest declares `<platform>/<filename>` → try `<platform>/<abi>/<filename>`
+      2. Manifest declares full path (with ABI baked in) → substitute ABI in path
+      3. Manifest path exists verbatim → use it
+      4. Fall back to <platform>/<abi>/ tree scan
+      5. Fall back to <platform>/ tree scan
+      6. Fall back to any matching extension under version_dir
+    """
+    spec = (manifest.get("platforms") or {}).get(platform)
+    declared: Optional[str] = None
+    if isinstance(spec, dict):
+        declared = spec.get("artifact")
+
+    if declared:
+        parts = Path(declared).parts
+
+        # Case 1: declared = "android/libpai_camera.so" (2 parts)
+        if abi and len(parts) == 2:
+            candidate = version_dir / parts[0] / abi / parts[1]
+            if candidate.exists():
+                return candidate
+
+        # Case 2: declared = "android/arm64-v8a/libpai_camera.so" (3+ parts)
+        # — swap whatever ABI segment is there with the requested one.
+        if abi and len(parts) >= 3:
+            known_abis = {"arm64-v8a", "armeabi-v7a", "x86_64", "x86", "arm64"}
+            patched = list(parts)
+            for i, p in enumerate(patched):
+                if p in known_abis:
+                    patched[i] = abi
+                    candidate = version_dir.joinpath(*patched)
+                    if candidate.exists():
+                        return candidate
+                    break
+
+        # Case 3: declared path exists verbatim
+        p = version_dir / declared
+        if p.exists():
+            return p
+
+    # Case 4/5: scan by extension
     ext = {
         "linux": ".so",
         "android": ".so",
@@ -121,10 +177,20 @@ def _artifact_for_platform(
     }.get(platform)
 
     if ext:
+        # Prefer ABI-specific scan
+        if abi:
+            base = version_dir / platform / abi
+            if base.is_dir():
+                for candidate in base.rglob(f"*{ext}"):
+                    return candidate
+        base = version_dir / platform
+        if base.is_dir():
+            for candidate in base.rglob(f"*{ext}"):
+                return candidate
         for candidate in version_dir.rglob(f"*{ext}"):
             return candidate
-    return None
 
+    return None
 
 @router.get("/index.json")
 async def registry_index(request: Request) -> Dict[str, Any]:
@@ -145,21 +211,65 @@ async def registry_index(request: Request) -> Dict[str, Any]:
             sha: Dict[str, str] = {}
             sizes: Dict[str, int] = {}
 
+            # NEW — per-ABI maps, keyed by platform
+            artifacts_by_abi: Dict[str, Dict[str, str]] = {}
+            sha_by_abi: Dict[str, Dict[str, str]] = {}
+            sizes_by_abi: Dict[str, Dict[str, int]] = {}
+            
             for platform in platforms:
-                artifact_path = _artifact_for_platform(version_dir, platform, manifest)
-                if artifact_path is None:
-                    continue
-                artifacts[platform] = (
-                    f"{base}/api/v1/plugins/{plugin_id}/{version}/artifact/{platform}"
-                )
-                sha[platform] = _sha256_file(artifact_path)
-                sizes[platform] = artifact_path.stat().st_size
+                abis = _enumerate_abis(version_dir, platform)
 
+                if abis:
+                    per_abi_urls: Dict[str, str] = {}
+                    per_abi_sha: Dict[str, str] = {}
+                    per_abi_sizes: Dict[str, int] = {}
+                    for abi in abis:
+                        artifact_path = _artifact_for_platform(
+                            version_dir, platform, manifest, abi=abi,
+                        )
+                        if artifact_path is None:
+                            continue
+                        per_abi_urls[abi] = (
+                            f"{base}/api/v1/plugins/{plugin_id}/{version}"
+                            f"/artifact/{platform}/{abi}"
+                        )
+                        per_abi_sha[abi] = _sha256_file(artifact_path)
+                        per_abi_sizes[abi] = artifact_path.stat().st_size
+
+                    if per_abi_urls:
+                        artifacts_by_abi[platform] = per_abi_urls
+                        sha_by_abi[platform] = per_abi_sha
+                        sizes_by_abi[platform] = per_abi_sizes
+
+                        # Legacy flat entries point at the first ABI so old
+                        # clients keep working. Order matches sorted(_KNOWN_ABIS),
+                        # so arm64-v8a comes before armeabi-v7a before x86_64.
+                        first = next(iter(per_abi_urls))
+                        artifacts[platform] = per_abi_urls[first]
+                        sha[platform] = per_abi_sha[first]
+                        sizes[platform] = per_abi_sizes[first]
+                else:
+                    # Single-artifact platform (Linux, etc.)
+                    artifact_path = _artifact_for_platform(
+                        version_dir, platform, manifest,
+                    )
+                    if artifact_path is None:
+                        continue
+                    artifacts[platform] = (
+                        f"{base}/api/v1/plugins/{plugin_id}/{version}"
+                        f"/artifact/{platform}"
+                    )
+                    sha[platform] = _sha256_file(artifact_path)
+                    sizes[platform] = artifact_path.stat().st_size
+                    
             versions_out[version] = {
                 "manifestUrl": f"{base}/api/v1/plugins/{plugin_id}/{version}/manifest.json",
                 "artifacts": artifacts,
                 "sha256": sha,
                 "sizeBytes": sizes,
+                "artifactsByAbi": artifacts_by_abi,
+                "sha256ByAbi": sha_by_abi,
+                "sizeBytesByAbi": sizes_by_abi,
             }
 
         plugins_out.append({
@@ -180,17 +290,27 @@ async def registry_manifest(plugin_id: str, version: str) -> JSONResponse:
     return JSONResponse(content=json.loads(path.read_text()))
 
 
-@router.get("/{plugin_id}/{version}/artifact/{platform}")
-async def registry_artifact(plugin_id: str, version: str, platform: str):
+@router.get("/{plugin_id}/{version}/artifact/{platform}/{abi}")
+async def registry_artifact_with_abi(
+    plugin_id: str,
+    version: str,
+    platform: str,
+    abi: str,
+):
     version_dir = REGISTRY_ROOT / plugin_id / version
     manifest_path = version_dir / "manifest.json"
     if not manifest_path.exists():
         raise HTTPException(404, f"plugin not found: {plugin_id}@{version}")
 
     manifest = json.loads(manifest_path.read_text())
-    artifact = _artifact_for_platform(version_dir, platform, manifest)
+    artifact = _artifact_for_platform(
+        version_dir, platform, manifest, abi=abi,
+    )
     if artifact is None:
-        raise HTTPException(404, f"no artifact for {plugin_id}@{version} on {platform}")
+        raise HTTPException(
+            404,
+            f"no artifact for {plugin_id}@{version} on {platform}/{abi}",
+        )
 
     return FileResponse(
         path=artifact,
@@ -199,6 +319,33 @@ async def registry_artifact(plugin_id: str, version: str, platform: str):
     )
 
 
+@router.get("/{plugin_id}/{version}/artifact/{platform}")
+async def registry_artifact(
+    plugin_id: str,
+    version: str,
+    platform: str,
+    abi: str = Query("arm64-v8a", description="Default ABI for legacy clients"),
+):
+    version_dir = REGISTRY_ROOT / plugin_id / version
+    manifest_path = version_dir / "manifest.json"
+    if not manifest_path.exists():
+        raise HTTPException(404, f"plugin not found: {plugin_id}@{version}")
+
+    manifest = json.loads(manifest_path.read_text())
+    artifact = _artifact_for_platform(
+        version_dir, platform, manifest, abi=abi,
+    )
+    if artifact is None:
+        raise HTTPException(
+            404,
+            f"no artifact for {plugin_id}@{version} on {platform}/{abi}",
+        )
+
+    return FileResponse(
+        path=artifact,
+        media_type="application/octet-stream",
+        filename=artifact.name,
+    )
 # ============================================================
 # Device reconciliation
 # ============================================================
@@ -275,6 +422,7 @@ def _plugin_compatible(
 @router.get("/catalog")
 async def get_catalog(
     request: Request,
+    abi: Optional[str] = Query(None),
     platform: Optional[str] = Query(None),
     architecture: Optional[str] = Query(None),
     device_type: Optional[str] = Query(None),

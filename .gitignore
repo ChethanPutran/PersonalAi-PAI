@@ -9,7 +9,7 @@ src/ai_personal_agent.egg-info/*
 .github/*
 __pycache__
 
-
+google-services.json
 # ─── CMake / C++ build output ──────────────────────────────────────────
 # Any build directory created by cmake
 build/

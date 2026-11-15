@@ -22,6 +22,9 @@ import '../models/chat_status.dart';
 class ChatStatusService extends ChangeNotifier {
   final ApiClient api;
   final String sessionId;
+  
+  int _consecutiveFailures = 0;
+static const _maxFailures = 5;
 
   WebSocketChannel? _ws;
   StreamSubscription? _sub;
@@ -83,11 +86,19 @@ class ChatStatusService extends ChangeNotifier {
       // future scheme (opaque tokens, refresh tokens with '+' or '=')
       // from silently producing a malformed URL.
       final url = Uri.parse(
-        '$wsBase/chat/$sessionId/stream'
+        '$wsBase/api/v1/chat/$sessionId/stream'
         '?token=${Uri.encodeComponent(token)}',
       );
+       debugPrint('[ChatStatus] connecting to $url');
 
       _ws = WebSocketChannel.connect(url);
+      
+      // Swallow the .ready future so a rejected upgrade goes through
+    // _handleDisconnect instead of surfacing as an unhandled error.
+    unawaited(_ws!.ready.catchError((Object e) {
+      _handleDisconnect(error: e);
+    }));
+      
       _sub = _ws!.stream.listen(
         _handleFrame,
         onError: (Object e) => _handleDisconnect(error: e),
@@ -118,9 +129,10 @@ class ChatStatusService extends ChangeNotifier {
       final type = data['type']?.toString();
 
       if (type == 'connected') {
-        debugPrint('[ChatStatus] stream connected for $sessionId');
-        return;
-      }
+  debugPrint('[ChatStatus] stream connected for $sessionId');
+  _consecutiveFailures = 0;
+  return;
+}
       if (type == 'error') {
         debugPrint('[ChatStatus] server error: ${data['message']}');
         return;
@@ -174,28 +186,20 @@ void _handleDisconnect({Object? error}) {
     return;
   }
 
-  // Pre-upgrade rejections (404/403/500) surface here as
-  // `WebSocketChannelException` with no close code. The channel may
-  // include the underlying exception in its message — grep for a
-  // 4xx status marker. If we see one, stop retrying — the route
-  // isn't going to appear by retrying.
-  if (code == null && error is WebSocketChannelException) {
-    // `.message` is nullable in some versions of web_socket_channel —
-    // the exception may be constructed with only a stack trace, or by a
-    // transport that doesn't surface a message. Coerce to an empty
-    // string so the `.toLowerCase()` chain doesn't need a null guard
-    // at every step.
-    final msg = (error.message ?? '').toLowerCase();
-    if (msg.contains('403') || msg.contains('404') ||
-        msg.contains('400') || msg.contains('401')) {
-      debugPrint(
-        '[ChatStatus] server rejected WS with a 4xx; not reconnecting: '
-        '${error.message ?? error.toString()}',
-      );
-      _current = null;
-      notifyListeners();
-      return;
-    }
+  // Pre-upgrade rejections (403/404/…) surface as a WebSocketException
+  // whose message never contains the HTTP status — so we can't
+  // distinguish them from a network blip. Cap the failure count
+  // instead: after N attempts with no successful handshake, give up
+  // and stop hammering the server.
+  _consecutiveFailures++;
+  if (_consecutiveFailures >= _maxFailures) {
+    debugPrint(
+      '[ChatStatus] giving up after $_maxFailures failed '
+      'attempts for $sessionId (last: ${error ?? "closed"})',
+    );
+    _current = null;
+    notifyListeners();
+    return;
   }
 
   _scheduleReconnect();

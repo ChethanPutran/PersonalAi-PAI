@@ -19,7 +19,7 @@
       "entrypoint": "pai_plugin_module_create"
     },
     "android": {
-      "artifact": "android/arm64-v8a/libpai_camera.so",
+      "artifact": "android/libpai_camera.so",
       "entrypoint": "pai_plugin_module_create"
     }
   },

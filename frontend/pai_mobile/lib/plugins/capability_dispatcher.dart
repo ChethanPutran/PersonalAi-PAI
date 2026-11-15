@@ -31,31 +31,58 @@ class CapabilityDispatcher {
   void invalidateCache() => _cache.clear();
 
   Future<Map<String, dynamic>> invoke({
-    required String capability,
-    required Map<String, dynamic> parameters,
-  }) async {
-    final info = await _resolve(capability);
+  required String capability,
+  required Map<String, dynamic> parameters,
+}) async {
+  final info = await _resolve(capability);
 
-    if (!await runtime.isModuleAvailable(info.nativeModule)) {
-      debugPrint('[Dispatcher] loading ${info.nativeModule}');
-      final ok = await runtime.loadNativeModule(
-        nativeModule: info.nativeModule,
-        artifactPath: info.artifactPath,
-        entrypoint: info.entrypoint,
-        capabilities: info.allCapabilities,
-        permissions: info.permissions,
-      );
-      if (!ok) {
-        throw Exception('Failed to load native module ${info.nativeModule}');
-      }
-    }
-
-    return await runtime.invoke(
+  if (!await runtime.isModuleAvailable(info.nativeModule)) {
+    debugPrint('[Dispatcher] loading ${info.nativeModule}');
+    final load = await runtime.loadNativeModule(
       nativeModule: info.nativeModule,
-      capability: capability,
-      parameters: parameters,
+      artifactPath: info.artifactPath,
+      entrypoint: info.entrypoint,
+      capabilities: info.allCapabilities,
+      permissions: info.permissions,
     );
+
+    if (load['ok'] != true) {
+      // Surface permission denial distinctly from other failures, so
+      // the chat UI can say "grant camera permission" rather than
+      // a generic "load failed".
+      final denied = _asStringList(load['denied']);
+      if (denied.isNotEmpty) {
+        throw Exception(
+          'Permissions denied for ${info.nativeModule}: '
+          '${denied.join(", ")}. '
+          'Grant them from the Plugins screen and try again.',
+        );
+      }
+      throw Exception(
+        'Failed to load native module ${info.nativeModule}: '
+        '${load['error'] ?? 'unknown_error'}',
+      );
+    }
   }
+
+  return await runtime.invoke(
+    nativeModule: info.nativeModule,
+    capability: capability,
+    parameters: parameters,
+  );
+}
+
+/// Android sends `List<String>`; Linux sends a comma-separated `String`.
+/// Normalize both to a list.
+List<String> _asStringList(dynamic v) {
+  if (v == null) return const [];
+  if (v is List) return v.map((e) => e.toString()).toList();
+  if (v is String) {
+    if (v.isEmpty) return const [];
+    return v.split(',').map((s) => s.trim()).where((s) => s.isNotEmpty).toList();
+  }
+  return const [];
+}
 
   Future<_ModuleInfo> _resolve(String capability) async {
     final cached = _cache[capability];

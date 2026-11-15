@@ -336,18 +336,52 @@ async def device_websocket(websocket: WebSocket, device_id: str):
     token = websocket.query_params.get("token")
     user_id: Optional[str] = None
 
-    if token:
-        try:
-            from pai.security.auth import decode_access_token
-            user_id = decode_access_token(token)
-        except Exception as exc:
-            logger.warning("WS token decode failed: %s", exc)
-            user_id = None
-
-    if user_id is None:
-        logger.warning("Device WS rejected: missing/invalid token")
+    if not token:
+        logger.warning("Device WS: no token for device %s", device_id)
+        # Accept first so the client receives a close code instead of a
+        # bare 403 upgrade rejection. Without this, dart:io surfaces a
+        # generic WebSocketException and the client retries forever.
+        await websocket.accept()
+        await websocket.send_json({
+            "type": "error",
+            "code": "missing_token",
+            "message": "Authentication token required",
+        })
         await websocket.close(code=4401)
         return
+
+    try:
+        from pai.security.auth import decode_access_token
+        user_id = decode_access_token(token)
+    except Exception as exc:
+        # Log the actual reason + a safe token fingerprint so the next
+        # 403 is diagnosable from the server log alone.
+        logger.warning(
+            "WS token decode failed for device %s: %s "
+            "(token_len=%d, head=%r, tail=%r)",
+            device_id, exc, len(token), token[:8], token[-8:],
+        )
+        user_id = None
+
+
+    if user_id is None:
+        logger.warning(
+            "Device WS: invalid/expired token for device %s "
+            "(token_len=%d, tail=%r)",
+            device_id, len(token), token[-8:],
+        )
+        await websocket.accept()
+        await websocket.send_json({
+            "type": "error",
+            "code": "invalid_token",
+            "message": "Invalid or expired token",
+        })
+        await websocket.close(code=4401)
+        return
+
+    logger.info(
+        "Device WS auth OK: device=%s user=%s", device_id, user_id,
+    )
 
     context = websocket.app.state.context
     device_manager = context.orchestrator.device_manager
@@ -387,8 +421,11 @@ async def device_websocket(websocket: WebSocket, device_id: str):
             # Ensure ownership is persisted for future restarts.
             try:
                 await device_manager.assign_user(device_id, user_id)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(
+                    "assign_user failed for %s (user=%s): %s",
+                    device_id, user_id, exc,
+                )
             logger.info("Device %s auto-registered", device_id)
         except Exception as exc:
             logger.exception(
@@ -438,7 +475,13 @@ async def device_websocket(websocket: WebSocket, device_id: str):
         })
 
         while True:
-            message = await websocket.receive_json()
+            try:
+                message = await websocket.receive_json()
+            except WebSocketDisconnect:
+                raise
+            except Exception as exc:
+                logger.warning("Bad frame from %s: %s", device_id, exc)
+                continue
             message_type = message.get("type")
             logger.debug("Device message [%s]: %s", device_id, message)
 

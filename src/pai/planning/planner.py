@@ -35,7 +35,8 @@ class Planner(Lifecycle):
         memory_manager: MemoryManager,
         chat_repo: ChatRepository,
         prompt_registry,
-        prompt_tracker
+        prompt_tracker,
+        prompt_guard
     ):
         self._event_bus = event_bus
         self.llm = llm_router
@@ -48,7 +49,8 @@ class Planner(Lifecycle):
             memory_manager=memory_manager,
             chat_repo=chat_repo,
             prompt_registry=prompt_registry,  
-            prompt_tracker=prompt_tracker,     
+            prompt_tracker=prompt_tracker,   
+            prompt_guard=prompt_guard 
         )
         self.verifier = PlanVerifier(capability_router=capability_router)
         self.active_plans: Dict[str, Plan] = {}

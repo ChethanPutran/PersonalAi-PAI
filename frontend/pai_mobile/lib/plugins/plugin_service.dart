@@ -10,6 +10,28 @@ import 'plugin_registry.dart';
 import 'plugin_repository.dart';
 import 'runtime/plugin_runtime.dart';
 
+/// Thrown by [PluginService.install] when the user denies one or more
+/// of the permissions the plugin's native manifest declares. The
+/// plugin has already been rolled back at this point — nothing on
+/// disk, nothing in the registry — so the caller's only job is UX:
+/// show [denied] to the user and offer to retry / open Settings.
+class PluginPermissionDeniedException implements Exception {
+  final String id;
+  final List<String> denied;
+  final List<String> permissions;
+
+  PluginPermissionDeniedException({
+    required this.id,
+    required this.denied,
+    required this.permissions,
+  });
+
+  @override
+  String toString() =>
+      'Plugin $id: permissions denied '
+      '(${denied.length} of ${permissions.length}: ${denied.join(", ")})';
+}
+
 /// Internal façade used by the UI and the command router.
 ///
 /// NOT the backend REST client.
@@ -41,18 +63,79 @@ class PluginService {
     return (index['plugins'] as List).cast<Map<String, dynamic>>();
   }
 
-  /// Download and install a plugin version.
+  /// Download, verify, load the native module (which triggers the OS
+  /// permission dialog), and register. If the user denies any of the
+  /// permissions the plugin's manifest declares, this rolls back —
+  /// deletes the downloaded files, unloads the native module, and
+  /// throws [PluginPermissionDeniedException] so the UI can show
+  /// which permissions were refused.
   Future<PluginInfo> install(String id, String version) async {
-    final manifest = await installer.install(id, version);
 
-    // Register it in-memory (disabled).
-    registry.add(DevicePlugin(info: manifest, enabled: false));
+    // 1. Detect ABI once
+    final abi = await runtime.getAbi();
+    debugPrint('[PluginService] install($id) abi=$abi');
 
+    // 2. Download with ABI-aware URL
+    final manifest = await installer.install(id, version, abi: abi);
+
+    // ---- 2. Resolve the artifact path for this platform ----
+    final platform = _platformKey();
+    final spec = manifest.platforms[platform];
+    if (spec == null) {
+      await installer.remove(id);
+      throw PluginRepositoryException(
+        'plugin $id@$version has no artifact for platform $platform',
+      );
+    }
+    final path = await installer.artifactPath(id, version, platform, spec,abi: abi);
+
+    // ---- 3. Load the .so — Kotlin reads the declared permissions, -----
+    //         shows the OS dialog(s), and returns the result.
+    final result = await runtime.loadNativeModule(
+      nativeModule: manifest.nativeModule,
+      artifactPath: path,
+      entrypoint: spec.entrypoint,
+      capabilities: manifest.capabilities,
+      permissions: manifest.permissions,
+    );
+
+    // ---- 4. Failure path — roll back cleanly ----
+    if (result['ok'] != true) {
+      // Unload even though Kotlin should have already done it. Belt
+      // and suspenders — if the .so was loaded before the permission
+      // check for any reason, this releases it.
+      try {
+        await runtime.unloadNativeModule(manifest.nativeModule);
+      } catch (_) {}
+
+      await installer.remove(id);
+
+      final denied = List<String>.from(result['denied'] as List? ?? const []);
+      if (denied.isNotEmpty) {
+        throw PluginPermissionDeniedException(
+          id: id,
+          denied: denied,
+          permissions: List<String>.from(
+            result['permissions'] as List? ?? manifest.permissions,
+          ),
+        );
+      }
+
+      throw PluginRepositoryException(
+        'loadNativeModule failed: ${result['error']}',
+      );
+    }
+
+    // ---- 5. Success path — plugin is loaded and permitted ----
+    await installer.setEnabled(id, true);
+    registry.add(DevicePlugin(info: manifest, enabled: true));
+
+    debugPrint('[PluginService] installed + enabled $id@$version');
     return manifest;
   }
 
   Future<Map<String, dynamic>> readInstalled() => installer.readInstalled();
-Future<List<PluginInfo>> discoverLocal() => installer.discover();
+  Future<List<PluginInfo>> discoverLocal() => installer.discover();
 
   /// Load the native module and mark enabled.
   Future<bool> enable(String id) async {
@@ -62,9 +145,9 @@ Future<List<PluginInfo>> discoverLocal() => installer.discover();
     if (plugin == null) {
       final manifests = await installer.discover();
       final manifest = manifests.cast<PluginInfo?>().firstWhere(
-            (m) => m?.id == id,
-            orElse: () => null,
-          );
+        (m) => m?.id == id,
+        orElse: () => null,
+      );
       if (manifest == null) return false;
       plugin = DevicePlugin(info: manifest, enabled: false);
       registry.add(plugin);
@@ -73,16 +156,21 @@ Future<List<PluginInfo>> discoverLocal() => installer.discover();
     final platform = _platformKey();
     final spec = plugin.info.platforms[platform];
     if (spec == null) return false;
+    
+    // NEW — pick up the current device ABI so artifactPath finds the
+    // per-ABI file when it exists on disk.
+    final abi = await runtime.getAbi();
 
     final path = await installer.artifactPath(
       plugin.info.id,
       plugin.info.version,
       platform,
       spec,
+      abi: abi,   
     );
     if (!File(path).existsSync()) return false;
 
-    final ok = await runtime.loadNativeModule(
+    final result = await runtime.loadNativeModule(
       nativeModule: plugin.info.nativeModule,
       artifactPath: path,
       entrypoint: spec.entrypoint,
@@ -90,7 +178,10 @@ Future<List<PluginInfo>> discoverLocal() => installer.discover();
       permissions: plugin.info.permissions,
     );
 
-    if (!ok) return false;
+    if (result['ok'] != true) {
+      debugPrint('[PluginService] enable($id) failed: $result');
+      return false;
+    }
 
     plugin.enabled = true;
     await installer.setEnabled(id, true);
@@ -142,11 +233,7 @@ Future<List<PluginInfo>> discoverLocal() => installer.discover();
     for (final info in manifests) {
       final entry = installed[info.id];
       final enabled = entry is Map && entry['enabled'] == true;
-      out.add({
-        'id': info.id,
-        'version': info.version,
-        'enabled': enabled,
-      });
+      out.add({'id': info.id, 'version': info.version, 'enabled': enabled});
     }
     return out;
   }
@@ -158,32 +245,40 @@ Future<List<PluginInfo>> discoverLocal() => installer.discover();
   /// Read installed.json and hydrate the registry.
   /// Does NOT auto-enable — the user decides.
   Future<void> restoreInstalled() async {
-  debugPrint('[PluginService] restoreInstalled: scanning disk');
-  final manifests = await installer.discover();
-  final installed = await installer.readInstalled();
+    debugPrint('[PluginService] restoreInstalled: scanning disk');
+    final manifests = await installer.discover();
+    final installed = await installer.readInstalled();
+    for (final m in manifests) {
+      final entry = installed[m.id];
+      final wasEnabled = entry is Map && entry['enabled'] == true;
 
-  for (final m in manifests) {
-    final entry = installed[m.id];
-    final enabled = entry is Map && entry['enabled'] == true;
+      registry.add(DevicePlugin(info: m, enabled: false));
 
-    registry.add(DevicePlugin(info: m, enabled: false));
+      if (!wasEnabled) {
+        debugPrint(
+          '[PluginService]   ${m.id}@${m.version} installed (disabled)',
+        );
+        continue;
+      }
 
-    if (!enabled) {
-      debugPrint('[PluginService]   ${m.id}@${m.version} installed (disabled)');
-      continue;
-    }
+      debugPrint('[PluginService]   ${m.id}@${m.version} re-enabling');
 
-    debugPrint('[PluginService]   ${m.id}@${m.version} re-enabling');
-    try {
-      await enable(m.id);
-      debugPrint('[PluginService]   → ${m.id} enabled OK');
-    } catch (e) {
-      debugPrint('[PluginService]   → ${m.id} enable FAILED: $e');
-      // Leave it disabled in installed.json? Or keep as-is for next try?
-      // For now: leave the flag alone so the user can retry manually.
+      final ok = await enable(m.id);
+      if (ok) {
+        debugPrint('[PluginService]   → ${m.id} enabled OK');
+      } else {
+        // Common case: user revoked a permission in Settings since the
+        // last run. Leave the plugin installed but disabled — the user
+        // can re-enable from the Plugins screen, which will re-trigger
+        // the OS permission dialog.
+        debugPrint(
+          '[PluginService]   → ${m.id} enable FAILED '
+          '(likely permission revoked) — leaving disabled',
+        );
+        await installer.setEnabled(m.id, false);
+      }
     }
   }
-}
 
   String _platformKey() {
     if (Platform.isAndroid) return 'android';

@@ -1,36 +1,40 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 import '../../auth/auth_service.dart';
 import '../../config/app_config.dart';
 
 
+/// HTTP client for the PAI backend.
+///
+/// **Base URL and `/api/v1` prefix are handled here.** Callers pass
+/// the path *after* `/api/v1` — so `api.get('/tasks')` hits
+/// `<baseUrl>/api/v1/tasks`, and `api.post('/devices/register', ...)`
+/// hits `<baseUrl>/api/v1/devices/register`.
+///
+/// - `baseUrl`   — host-only, no trailing slash, no path segment.
+///                 e.g. `http://10.0.2.2:8000`
+/// - `apiPrefix` — prepended to every call. Default `/api/v1`.
+///                 Override only for non-standard deployments.
+///
+/// **Do NOT include `/api/v1` in caller paths** — doing so produces
+/// a doubled prefix. A `debugPrint` warning fires if you try, so the
+/// bug surfaces in one test cycle instead of as a silent 404.
 class ApiClient {
-  /// Base URL of the backend.
-  ///
-  /// Must NOT end with a trailing slash or a path segment.
-  /// Example: "http://127.0.0.1:8000" or "http://10.0.2.2:8000".
-  ///
-  /// Callers pass paths like "/api/v1/plugins/catalog" — the "/api/v1"
-  /// prefix belongs to the caller, not to this class, because the
-  /// backend may serve non-versioned paths too.
   final String baseUrl;
-
+  final String apiPrefix;
   final AuthService? auth;
 
-  /// The current access token, or null if unauthenticated.
-  ///
-  /// This is the single place WS-based services should look for the
-  /// token. If `AuthService` gains an auto-refresh mechanism later,
-  /// adding it here (e.g. making this async and calling refresh on
-  /// expiry) propagates to every consumer without touching them.
   String? get authToken => auth?.token;
 
   ApiClient({
     String? baseUrl,
+    String? apiPrefix,
     this.auth,
-  }) : baseUrl = _normalize(baseUrl ?? AppConfig.baseUrl);
+  })  : baseUrl = _normalize(baseUrl ?? AppConfig.baseUrl),
+        apiPrefix = _normalizePrefix(apiPrefix ?? AppConfig.apiPrefix);
 
   // -----------------------------------------------------------------
   // URL construction
@@ -38,21 +42,34 @@ class ApiClient {
 
   static String _normalize(String url) {
     var s = url.trim();
-    while (s.endsWith('/')) {
-      s = s.substring(0, s.length - 1);
-    }
+    while (s.endsWith('/')) s = s.substring(0, s.length - 1);
     return s;
   }
 
-  /// Build a URI from this client's base URL and a caller-supplied path.
+  static String _normalizePrefix(String p) {
+    var s = p.trim();
+    if (s.isEmpty) return '';
+    if (!s.startsWith('/')) s = '/$s';
+    while (s.endsWith('/')) s = s.substring(0, s.length - 1);
+    return s;
+  }
+
+  /// Build a full URI from a caller-supplied path.
   ///
-  /// Guarantees exactly one slash between the base and the path,
-  /// regardless of whether the caller wrote `/foo` or `foo`.
+  /// `'/tasks'` and `'tasks'` both yield `<baseUrl><apiPrefix>/tasks`.
   Uri _uri(String path, [Map<String, String>? query]) {
     var p = path;
     if (!p.startsWith('/')) p = '/$p';
 
-    final uri = Uri.parse('$baseUrl$p');
+    if (apiPrefix.isNotEmpty && p.startsWith('$apiPrefix/')) {
+      debugPrint(
+        '[ApiClient] WARNING: path "$path" already starts with '
+        '"$apiPrefix". Callers must pass the path *after* the prefix '
+        "(e.g. '/tasks', not '$apiPrefix/tasks').",
+      );
+    }
+
+    final uri = Uri.parse('$baseUrl$apiPrefix$p');
     if (query == null || query.isEmpty) return uri;
     return uri.replace(queryParameters: {
       ...uri.queryParameters,
@@ -65,9 +82,7 @@ class ApiClient {
   // -----------------------------------------------------------------
 
   Map<String, String> get _headers {
-    final h = <String, String>{
-      'Content-Type': 'application/json',
-    };
+    final h = <String, String>{'Content-Type': 'application/json'};
     final token = auth?.token;
     if (token != null && token.isNotEmpty) {
       h['Authorization'] = 'Bearer $token';
@@ -111,12 +126,17 @@ class ApiClient {
     return _handle(response);
   }
 
-Future<dynamic> patch(String path, Map<String, dynamic> body) async {
-  final response = await http.patch(
-    _uri(path), headers: _headers, body: jsonEncode(body),
-  );
-  return _handle(response);
-}
+  Future<dynamic> patch(
+    String path,
+    Map<String, dynamic> body,
+  ) async {
+    final response = await http.patch(
+      _uri(path),
+      headers: _headers,
+      body: jsonEncode(body),
+    );
+    return _handle(response);
+  }
 
   Future<dynamic> delete(String path) async {
     final response = await http.delete(_uri(path), headers: _headers);
@@ -133,16 +153,17 @@ Future<dynamic> patch(String path, Map<String, dynamic> body) async {
         : jsonDecode(response.body);
 
     if (response.statusCode == 401) {
-      // Clear the local session so the UI falls back to the login
-    // screen. Without this, an expired token produces a cascade of
-    // UnauthorizedException on every screen and the app never
-    // recovers.
-    auth?.handleUnauthorized();
-    throw UnauthorizedException();
+      auth?.handleUnauthorized();
+      throw UnauthorizedException();
     }
 
     if (response.statusCode >= 200 && response.statusCode < 300) {
       return data;
+    }
+    if (response.statusCode == 401) {
+  	auth?.handleUnauthorized();
+  	final msg = (data is Map ? data['detail']?.toString() : null);
+  	throw UnauthorizedException(msg);      
     }
 
     throw ApiException(response.statusCode, data);
@@ -151,8 +172,11 @@ Future<dynamic> patch(String path, Map<String, dynamic> body) async {
 
 
 class UnauthorizedException implements Exception {
+  final String? message;
+  UnauthorizedException([this.message]);
+
   @override
-  String toString() => 'Unauthorized';
+  String toString() => message ?? 'Unauthorized';
 }
 
 

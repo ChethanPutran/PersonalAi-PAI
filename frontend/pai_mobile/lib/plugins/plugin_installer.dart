@@ -78,93 +78,186 @@ class PluginInstaller {
   // ---------------------------------------------------------------
   // Install
   // ---------------------------------------------------------------
+  Future<PluginInfo> install(
+  String id,
+  String version, {
+  String abi = 'unknown',
+}) async {
+  debugPrint('$_tag install($id, $version, abi=$abi) starting');
 
-  Future<PluginInfo> install(String id, String version) async {
-    debugPrint('$_tag install($id, $version) starting');
+  // 1. Resolve entry from registry index.
+  final index = await repository.fetchIndex();
+  final plugins = (index['plugins'] as List).cast<Map<String, dynamic>>();
+  final entry = plugins.firstWhere(
+    (p) => p['id'] == id,
+    orElse: () =>
+        throw PluginRepositoryException('plugin $id not in registry'),
+  );
 
-    // 1. Resolve entry from registry index.
-    debugPrint('$_tag   step 1: fetching registry index');
-    final index = await repository.fetchIndex();
-    final plugins = (index['plugins'] as List).cast<Map<String, dynamic>>();
-    debugPrint('$_tag   index contains ${plugins.length} plugin(s)');
-
-    final entry = plugins.firstWhere(
-      (p) => p['id'] == id,
-      orElse: () =>
-          throw PluginRepositoryException('plugin $id not in registry'),
-    );
-
-    final versions = (entry['versions'] as Map).cast<String, dynamic>();
-    final ver = versions[version] as Map<String, dynamic>?;
-    if (ver == null) {
-      throw PluginRepositoryException('plugin $id has no version $version');
-    }
-    debugPrint('$_tag   resolved $id@$version from index');
-
-    // 2. Fetch manifest.
-    final manifestUrl = ver['manifestUrl'] as String;
-    debugPrint('$_tag   step 2: fetching manifest from $manifestUrl');
-    final manifest = await repository.fetchManifest(manifestUrl);
-    debugPrint(
-        '$_tag   manifest: nativeModule=${manifest.nativeModule} '
-        'capabilities=${manifest.capabilities}');
-
-    // 3. Pick artifact for this platform.
-    final platform = _platformKey();
-    debugPrint('$_tag   step 3: resolving platform artifact ($platform)');
-
-    final spec = manifest.platforms[platform];
-    if (spec == null) {
-      throw PluginRepositoryException(
-          'plugin $id does not support $platform '
-          '(available: ${manifest.platforms.keys.join(", ")})');
-    }
-
-    final artifactUrl = (ver['artifacts'] as Map)[platform] as String?;
-    final sha = (ver['sha256'] as Map)[platform] as String?;
-    if (artifactUrl == null || sha == null) {
-      throw PluginRepositoryException(
-          'registry missing artifact/sha for $id@$version on $platform');
-    }
-    debugPrint('$_tag   artifact: $artifactUrl');
-    debugPrint('$_tag   expected sha256: $sha');
-
-    // 4. Create version directory.
-    final dir = await pluginDir(id, version);
-    await dir.create(recursive: true);
-    debugPrint('$_tag   step 4: plugin dir = ${dir.path}');
-
-    // 5. Persist manifest.
-    final manifestFile = File('${dir.path}/manifest.json');
-    await manifestFile.writeAsString(jsonEncode(manifest.toJson()));
-    debugPrint('$_tag   step 5: wrote ${manifestFile.path}');
-
-    // 6. Download + verify artifact.
-    final artifactFile = File('${dir.path}/${spec.artifact}');
-    debugPrint('$_tag   step 6: downloading to ${artifactFile.path}');
-    final t0 = DateTime.now();
-    try {
-      await repository.downloadArtifact(
-        url: artifactUrl,
-        expectedSha256: sha,
-        dest: artifactFile,
-      );
-    } catch (e) {
-      debugPrint('$_tag   download/verify FAILED: $e');
-      rethrow;
-    }
-    final elapsed = DateTime.now().difference(t0);
-    final size = await artifactFile.length();
-    debugPrint(
-        '$_tag   download ok: $size bytes in ${elapsed.inMilliseconds}ms');
-
-    // 7. Mark installed.
-    await _markInstalled(id, version, enabled: false);
-    debugPrint('$_tag   step 7: marked installed (enabled=false)');
-
-    debugPrint('$_tag install($id, $version) complete');
-    return manifest;
+  final versions = (entry['versions'] as Map).cast<String, dynamic>();
+  final ver = versions[version] as Map<String, dynamic>?;
+  if (ver == null) {
+    throw PluginRepositoryException('plugin $id has no version $version');
   }
+
+  // 2. Fetch manifest.
+  final manifestUrl = ver['manifestUrl'] as String;
+  final manifest = await repository.fetchManifest(manifestUrl);
+
+  // 3. Pick artifact for this platform + ABI.
+  final platform = _platformKey();
+  final spec = manifest.platforms[platform];
+  if (spec == null) {
+    throw PluginRepositoryException(
+        'plugin $id does not support $platform '
+        '(available: ${manifest.platforms.keys.join(", ")})');
+  }
+
+  final (artifactUrl, sha, usesAbi) = _pickArtifactUrl(
+    ver: ver,
+    platform: platform,
+    abi: abi,
+    pluginId: id,
+    version: version,
+  );
+  debugPrint('$_tag   artifact: $artifactUrl');
+  debugPrint('$_tag   expected sha256: $sha');
+  debugPrint('$_tag   usesAbiPath: $usesAbi');
+
+  // 4. Create version directory.
+  final dir = await pluginDir(id, version);
+  await dir.create(recursive: true);
+
+  // 5. Persist manifest (unchanged).
+  final manifestFile = File('${dir.path}/manifest.json');
+  await manifestFile.writeAsString(jsonEncode(manifest.toJson()));
+
+  // 6. Download to the ABI-correct local path.
+  final localRel = _resolveLocalArtifactPath(
+    declared: spec.artifact,
+    platform: platform,
+    abi: abi,
+    usesAbiPath: usesAbi,
+  );
+  final artifactFile = File('${dir.path}/$localRel');
+  await artifactFile.parent.create(recursive: true);
+  debugPrint('$_tag   local path: ${artifactFile.path}');
+
+  final t0 = DateTime.now();
+  try {
+    await repository.downloadArtifact(
+      url: artifactUrl,        // ← ABI-aware URL now
+      expectedSha256: sha,
+      dest: artifactFile,
+    );
+  } catch (e) {
+    debugPrint('$_tag   download/verify FAILED: $e');
+    rethrow;
+  }
+  final elapsed = DateTime.now().difference(t0);
+  final size = await artifactFile.length();
+  debugPrint(
+      '$_tag   download ok: $size bytes in ${elapsed.inMilliseconds}ms');
+
+  // 7. Mark installed.
+  await _markInstalled(id, version, enabled: false);
+  return manifest;
+}
+
+/// Resolve the download URL, sha256, and whether the URL is ABI-specific.
+///
+/// Prefers `artifactsByAbi[platform][abi]` when present (new backend).
+/// Falls back to `artifacts[platform]` + appended `/$abi` (legacy backend).
+( String, String, bool ) _pickArtifactUrl({
+  required Map<String, dynamic> ver,
+  required String platform,
+  required String abi,
+  required String pluginId,
+  required String version,
+}) {
+  final artifacts = (ver['artifacts'] as Map?)?.cast<String, dynamic>() ?? {};
+  final sha = (ver['sha256'] as Map?)?.cast<String, dynamic>() ?? {};
+  final artifactsByAbi =
+      (ver['artifactsByAbi'] as Map?)?.cast<String, dynamic>() ?? {};
+  final shaByAbi =
+      (ver['sha256ByAbi'] as Map?)?.cast<String, dynamic>() ?? {};
+
+  final platformAbis =
+      (artifactsByAbi[platform] as Map?)?.cast<String, dynamic>();
+  final platformSha =
+      (shaByAbi[platform] as Map?)?.cast<String, dynamic>();
+
+  // Path 1: new backend, exact ABI match
+  if (platformAbis != null && platformAbis.containsKey(abi)) {
+    return (
+      platformAbis[abi] as String,
+      platformSha![abi] as String,
+      true,
+    );
+  }
+
+  // Path 2: new backend, no exact match — fall back to any declared
+  // ABI and warn. Shouldn't happen if the manifest's `architectures`
+  // is correct, but better to install *something* than fail.
+  if (platformAbis != null && platformAbis.isNotEmpty) {
+    final fallback = platformAbis.keys.first;
+    debugPrint(
+      '$_tag   WARN: no ABI-specific artifact for "$abi", '
+      'falling back to "$fallback"',
+    );
+    return (
+      platformAbis[fallback] as String,
+      platformSha![fallback] as String,
+      true,
+    );
+  }
+
+  // Path 3: legacy backend — single flat artifact URL per platform.
+  final baseUrl = artifacts[platform] as String?;
+  final baseSha = sha[platform] as String?;
+  if (baseUrl == null || baseSha == null) {
+    throw PluginRepositoryException(
+      'registry has no artifact for $pluginId@$version on $platform',
+    );
+  }
+
+  // Legacy backend's URL is already platform-scoped but ABI-blind.
+  // The old `registry_artifact` route accepted `abi` only as a query
+  // param — appending to the path won't work. Return the flat URL
+  // and let the legacy route serve its default ABI.
+  return (baseUrl, baseSha, false);
+}
+
+/// Compute the on-disk path for the artifact.
+///
+/// Uses `spec.artifact` as the base. If the platform ships per-ABI
+/// binaries AND the declared path is generic (`android/libpai_camera.so`),
+/// insert the ABI directory. If the manifest already has ABI baked
+/// into the path (`android/arm64-v8a/libpai_camera.so`), leave it.
+String _resolveLocalArtifactPath({
+  required String declared,
+  required String platform,
+  required String abi,
+  required bool usesAbiPath,
+}) {
+  if (!usesAbiPath) return declared;
+
+  const knownAbis = {'arm64-v8a', 'armeabi-v7a', 'x86_64', 'x86', 'arm64'};
+  final parts = declared.split('/');
+
+  // ABI already in the path → use as-is
+  if (parts.any((p) => knownAbis.contains(p))) {
+    return declared;
+  }
+
+  // Insert: android/libpai_camera.so → android/x86_64/libpai_camera.so
+  if (parts.length == 2) {
+    return '${parts[0]}/$abi/${parts[1]}';
+  }
+
+  // Unexpected shape — don't guess
+  return declared;
+}
 
   // ---------------------------------------------------------------
   // Remove
@@ -190,23 +283,74 @@ class PluginInstaller {
   // Artifact path resolution
   // ---------------------------------------------------------------
 
-  Future<String> artifactPath(
-    String id,
-    String version,
-    String platform,
-    PlatformSpec spec,
-  ) async {
-    final dir = await pluginDir(id, version);
-    final p = '${dir.path}/${spec.artifact}';
-    debugPrint('$_tag artifactPath($id@$version, $platform) = $p');
+/// Locate the artifact on disk.
+///
+/// Tries the ABI-specific path first (`android/x86_64/libpai_camera.so`),
+/// then falls back to the manifest's declared path
+/// (`android/libpai_camera.so`). This handles both layouts:
+///   • new backend — downloaded to per-ABI subdirectory
+///   • legacy backend — no ABI subdirectory on disk
+///
+/// Checking disk (rather than tracking ABI state) means the caller
+/// doesn't need to know which download path was used — it just asks
+/// "where is the file?" and gets back something that exists.
+Future<String> artifactPath(
+  String id,
+  String version,
+  String platform,
+  PlatformSpec spec, {
+  String abi = 'unknown',
+}) async {
+  final dir = await pluginDir(id, version);
 
-    // Warn early if the file isn't actually there.
-    if (!File(p).existsSync()) {
-      debugPrint('$_tag   WARNING: artifact file does not exist at $p');
+  // 1. Try ABI-specific path first (what the new backend downloads to).
+  if (abi != 'unknown' && abi.isNotEmpty) {
+    final abiRel = _resolveLocalArtifactPath(
+      declared: spec.artifact,
+      platform: platform,
+      abi: abi,
+      usesAbiPath: true,
+    );
+    final abiPath = File('${dir.path}/$abiRel');
+    if (abiPath.existsSync()) {
+      debugPrint(
+        '$_tag artifactPath($id@$version, $abi) = ${abiPath.path}',
+      );
+      return abiPath.path;
     }
-    return p;
   }
 
+  // 2. Fall back to the manifest's declared path.
+  final declared = '${dir.path}/${spec.artifact}';
+  debugPrint('$_tag artifactPath($id@$version) = $declared');
+
+  if (!File(declared).existsSync()) {
+    // Neither path exists. Before failing, try one more thing:
+    // a directory scan for any `.so`/`.dll`/`.dylib` under this plugin dir.
+    // Handles manifests whose `artifact` was manually edited post-install.
+    final scan = _findAnyArtifactSync(dir);
+    if (scan != null) {
+      debugPrint('$_tag   fallback scan found ${scan.path}');
+      return scan.path;
+    }
+    debugPrint('$_tag   WARNING: artifact file does not exist at $declared '
+        '(and no fallback found)');
+  }
+  return declared;
+}
+
+/// Best-effort scan for the first native artifact under `dir`.
+File? _findAnyArtifactSync(Directory dir) {
+  const exts = {'.so', '.dll', '.dylib'};
+  try {
+    for (final entity in dir.listSync(recursive: true, followLinks: false)) {
+      if (entity is! File) continue;
+      final p = entity.path;
+      if (exts.any(p.endsWith)) return entity;
+    }
+  } catch (_) {}
+  return null;
+}
   // ---------------------------------------------------------------
   // installed.json
   // ---------------------------------------------------------------
