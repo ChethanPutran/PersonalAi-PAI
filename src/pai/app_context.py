@@ -26,6 +26,7 @@ from pai.planning.planner import Planner
 from pai.prompts.registry import PromptRegistry
 from pai.prompts.tracker import PromptVersionTracker
 from pai.security.llm_guard import PromptGuard
+from pai.security.plugin_guard import PluginGuard
 from pai.storage.database import Database
 from pai.storage.repositories.chat import ChatRepository
 from pai.storage.repositories.task import TaskRepository
@@ -252,7 +253,7 @@ def create_app_context(config: Config) -> PAIAppContext:
     builtin_executor = BuiltinExecutor(builtin_registry)
     executor_manager.register(builtin_executor)
 
-
+    plugin_guard = PluginGuard(session_factory=database.sessionmaker, plugin_manager=plugin_manager, device_manager=device_manager)
 
     orchestrator = TaskOrchestrator(
         context_manager=context_manager,
@@ -276,6 +277,7 @@ def create_app_context(config: Config) -> PAIAppContext:
         push_service=push_service,
         prompt_registry=prompt_registry,
         prompt_tracker=prompt_tracker,
+        plugin_guard=plugin_guard,
         prompt_guard=prompt_guard
     )
 

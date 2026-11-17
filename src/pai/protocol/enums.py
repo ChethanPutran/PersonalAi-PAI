@@ -20,6 +20,9 @@ class DeviceMessageType(str, Enum):
     HEARTBEAT = "heartbeat"
     HEARTBEAT_ACK = "heartbeat_ack"
     ERROR = "error"
+    STREAM_START = "stream.start"
+    STREAM_END = "stream.end"
+    STREAME_FRAME = "stream.frame"
 
     # ── Plugin sync ──
     SYNC_PLUGINS_REQUEST = "sync_plugins_request"

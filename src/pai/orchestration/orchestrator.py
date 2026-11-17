@@ -18,6 +18,7 @@ from pai.prompts.registry import PromptRegistry
 from pai.prompts.tracker import PromptVersionTracker
 from pai.scheduler.scheduler_service import SchedulerService
 from pai.security.llm_guard import PromptGuard
+from pai.security.plugin_guard import PluginGuard
 from pai.storage.repositories.chat import ChatRepository
 from pai.tasks.task_tracker import TaskTracker
 from pai.devices.manager import DeviceManager
@@ -110,6 +111,7 @@ class TaskOrchestrator(Manager):
         push_service: PushService,
         prompt_registry: PromptRegistry,          
         prompt_tracker: PromptVersionTracker,    
+        plugin_guard: PluginGuard,
         command_registry: Optional[CommandRegistry] = None,   
         orchestrator_config: OrchestratorConfig = OrchestratorConfig(),
         prompt_guard: Optional[PromptGuard] = None,
@@ -120,6 +122,7 @@ class TaskOrchestrator(Manager):
         self.planner = planning_engine
         self.task_manager = task_manager
         self.agent_manager = agent_manager
+        self.plugin_guard = plugin_guard 
         self.device_manager = device_manager
         self.plugin_manager = plugin_manager
         self.security_manager = security_manager

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Literal, Optional
 
 from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -90,6 +90,7 @@ class TaskManager(Manager):
         title: str,
         input: str,
         task_type: str,
+        kind: Literal["one_shot", "long_running", "stream"] = "one_shot",
         parameters: Optional[Dict[str, Any]] = None,
         user_id: Optional[str] = None,
         session_id: Optional[str] = None,
@@ -101,7 +102,7 @@ class TaskManager(Manager):
         parent_task_id: Optional[str] = None,
         device_id: Optional[str] = None,
         executor_id: Optional[str] = None,
-        plugin: Optional[str] = None,
+        plugin: Optional[str] = None
     ) -> Task:
 
         tracer = get_tracer()
@@ -112,6 +113,7 @@ class TaskManager(Manager):
             device_id=device_id,
             executor_id=executor_id,
             plugin=plugin,
+            kind=kind,
         ) as span:
 
             task = Task(
@@ -130,6 +132,7 @@ class TaskManager(Manager):
                 device_id=device_id,
                 executor_id=executor_id,
                 plugin=plugin,
+                kind=kind,
             )
 
             await self.store.create(task)
@@ -208,6 +211,7 @@ class TaskManager(Manager):
         timeout: float = 30.0,
         max_retries: int = 0,
         metadata: Optional[Dict[str, Any]] = None,
+        kind: Literal["one_shot", "long_running", "stream"] = "one_shot"
     ) -> Task:
 
         tracer = get_tracer()
@@ -234,7 +238,9 @@ class TaskManager(Manager):
                 metadata=metadata,
                 device_id=device_id,
                 executor_id=executor_id,
+                kind=kind
             )
+            task.kind = kind
 
             task = await self.initialize_task(
                 task.id,
@@ -441,7 +447,49 @@ class TaskManager(Manager):
             result = await execution
             return result
 
+    async def _confirm_if_needed(self, task: Task, pause_event: asyncio.Event) -> None:
+        """Confirmation gate. Called inside _execute between checkpoints.
+
+        If the task's metadata declares requires_confirmation, this pauses
+        the task, emits a notification, and blocks until the user resumes
+        or cancels. If cancelled, raises CancelledError (caught downstream).
+        """
+        if not task.metadata.get("requires_confirmation"):
+            return
+
+        # Pause the task — uses existing lifecycle
+        TaskLifecycle.pause(task)  # RUNNING → PAUSED
+        await self.store.save(task)
+        await self._publish("task.awaiting_confirmation", task.to_dict())
+
+        # Clear the checkpoint event; the user's resume() will set it
+        pause_event.clear()
+
+        # Emit the confirmation request on the event bus
+        # (the notification service subscribes to this and pushes to the device)
+        self._emit("task.confirmation_requested", {
+            "task_id": task.id,
+            "user_id": task.user_id,
+            "session_id": task.session_id,
+            "capability": task.capability,
+            "parameters": task.parameters,
+            "reason": task.metadata.get("confirmation_reason", ""),
+        })
+
+        logger.info(
+            "task.awaiting_confirmation: id=%s capability=%s user=%s",
+            task.id, task.capability, task.user_id,
+        )
+
+        # Block until the user resumes or cancels. resume() sets the event;
+        # cancel() cancels the asyncio task, which raises CancelledError here.
+        await pause_event.wait()
+
+        # If we got here, user resumed. Task status is RUNNING again.
+        logger.info("task.confirmation_granted: id=%s", task.id)
+
     async def _execute(self, task_id: str) -> TaskResult:
+        
 
         tracer = get_tracer()
         # This runs inside the context captured at create_task time,
@@ -476,6 +524,9 @@ class TaskManager(Manager):
                 # Checkpoint 1 — pause blocks the tool invocation entirely.
                 await pause_event.wait()
 
+                # Confirmation gate — no-op if not needed
+                await self._confirm_if_needed(task, pause_event)
+
                 async with tracer.span(
                     "task.scheduler_call",
                     task_id=task.id,
@@ -484,15 +535,20 @@ class TaskManager(Manager):
                     try:
                         if( task.executor_id is None ):
                             raise ValueError("Task has no executor")
-                        
-                        result = await asyncio.wait_for(
 
-                            self.scheduler.schedule_task(
-                                task=task,
-                                executor_name=task.executor_id,
-                            ),
-                            timeout=task.timeout,
-                        )
+                        if task.kind in ("long_running", "stream"):
+                            # No timeout — cancel via TaskManager.cancel()
+                            result = await self.scheduler.schedule_task(
+                                task=task, executor_name=task.executor_id,
+                            )
+                        else:
+                            result = await asyncio.wait_for(
+                                self.scheduler.schedule_task(
+                                    task=task, executor_name=task.executor_id,
+                                ),
+                                timeout=task.timeout,
+                            )
+                        
                         sched_span.set_attribute("result_type", type(result).__name__)
                         sched_span.set_attribute("result", str(result))
                         # ── Treat a failed result as a real failure ──

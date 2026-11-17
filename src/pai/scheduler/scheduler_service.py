@@ -43,6 +43,7 @@ class SchedulerService:
         self.device_executor_name = device_executor_name
         self._task: Optional[asyncio.Task] = None
         self._stop = asyncio.Event()
+        self._last_undeliverable: dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -284,38 +285,41 @@ class SchedulerService:
         )
 
     async def _handle_undeliverable(self, sched, repo, now, reason: str):
-        logger.warning(
-            "Schedule %s undeliverable (%s) — catch_up=%s",
-            sched.id, reason, sched.catch_up,
-        )
+        if self._last_undeliverable.get(sched.id) != reason:
+            logger.warning(
+                "Schedule %s undeliverable (%s) — catch_up=%s",
+                sched.id, reason, sched.catch_up,
+            )
+            self._last_undeliverable[sched.id] = reason
+        else:
+            logger.debug(
+                "Schedule %s still undeliverable (%s)", sched.id, reason,
+            )
         if sched.catch_up == "none":
             await self._advance(sched, repo, now)
-        # else: leave due — retry next tick when a device comes back.
 
     async def _advance(self, sched, repo, now):
         next_at = self._next_fire_at(sched, now)
         await repo.mark_fired(sched.id, fired_at=now, next_fire_at=next_at)
 
 
-    async def _resolve_device(self, sched: ScheduleModel) -> Optional[str]:
+    async def _resolve_device(self, sched) -> Optional[str]:
         if sched.target_device_id:
-            try:
-                connected = await self.device_manager.is_connected(
-                    sched.target_device_id,
-                )
-            except Exception:
-                connected = False
-            return sched.target_device_id if connected else None
-
+            return sched.target_device_id          # trust the target, check connectivity later
         try:
             devices = await self.device_manager.list_devices(sched.user_id)
         except Exception:
             return None
+        # prefer a connected device, but fall back to any device the user owns
+        fallback = None
         for d in devices:
             dev_id = getattr(d, "id", None)
-            if dev_id and await self.device_manager.is_connected(dev_id):
+            if not dev_id:
+                continue
+            fallback = fallback or dev_id
+            if await self.device_manager.is_connected(dev_id):
                 return dev_id
-        return None
+        return fallback
 
     # ------------------------------------------------------------------
     # Time math

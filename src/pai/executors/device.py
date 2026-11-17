@@ -212,9 +212,20 @@ class DeviceExecutor(BaseExecutor):
                 "parameters": params,
             }
 
+            kind = task_dict.get("kind", "one_shot")
+            timeout = None if kind in ("long_running", "stream") else 30.0
+
+            span.set_attribute("kind", kind)
+            span.set_attribute("timeout", timeout)
+
             try:
                 await self.device_manager.send(device_id, payload)
-                result = await asyncio.wait_for(fut, timeout=30.0)
+
+                if timeout is not None:
+                    result = await asyncio.wait_for(fut, timeout=timeout)
+                else:
+                    result = await fut  
+                
                 span.set_attribute("status", "completed")
                 return {
                     "status": "success",

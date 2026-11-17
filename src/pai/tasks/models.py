@@ -274,6 +274,9 @@ class Task(BaseModel):
     parent_task_id: Optional[str] = None
     child_task_ids: List[str] = Field(default_factory=list)
 
+    # Task kind
+    kind: Literal["one_shot", "long_running", "stream"] = "one_shot"
+
     @property
     def terminal(self) -> bool:
         return self.status in {

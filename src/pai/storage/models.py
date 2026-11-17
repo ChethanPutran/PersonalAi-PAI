@@ -191,6 +191,21 @@ class DeviceModel(Base):
     )
 
 
+class TrustedDeviceModel(Base):
+    __tablename__ = "trusted_devices"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[str] = mapped_column(String, index=True)
+    device_id: Mapped[str] = mapped_column(String, index=True)
+    trusted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc),
+    )
+
+    __table_args__ = (
+        # A user trusts each device at most once
+        {"sqlite_autoincrement": True},
+    )
+
 # ============================================================
 # User plugins
 # ============================================================
@@ -234,6 +249,24 @@ class UserPluginModel(Base):
 
     __table_args__ = (
         UniqueConstraint("user_id", "plugin_id", name="uq_user_plugin"),
+    )
+
+
+class PluginAuditModel(Base):
+    __tablename__ = "plugin_audit"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[str] = mapped_column(String, index=True)
+    device_id: Mapped[str] = mapped_column(String, index=True)
+    source_device_id: Mapped[Optional[str]] = mapped_column(String, nullable=True, index=True)
+    task_id: Mapped[Optional[str]] = mapped_column(String, nullable=True, index=True)
+    capability: Mapped[str] = mapped_column(String(128), index=True)
+    parameters_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    result_status: Mapped[str] = mapped_column(String(32))  # allowed|denied|confirmed|cancelled|completed|failed
+    result_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    decision_reason: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True,
     )
 
 
