@@ -19,6 +19,11 @@ enum DeviceMessageType {
   heartbeatAck('heartbeat_ack'),
   error('error'),
 
+  // Stream events
+  streamStart('stream.start'),
+  streamFrame('stream.frame'),
+  streamEnd('stream.end'),
+
   command('command'),
 
   // Plugin sync

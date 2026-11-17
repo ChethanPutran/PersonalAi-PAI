@@ -14,7 +14,7 @@ class NativeModuleRegistry {
  public:
   /// Register under an explicit key. If [name] is empty, falls back to
   /// the module's self-reported name.
-  void Register(const std::string& name, std::shared_ptr<PluginModule> m);
+  bool Register(const std::string& name, std::shared_ptr<PluginModule> m);
   void Unregister(const std::string& name);
   std::shared_ptr<PluginModule> Get(const std::string& name) const;
   std::vector<std::string> List() const;

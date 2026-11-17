@@ -26,7 +26,9 @@ class MainActivity : FlutterActivity() {
             flutterEngine.dartExecutor.binaryMessenger,
             PluginChannel.CHANNEL,
         )
-        channel.setMethodCallHandler(PluginChannel(scope, permissionManager))
+        channel.setMethodCallHandler(
+            PluginChannel(this, scope, permissionManager)
+        )
     }
 
     override fun onRequestPermissionsResult(

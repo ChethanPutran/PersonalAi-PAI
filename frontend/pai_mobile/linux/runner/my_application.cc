@@ -23,6 +23,11 @@ static void first_frame_cb(MyApplication* self, FlView* view) {
 
 // Implements GApplication::activate.
 static void my_application_activate(GApplication* application) {
+   // Flutter's Linux embedder only supports X11. Force GDK to use it
+  // so we don't hit the GNOME 40+ Wayland schema crash
+  // (org.gnome.settings-daemon.plugins.xsettings:antialiasing).
+  gdk_set_allowed_backends("x11");
+  
   MyApplication* self = MY_APPLICATION(application);
   GtkWindow* window =
       GTK_WINDOW(gtk_application_window_new(GTK_APPLICATION(application)));
@@ -85,7 +90,9 @@ static void my_application_activate(GApplication* application) {
   
   // keep the channel alive for the lifetime of the app
   static std::unique_ptr<pai::agent::PluginChannel> g_plugin_channel;
-  g_plugin_channel = std::make_unique<pai::agent::PluginChannel>(messenger);
+  if (!g_plugin_channel) {
+    g_plugin_channel = std::make_unique<pai::agent::PluginChannel>(messenger);
+  }
 
 }
 

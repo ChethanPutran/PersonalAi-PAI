@@ -75,6 +75,10 @@ set_target_properties(${BINARY_NAME}
 include(flutter/generated_plugins.cmake)
 
 
+target_include_directories(${BINARY_NAME} PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/runner/agent"
+)
+
 # === Installation ===
 # By default, "installing" just makes a relocatable bundle in the build
 # directory.

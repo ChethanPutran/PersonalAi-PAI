@@ -79,6 +79,7 @@ class PluginInfo {
   final String? author;
   final String? icon;
   final int schemaVersion;
+  final String type; // NEW: "native" or "kotlin" (from manifest.json runtime.type). Defaults to "native" for older plugins.
 
   /// Union of all capability permissions.
   final List<String> permissions;
@@ -126,6 +127,7 @@ class PluginInfo {
     this.author,
     this.icon,
     this.schemaVersion = 1,
+    this.type = 'native',
     this.permissions = const [],
     this.capabilityDetails = const [],
     this.capabilities = const [],
@@ -268,6 +270,7 @@ class PluginInfo {
       version: j['version']?.toString() ?? '',
       description: j['description']?.toString() ?? '',
       author: j['author']?.toString(),
+      type: (j['type'] as String?) ?? 'native',   // ← NEW
       icon: j['icon']?.toString(),
       schemaVersion: (j['schemaVersion'] as num?)?.toInt() ?? 1,
       permissions: (j['permissions'] as List?)?.cast<String>() ?? const [],
@@ -288,6 +291,7 @@ class PluginInfo {
         'description': description,
         'author': author,
         'icon': icon,
+        'type': type,  
         'schemaVersion': schemaVersion,
         'permissions': permissions,
         'capabilities': capabilityDetails.map((c) => c.toJson()).toList(),

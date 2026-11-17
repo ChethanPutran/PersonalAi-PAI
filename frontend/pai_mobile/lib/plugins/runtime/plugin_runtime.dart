@@ -17,10 +17,12 @@ class PluginRuntime {
   required String entrypoint,
   required List<String> capabilities,
   required List<String> permissions,
+  String type = 'native', 
 }) async {
   debugPrint('$_tag loadNativeModule:');
   debugPrint('$_tag   nativeModule = $nativeModule');
   debugPrint('$_tag   artifactPath = $artifactPath');
+  debugPrint('$_tag   type         = $type');
 
   try {
     final r = await _channel.invokeMethod<Map<dynamic, dynamic>>(
@@ -31,6 +33,7 @@ class PluginRuntime {
         'entrypoint': entrypoint,
         'capabilities': capabilities,
         'permissions': permissions,
+        'type': type,             
       },
     );
 

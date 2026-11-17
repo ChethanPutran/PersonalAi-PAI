@@ -1,5 +1,8 @@
 package com.pai.agent.plugins
 
+import com.pai.plugin.api.PluginModule      
+import com.pai.plugin.api.PluginContext     
+
 class CAbiPluginModule(
     private val handle: Long,
 ) : PluginModule {
@@ -29,11 +32,6 @@ class CAbiPluginModule(
         return nativeInvoke(handle, capability, keys, values) as Map<String, Any?>
     }
 
-    override suspend fun requestPermissions(
-        permissions: List<String>,
-    ): Map<String, Any?> =
-        // No-op — permission UX is owned by PermissionManager now.
-        mapOf("ok" to true, "granted" to permissions)
 
     @Synchronized
     fun destroy() {

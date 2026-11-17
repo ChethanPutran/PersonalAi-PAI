@@ -20,15 +20,15 @@ T = TypeVar("T")
 
 PLUGIN_REGISTRY_DIR = Path(__file__).resolve().parent.parent.parent.parent / "plugin_registry"
 
+
 class PluginManager(Manager):
     def __init__(
         self,
-        event_bus:EventBus,
+        event_bus: EventBus,
         registry: Optional[PluginRegistry] = None,
         session_factory: Optional[Callable[[], AsyncSession]] = None,
         plugin_registry_dir: Optional[str | Path] = PLUGIN_REGISTRY_DIR,
-        **kwargs
-        
+        **kwargs,
     ):
         super().__init__(session_factory=session_factory, event_bus=event_bus)
         self.registry = registry
@@ -39,21 +39,14 @@ class PluginManager(Manager):
         self.plugin_registry_dir = plugin_registry_dir
 
     async def _on_initialize(self) -> None:
-        # Move the *entire* body of the current `initialize()` here,
-        # minus the `if self._initialized: return` guard and the final
-        # `self._initialized = True` — those are now handled by the base.
         tracer = get_tracer()
         async with tracer.span("plugin_manager.initialize") as span:
             logger.info("Initializing backend plugin manager")
-            
+
             # ── Pass 1: server-side Python plugins ──
-            # Scans `pai/plugins/*/manifest.json` for plugins with
-            # `runtime.kind == "server"`. These are the browser, planner,
-            # etc. — Python classes loaded into the backend process.
             if self.registry is not None:
                 try:
                     await self.registry.discover()
-
                     for manifest in self.registry.get_all_manifests():
                         if not getattr(manifest, "id", None):
                             continue
@@ -65,17 +58,14 @@ class PluginManager(Manager):
                                 "Failed to ingest manifest {}: {}",
                                 getattr(manifest, "id", "<unknown>"), exc,
                             )
-
                 except Exception as exc:
                     logger.warning("Plugin registry discovery failed: {}", exc)
 
             server_count = len(self._catalog)
 
             # ── Pass 2: device plugins from plugin_registry/ ──
-            # Scans `plugin_registry/<plugin-id>/<version>/manifest.json`
-            # for native plugins like camera, notifications.
-            # These manifest entries OVERRIDE any stale static catalog
-            # entry with the same id.
+            # Each plugin dir is expected to hold per-platform manifests:
+            #   plugin_registry/<id>/<version>/<platform>/manifest.json
             device_count = 0
             device_failures: List[Dict[str, str]] = []
 
@@ -83,7 +73,6 @@ class PluginManager(Manager):
                 for plugin_dir in sorted(self.plugin_registry_dir.iterdir()):
                     if not plugin_dir.is_dir() or plugin_dir.name.startswith("_"):
                         continue
-
                     try:
                         info = self._load_device_plugin(plugin_dir)
                         if info is not None:
@@ -100,15 +89,12 @@ class PluginManager(Manager):
                         })
             else:
                 logger.warning(
-                    "Device plugin registry not found at {}; "
-                    "device plugins will come from the static catalog only",
+                    "Device plugin registry not found at {}",
                     self.plugin_registry_dir,
                 )
 
             static_count = len(self._catalog) - server_count - device_count
 
-
-            # ── Diagnostic attributes for the trace UI ──
             span.set_attribute("server_plugins", server_count)
             span.set_attribute("device_plugins", device_count)
             span.set_attribute("static_fallback", static_count)
@@ -134,14 +120,6 @@ class PluginManager(Manager):
                 server_count, device_count, static_count, len(self._catalog),
             )
 
-            # ── EVENT: plugin.catalog_loaded ──
-            #
-            # Pure observability — the catalog is per-replica (each
-            # process loads its own), so this doesn't propagate over
-            # NATS. An admin dashboard on the same replica can show
-            # "N plugins loaded, M failures" without hitting the manager
-            # directly. `_emit` (fire-and-forget) because startup must
-            # not block on the bus.
             self._emit(
                 "plugin.catalog_loaded",
                 {
@@ -154,7 +132,6 @@ class PluginManager(Manager):
                 distributed=False,
             )
 
-
     # ------------------------------------------------------------------
     # Router wiring
     # ------------------------------------------------------------------
@@ -166,84 +143,147 @@ class PluginManager(Manager):
         if self._capability_router is not None:
             self._capability_router.invalidate(user_id)
 
-    
-
     # ------------------------------------------------------------------
-    # Lifecycle
+    # Per-platform manifest loading
     # ------------------------------------------------------------------
 
- 
+    @staticmethod
+    def _enumerate_platform_manifest_paths(version_dir: Path) -> Dict[str, Path]:
+        """
+        Return {platform: manifest_path} for every platform subdir under
+        a version directory. A platform subdir must contain manifest.json.
+
+        Ignores hidden dirs ('.gradle') and files (settings.gradle.kts).
+        """
+        out: Dict[str, Path] = {}
+        if not version_dir.is_dir():
+            return out
+        for child in version_dir.iterdir():
+            if not child.is_dir() or child.name.startswith("."):
+                continue
+            mp = child / "manifest.json"
+            if mp.exists():
+                out[child.name] = mp
+        return out
+
+    @staticmethod
+    def _merge_platform_manifests(
+        platform_manifests: Dict[str, Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """
+        Merge per-platform manifest dicts into a single dict suitable for
+        PluginManifest.from_dict(). Used only for the *catalog* view — the
+        client always fetches the per-platform manifest for install.
+
+        The merged `type` is `"mixed"`; per-platform types live in each
+        sub-manifest and are what the client actually uses.
+        """
+        if not platform_manifests:
+            raise ValueError("no platform manifests to merge")
+
+        # Use the alphabetically first platform for id/name/version since
+        # all platforms must agree on those.
+        first = platform_manifests[sorted(platform_manifests.keys())[0]]
+
+        merged: Dict[str, Any] = {
+            "id": first.get("id"),
+            "name": first.get("name"),
+            "version": first.get("version"),
+            "description": first.get("description", ""),
+            "type": "mixed",
+            "platforms": {},
+            "architectures": [],
+            "device_types": [],
+            "capabilities": [],
+            "permissions": [],
+        }
+
+        for m in platform_manifests.values():
+            for k, v in (m.get("platforms") or {}).items():
+                merged["platforms"][k] = v
+            for field in (
+                "architectures", "device_types", "capabilities", "permissions",
+            ):
+                for v in m.get(field) or []:
+                    if v not in merged[field]:
+                        merged[field].append(v)
+
+        # runtime — first manifest that declares one wins.
+        for m in platform_manifests.values():
+            if "runtime" in m:
+                merged["runtime"] = m["runtime"]
+                break
+
+        return merged
 
     def _load_device_plugin(self, plugin_dir: Path) -> Optional[PluginInfo]:
         """
         Load a single device plugin directory.
 
-        Layout expected:
+        Expected layout (per-platform manifests only):
             plugin_registry/<plugin-id>/
-                <version>/manifest.json
-                <version>/linux/libpai_*.so
-                <version>/android/arm64-v8a/libpai_*.so
+                <version>/
+                    linux/manifest.json
+                    linux/libpai_camera.so
+                    android/manifest.json
+                    android/plugin.dex
 
-        Picks the highest version directory when multiple are present.
-        Returns None if no manifest was found — the caller just skips
-        the folder without raising.
+        Picks the highest version directory. Merges per-platform manifests
+        into one PluginInfo for the catalog. Returns None if no version
+        has any platform manifest — caller just skips the dir.
         """
-        versions: List[tuple[str, Path, Dict[str, Any]]] = []
-
+        candidates: List[Path] = []
         for version_dir in plugin_dir.iterdir():
-            if not version_dir.is_dir():
+            if not version_dir.is_dir() or version_dir.name.startswith("."):
                 continue
+            if self._enumerate_platform_manifest_paths(version_dir):
+                candidates.append(version_dir)
 
-            manifest_path = version_dir / "manifest.json"
-            if not manifest_path.exists():
-                continue
-
-            try:
-                data = json.loads(manifest_path.read_text(encoding="utf-8"))
-                version = str(data.get("version") or version_dir.name)
-                versions.append((version, version_dir, data))
-            except Exception as exc:
-                logger.debug(
-                    "Skipping malformed manifest at {}: {}",
-                    manifest_path, exc,
-                )
-
-        if not versions:
+        if not candidates:
             return None
 
-        # Highest version wins. Simple lexicographic sort — replace with
-        # `packaging.version.parse` if you start using semver pre-releases
-        # (e.g. "1.0.0-rc1" would sort after "1.0.0" lexicographically).
-        versions.sort(key=lambda v: v[0], reverse=True)
-        chosen_version, chosen_dir, chosen_data = versions[0]
+        # Highest version wins (lexicographic; upgrade to packaging.version
+        # if you start shipping pre-releases).
+        candidates.sort(key=lambda p: p.name, reverse=True)
+        chosen_dir = candidates[0]
+        chosen_version = chosen_dir.name
+
+        platform_manifests: Dict[str, Dict[str, Any]] = {}
+        for platform, mp in self._enumerate_platform_manifest_paths(chosen_dir).items():
+            try:
+                platform_manifests[platform] = json.loads(mp.read_text())
+            except Exception as exc:
+                logger.warning("bad platform manifest %s: %s", mp, exc)
+
+        if not platform_manifests:
+            return None
+
+        merged = self._merge_platform_manifests(platform_manifests)
 
         try:
-            manifest = PluginManifest.from_dict(chosen_data)
+            manifest = PluginManifest.from_dict(merged)
         except Exception as exc:
             logger.warning(
-                "PluginManifest.from_dict failed for device plugin {}@{}: {}",
+                "PluginManifest.from_dict failed for device plugin %s@%s: %s",
                 plugin_dir.name, chosen_version, exc,
             )
             raise
 
         info = self._manifest_to_info(manifest)
-
-        # Attach the artifact URL so the mobile app can download it.
-        # Matches the shape returned by /api/v1/plugins/catalog, so clients
-        # see a consistent response regardless of where the entry came from.
         info = replace(
             info,
             package_url=f"/api/v1/plugins/{info.id}/{chosen_version}/artifact",
         )
 
         logger.info(
-            "Loaded device plugin '{}' v{} from {} ({} capabilities, "
-            "{} schemas)",
+            "Loaded device plugin '{}' v{} from {} ({} platforms: {}, "
+            "{} capabilities)",
             info.id,
             chosen_version,
             chosen_dir,
+            len(platform_manifests),
+            sorted(platform_manifests.keys()),
             len(info.capabilities),
-            len(info.capability_schemas),
         )
         return info
 
@@ -329,33 +369,46 @@ class PluginManager(Manager):
         return plugin
 
     async def get_manifest_at_version(
-        self, plugin_id: str, version: str,
+        self,
+        plugin_id: str,
+        version: str,
+        platform: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """
-        Read a specific version's manifest from the plugin_registry dir,
-        bypassing the in-memory catalog.
+        Read a specific version's manifest from disk, bypassing the catalog.
 
-        The catalog only holds the *latest* version per plugin. When a
-        caller asks for `browser@1.0.0` after a bump to `1.0.1`, the
-        catalog entry says `1.0.1` — but the disk still has `1.0.0/`.
-        This method lets the caller install an older version explicitly.
+        - `platform` set: return that platform's manifest only (install path).
+        - `platform` None: return a merged view (discovery/debug only).
         """
-        import json
-        from pathlib import Path
-
         if self.plugin_registry_dir is None:
             return None
-        path = Path(self.plugin_registry_dir) / plugin_id / version / "manifest.json"
-        if not path.exists():
+
+        version_dir = Path(self.plugin_registry_dir) / plugin_id / version
+        if not version_dir.exists():
             return None
-        try:
-            return json.loads(path.read_text())
-        except Exception as exc:
-            logger.warning(
-                "Failed to read manifest %s: %s", path, exc
-            )
+
+        if platform:
+            mp = version_dir / platform / "manifest.json"
+            if not mp.exists():
+                return None
+            try:
+                return json.loads(mp.read_text())
+            except Exception as exc:
+                logger.warning("bad manifest %s: %s", mp, exc)
+                return None
+
+        platform_manifests: Dict[str, Dict[str, Any]] = {}
+        for plat, mp in self._enumerate_platform_manifest_paths(version_dir).items():
+            try:
+                platform_manifests[plat] = json.loads(mp.read_text())
+            except Exception:
+                continue
+
+        if not platform_manifests:
             return None
-    
+
+        return self._merge_platform_manifests(platform_manifests)
+
     async def get_plugin_for_capability(
         self, capability: str,
     ) -> Optional[PluginInfo]:
@@ -377,13 +430,43 @@ class PluginManager(Manager):
         ]
 
     async def is_compatible(
-        self, plugin_id: str, platform: str, architecture: str,
-        device_type: Optional[str] = None
+        self,
+        plugin_id: str,
+        platform: str,
+        architecture: str,
+        device_type: Optional[str] = None,
     ) -> bool:
-        plugin = await self.get_plugin(plugin_id)
-        if plugin is None:
+        """
+        Per-platform compatibility check. Reads the *per-platform* manifest
+        — NOT the merged catalog entry — so Android-only architectures
+        aren't treated as valid on Linux, etc.
+        """
+        if not self._initialized:
+            await self.initialize()
+
+        try:
+            plugin = await self.require_plugin(plugin_id)
+        except ValueError:
             return False
-        return platform in plugin.platforms and architecture in plugin.architectures and (device_type is None or device_type in getattr(plugin, "device_types", []))
+
+        manifest = await self.get_manifest_at_version(
+            plugin_id, plugin.version, platform=platform,
+        )
+        if manifest is None:
+            return False
+
+        if not (manifest.get("platforms") or {}).get(platform):
+            return False
+
+        declared_types = manifest.get("device_types") or []
+        if declared_types and device_type and device_type not in declared_types:
+            return False
+
+        declared_archs = manifest.get("architectures") or []
+        if declared_archs and architecture and architecture not in declared_archs:
+            return False
+
+        return True
 
     # ------------------------------------------------------------------
     # User plugin state
@@ -392,7 +475,6 @@ class PluginManager(Manager):
     async def is_enabled_for_user(
         self, user_id: str, plugin_id: str,
     ) -> bool:
-        """True iff the user has enabled the given plugin."""
         if not user_id or self._session_factory is None:
             return False
 
@@ -402,7 +484,6 @@ class PluginManager(Manager):
             user_id=user_id,
             plugin_id=plugin_id,
         ) as span:
-
             async def _do(session: AsyncSession):
                 repo = UserPluginRepository(session)
                 records = await repo.list_for_user(user_id)
@@ -413,14 +494,14 @@ class PluginManager(Manager):
 
             result = await self._with_session(_do)
             span.set_attribute("enabled", result)
-            return result
+            return bool(result)
 
     async def list_plugins(
         self,
         user_id: Optional[str] = None,
         platform: Optional[str] = None,
         architecture: Optional[str] = None,
-        device_type: Optional[str] = None
+        device_type: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         plugins = self.get_catalog()
 
@@ -428,7 +509,6 @@ class PluginManager(Manager):
             plugins = [p for p in plugins if platform in p.platforms]
         if architecture:
             plugins = [p for p in plugins if architecture in p.architectures]
-
         if device_type:
             plugins = [p for p in plugins if device_type in p.device_types]
 
@@ -466,24 +546,9 @@ class PluginManager(Manager):
             self._invalidate(user_id)
             logger.info("Plugin '{}' enabled for user '{}'", plugin_id, user_id)
 
-            # ── EVENT: plugin.enabled ──
-            #
-            # `_publish` (awaited) because the CapabilityRouter on
-            # *this* replica was just invalidated inline — but any
-            # other backend replica still holds a stale per-user cache
-            # that says "this plugin is disabled for user X". Awaited
-            # delivery ensures the event reaches NATS before `enable()`
-            # returns, so a subsequent request that lands on replica B
-            # sees fresh capabilities.
-            #
-            # `distributed=True` — this is precisely the case NATS
-            # exists for.
             await self._publish(
                 "plugin.enabled",
-                {
-                    "plugin_id": plugin_id,
-                    "user_id": user_id,
-                },
+                {"plugin_id": plugin_id, "user_id": user_id},
                 distributed=True,
             )
 
@@ -503,16 +568,9 @@ class PluginManager(Manager):
             self._invalidate(user_id)
             logger.info("Plugin '{}' disabled for user '{}'", plugin_id, user_id)
 
-            # ── EVENT: plugin.disabled ──
-            #
-            # Symmetric to `plugin.enabled`. Awaited + distributed for
-            # the same reason — cross-replica cache invalidation.
             await self._publish(
                 "plugin.disabled",
-                {
-                    "plugin_id": plugin_id,
-                    "user_id": user_id,
-                },
+                {"plugin_id": plugin_id, "user_id": user_id},
                 distributed=True,
             )
 
@@ -546,16 +604,6 @@ class PluginManager(Manager):
 
             await self._with_session(_do)
 
-            # ── EVENT: plugin.config_updated ──
-            #
-            # `_emit` (fire-and-forget) because config changes don't
-            # invalidate the capability router — a plugin's availability
-            # is unchanged, only its per-user metadata. Observability
-            # for the settings UI, not a cache-invalidation trigger.
-            #
-            # Emit only the keys, not the values — user config may
-            # contain secrets (API keys, credentials) and the event
-            # bus payload lands in logs and NATS.
             self._emit(
                 "plugin.config_updated",
                 {
@@ -571,10 +619,7 @@ class PluginManager(Manager):
     # ------------------------------------------------------------------
 
     async def set_device_enabled(
-        self,
-        device_id: str,
-        plugin_id: str,
-        enabled: bool,
+        self, device_id: str, plugin_id: str, enabled: bool,
     ) -> None:
         tracer = get_tracer()
         async with tracer.span(
@@ -592,13 +637,6 @@ class PluginManager(Manager):
                 device_id, plugin_id, enabled,
             )
 
-            # ── EVENT: plugin.device_enabled ──
-            #
-            # `_publish(distributed=True)` — the flip changes whether
-            # a capability is routable to this device. Replica B's
-            # router has a cached "capability X is on device D" entry
-            # that's now stale. Awaited so the invalidation lands
-            # before the HTTP response returns to the caller.
             await self._publish(
                 "plugin.device_enabled",
                 {
@@ -645,13 +683,6 @@ class PluginManager(Manager):
                 plugin_id, version, device_id,
             )
 
-            # ── EVENT: plugin.installed ──
-            #
-            # `_publish(distributed=True)` — a new capability just
-            # became routable on `device_id`. Every replica's router
-            # cache must drop its "no such capability" verdict for
-            # this plugin/device pair, or the next chat request
-            # routes nowhere.
             await self._publish(
                 "plugin.installed",
                 {
@@ -678,17 +709,9 @@ class PluginManager(Manager):
             await self._with_session(_do)
             self._invalidate()
 
-            # ── EVENT: plugin.uninstalled ──
-            #
-            # `_publish(distributed=True)` — symmetric to installed.
-            # The capability is no longer routable to this device;
-            # any replica that cached it needs to invalidate.
             await self._publish(
                 "plugin.uninstalled",
-                {
-                    "plugin_id": plugin_id,
-                    "device_id": device_id,
-                },
+                {"plugin_id": plugin_id, "device_id": device_id},
                 distributed=True,
             )
 
@@ -701,13 +724,6 @@ class PluginManager(Manager):
 
         await self._with_session(_do)
 
-        # ── EVENT: plugin.error_recorded ──
-        #
-        # `_emit(distributed=False)` — pure observability. The admin
-        # panel wants "this device/plugin had an error"; no cache
-        # invalidation needed (an error doesn't change routability).
-        # Truncate the error to keep the bus payload small — the full
-        # traceback lives in `device_plugins.last_error` if needed.
         self._emit(
             "plugin.error_recorded",
             {
@@ -728,16 +744,6 @@ class PluginManager(Manager):
         result = await self._with_session(_do)
         self._invalidate()
 
-        # ── EVENT: plugin.reconciled ──
-        #
-        # `_emit(distributed=False)` — the reconcile returns an
-        # added/updated/removed diff that admin tooling wants to see,
-        # but the router invalidation already happened inline via
-        # `_invalidate()`. Cross-replica propagation is a separate
-        # concern the router will handle on its next cold read.
-        #
-        # `result` is whatever DevicePluginRepository.reconcile()
-        # returns — defensively pull the three keys admin expects.
         self._emit(
             "plugin.reconciled",
             {
@@ -767,7 +773,7 @@ class PluginManager(Manager):
                 "version": r.version,
                 "is_installed": r.is_installed,
                 "enabled_on_device": r.enabled_on_device,
-                "artifact_sha256": getattr(r, "artifact_sha256", None),   # ← add
+                "artifact_sha256": getattr(r, "artifact_sha256", None),
                 "installed_at": (
                     r.installed_at.isoformat() if r.installed_at else None
                 ),
@@ -775,13 +781,19 @@ class PluginManager(Manager):
             }
             for r in records
         ]
+
     # ------------------------------------------------------------------
-    # Install request builder
+    # Install request builder (kept for compatibility)
     # ------------------------------------------------------------------
 
     async def build_install_request(
         self, plugin_id: str, device_id: str,
     ) -> Dict[str, Any]:
+        """
+        NOTE: The API route builds the WS payload directly from the
+        per-platform manifest. This helper is kept only for callers that
+        already know they want the merged/latest view.
+        """
         plugin = await self.require_plugin(plugin_id)
         return {
             "type": "plugin.install",
@@ -819,7 +831,7 @@ class PluginManager(Manager):
             "package_url": getattr(plugin, "package_url", None),
             "checksum": getattr(plugin, "checksum", None),
             "size": getattr(plugin, "size", 0),
-            "is_enabled": is_enabled
+            "is_enabled": is_enabled,
         }
 
     async def get_status(self, *, user_id: Optional[str] = None) -> Dict[str, Any]:

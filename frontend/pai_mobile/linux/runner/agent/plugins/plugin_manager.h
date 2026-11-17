@@ -6,7 +6,7 @@
 #include <vector>
 
 #include "native_module_registry.h"
-#include "permission_manager.h"
+#include "../permissions/permission_manager.h"
 
 namespace pai::agent {
 

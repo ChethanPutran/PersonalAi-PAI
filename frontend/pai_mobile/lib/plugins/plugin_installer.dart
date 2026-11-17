@@ -101,11 +101,23 @@ class PluginInstaller {
   }
 
   // 2. Fetch manifest.
-  final manifestUrl = ver['manifestUrl'] as String;
+  final platform = _platformKey();
+
+  final manifestUrls =
+      (ver['manifestUrls'] as Map?)?.cast<String, dynamic>() ?? {};
+  final manifestUrl =
+      manifestUrls[platform] as String?
+      ?? (ver['manifestUrl'] as String?);
+
+  if (manifestUrl == null) {
+    throw PluginRepositoryException(
+      'plugin $id@$version has no manifest for platform $platform',
+    );
+  }
+
   final manifest = await repository.fetchManifest(manifestUrl);
 
   // 3. Pick artifact for this platform + ABI.
-  final platform = _platformKey();
   final spec = manifest.platforms[platform];
   if (spec == null) {
     throw PluginRepositoryException(

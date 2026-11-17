@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from pai.api.dependencies import get_current_user
 from pai.api.routes.system import _serialize_task
-from pai.app_context import get_orchestrator
+from pai.app_context import PAIAppContext, get_app_context, get_orchestrator
 from pai.orchestration.orchestrator import TaskOrchestrator
 from pai.tasks.lifecycle import InvalidTaskTransition
 from pai.tasks.models import Task, TaskStatus
@@ -181,3 +181,43 @@ async def cancel_task(
     if task is None:
         raise HTTPException(404, "Task not found")
     return _serialize_task(task)
+
+
+# ============================================================
+# HIL (Confirm / Cancel) — for tasks that require human approval
+# ============================================================
+@router.post("/{task_id}/confirm")
+async def confirm_task(
+    task_id: str,
+    context: PAIAppContext = Depends(get_app_context),
+    user_id: str = Depends(get_current_user),
+) -> Dict[str, Any]:
+    tm = context.orchestrator.task_manager
+    task = await tm.get(task_id)
+    if task is None:
+        raise HTTPException(404, "Task not found")
+    if task.user_id != user_id:
+        raise HTTPException(403, "Not your task")
+    if task.status != TaskStatus.PAUSED:
+        raise HTTPException(
+            400,
+            f"Task is {task.status.value}, not PAUSED — nothing to confirm",
+        )
+    await tm.resume(task_id)
+    return {"task_id": task_id, "status": "confirmed"}
+
+
+@router.post("/{task_id}/deny")
+async def deny_task(
+    task_id: str,
+    context: PAIAppContext = Depends(get_app_context),
+    user_id: str = Depends(get_current_user),
+) -> Dict[str, Any]:
+    tm = context.orchestrator.task_manager
+    task = await tm.get(task_id)
+    if task is None:
+        raise HTTPException(404, "Task not found")
+    if task.user_id != user_id:
+        raise HTTPException(403, "Not your task")
+    await tm.cancel(task_id, reason="User denied confirmation")
+    return {"task_id": task_id, "status": "denied"}

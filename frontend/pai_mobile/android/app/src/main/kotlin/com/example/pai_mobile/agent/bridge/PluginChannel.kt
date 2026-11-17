@@ -2,7 +2,9 @@ package com.pai.agent.bridge
 
 import com.pai.agent.permissions.PermissionManager
 import com.pai.agent.plugins.CAbiPluginModule
+import com.pai.agent.plugins.DefaultPluginContext
 import com.pai.agent.plugins.DynamicLoader
+import com.pai.agent.plugins.KotlinPluginLoader
 import com.pai.agent.plugins.NativeModuleRegistry
 import com.pai.agent.plugins.PluginManager
 import io.flutter.plugin.common.MethodCall
@@ -11,8 +13,10 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import android.os.Build
+import android.app.Activity
 
 class PluginChannel(
+    private val activity: Activity,
     private val scope: CoroutineScope,
     private val permissionManager: PermissionManager,
 ) : MethodChannel.MethodCallHandler {
@@ -23,6 +27,7 @@ class PluginChannel(
 
     private val registry = NativeModuleRegistry()
     private val manager = PluginManager(registry, permissionManager)
+    private val kotlinLoader = KotlinPluginLoader(activity.applicationContext)
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
@@ -35,10 +40,16 @@ class PluginChannel(
             }
 
             // ---- Install: dlopen → read manifest → request perms → register ----
+            // ---- Unified load: native OR kotlin ----
             "loadNativeModule" -> {
                 val path = call.argument<String>("artifactPath")!!
+                val type = call.argument<String>("type") ?: "native"
+                val entrypoint = call.argument<String>("entrypoint") ?: ""
                 scope.launch(Dispatchers.IO) {
-                    val out = installModule(path)
+                    val out = when (type) {
+                        "kotlin" -> installKotlinModule(path, entrypoint)
+                        else -> installNativeModule(path)
+                    }
                     Dispatchers.Main.run { result.success(out) }
                 }
             }
@@ -53,7 +64,9 @@ class PluginChannel(
 
             "unloadNativeModule" -> {
                 val name = call.argument<String>("nativeModule")!!
-                (registry.get(name) as? CAbiPluginModule)?.destroy()
+                val mod = registry.get(name)
+
+                mod?.destroy()
                 registry.unregister(name)
                 result.success(null)
             }
@@ -81,13 +94,18 @@ class PluginChannel(
                     result.success(permissionManager.request(mod.permissions))
                 }
             }
+            
+            "debugRegistry" -> {
+                result.success(registry.list().associateWith { "<registered>" })
+            }
 
             else -> result.notImplemented()
         }
     }
 
     /** Install flow: safe to call from IO; suspends on the permission dialog. */
-    private suspend fun installModule(path: String): Map<String, Any?> {
+    // -------- Native (.so) path — unchanged behavior --------
+    private suspend fun installNativeModule(path: String): Map<String, Any?> {
         val handle = try {
             DynamicLoader.nativeCreateModule(path)
         } catch (t: Throwable) {
@@ -123,6 +141,55 @@ class PluginChannel(
             "ok" to true,
             "name" to module.name,
             "capabilities" to module.capabilities,
+            "permissions" to manifestPerms,
+        )
+    }
+
+    // -------- Kotlin (.dex) path --------
+    private suspend fun installKotlinModule(
+        dexPath: String,
+        className: String,
+    ): Map<String, Any?> {
+        if (className.isBlank()) {
+            return mapOf("ok" to false, "error" to "missing_entrypoint_class")
+        }
+
+        val loaded = kotlinLoader.load(dexPath, className).getOrElse { t ->
+            return mapOf(
+                "ok" to false,
+                "error" to "kotlin_load_failed: ${t.message ?: t::class.simpleName}",
+            )
+        }
+
+        // Attach context BEFORE reading perms — the plugin may want
+        // to inspect its own storage during the permission phase.
+        val ctx = DefaultPluginContext(
+            activity.applicationContext,
+            pluginId = loaded.name,
+            pluginVersion = "0.0.0",
+        )
+        loaded.attach(ctx)
+
+        val manifestPerms = loaded.permissions
+        val permResult = permissionManager.request(manifestPerms)
+
+        if (permResult["ok"] != true) {
+            loaded.destroy()
+            return mapOf(
+                "ok" to false,
+                "error" to "permissions_denied",
+                "name" to loaded.name,
+                "capabilities" to loaded.capabilities,
+                "permissions" to manifestPerms,
+                "denied" to (permResult["denied"] ?: emptyList<String>()),
+            )
+        }
+
+        registry.register(loaded)
+        return mapOf(
+            "ok" to true,
+            "name" to loaded.name,
+            "capabilities" to loaded.capabilities,
             "permissions" to manifestPerms,
         )
     }

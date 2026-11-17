@@ -197,7 +197,6 @@ async def list_devices(
     return {"devices": devices}
 
 
-# devices.py — additions
 
 @router.post("/{device_id}/disconnect")
 async def disconnect_my_device(
@@ -312,6 +311,30 @@ async def invoke_on_device(
         raise HTTPException(409, str(exc)) from exc
 
     return {"ok": True, "device_id": device_id, "capability": payload.capability, "result": result}
+
+
+@router.post("/{device_id}/trust")
+async def trust_device(
+    device_id: str,
+    context: PAIAppContext = Depends(get_app_context),
+    user_id: str = Depends(get_current_user),
+) -> Dict[str, Any]:
+    dm = context.orchestrator.device_manager
+    device = await dm.get(device_id)
+    if device is None or getattr(device, "user_id", None) != user_id:
+        raise HTTPException(404, "Device not found")
+    await context.orchestrator.plugin_guard.trust_device(user_id, device_id)
+    return {"device_id": device_id, "trusted": True}
+
+
+@router.delete("/{device_id}/trust", status_code=204)
+async def untrust_device(
+    device_id: str,
+    context: PAIAppContext = Depends(get_app_context),
+    user_id: str = Depends(get_current_user),
+):
+    await context.orchestrator.plugin_guard.untrust_device(user_id, device_id)
+    return Response(status_code=204)
 
 # ============================================================
 # Device WebSocket

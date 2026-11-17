@@ -91,12 +91,23 @@ class PluginService {
 
     // ---- 3. Load the .so — Kotlin reads the declared permissions, -----
     //         shows the OS dialog(s), and returns the result.
+    // Unload any prior registration first. Handles three cases that would
+    // otherwise fail with `already_registered`:
+    //   • user clicked Install twice
+    //   • app hot-restarted (Dart state reset, native state not)
+    //   • a prior uninstall didn't clear the native registry
+    // No-op if nothing was registered.
+    try {
+      await runtime.unloadNativeModule(manifest.nativeModule);
+    } catch (_) {}
+
     final result = await runtime.loadNativeModule(
       nativeModule: manifest.nativeModule,
       artifactPath: path,
       entrypoint: spec.entrypoint,
       capabilities: manifest.capabilities,
       permissions: manifest.permissions,
+      type: manifest.type,
     );
 
     // ---- 4. Failure path — roll back cleanly ----
@@ -170,12 +181,17 @@ class PluginService {
     );
     if (!File(path).existsSync()) return false;
 
+      try {
+    await runtime.unloadNativeModule(plugin.info.nativeModule);
+  } catch (_) {}
+
     final result = await runtime.loadNativeModule(
       nativeModule: plugin.info.nativeModule,
       artifactPath: path,
       entrypoint: spec.entrypoint,
       capabilities: plugin.info.capabilities,
       permissions: plugin.info.permissions,
+      type: plugin.info.type,
     );
 
     if (result['ok'] != true) {
@@ -196,11 +212,32 @@ class PluginService {
     await installer.setEnabled(id, false);
   }
 
-  Future<void> uninstall(String id) async {
-    await disable(id);
-    await installer.remove(id);
-    registry.remove(id);
+Future<void> uninstall(String id) async {
+  // Resolve the native module name even when the plugin isn't in the
+  // Dart registry. Otherwise the C++ side keeps the module loaded and
+  // the next install fails with `already_registered`.
+  String? nativeName = registry.byId(id)?.info.nativeModule;
+  if (nativeName == null) {
+    try {
+      final manifests = await installer.discover();
+      for (final m in manifests) {
+        if (m.id == id) {
+          nativeName = m.nativeModule;
+          break;
+        }
+      }
+    } catch (_) {}
   }
+
+  if (nativeName != null) {
+    try {
+      await runtime.unloadNativeModule(nativeName);
+    } catch (_) {}
+  }
+
+  await installer.remove(id);
+  registry.remove(id);
+}
 
   /// Dispatch a capability call.
   Future<Map<String, dynamic>> invoke(
@@ -216,10 +253,14 @@ class PluginService {
       };
     }
 
+    // Convert all params to strings, because the native side only accepts string values.
+    // This is a temporary workaround until we implement proper type handling in the native module.
+    final stringParams = params.map((k, v) => MapEntry(k, v?.toString() ?? ''));
+
     return runtime.invoke(
       nativeModule: resolved.plugin.info.nativeModule,
       capability: capability,
-      parameters: params,
+      parameters: stringParams,
     );
   }
 
