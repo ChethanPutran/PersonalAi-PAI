@@ -1,0 +1,95 @@
+{
+  "schemaVersion": 1,
+  "id": "desktop",
+  "name": "Desktop",
+  "version": "1.0.0",
+  "description": "Desktop conveniences: clipboard, audio, media, notifications, app launcher.",
+  "author": "PAI",
+  "license": "MIT",
+
+  "runtime": {
+    "kind": "native",
+    "nativeModule": "pai.desktop",
+    "minPaiVersion": "0.4.0"
+  },
+
+  "platforms": {
+    "linux": {
+      "artifact": "linux/libpai_desktop.so",
+      "entrypoint": "pai_plugin_module_create"
+    }
+  },
+
+  "architectures": ["x86_64"],
+  "device_types": ["desktop"],
+  "permissions": ["clipboard", "notifications", "network"],
+
+  "capabilities": [
+    {
+      "id": "clipboard.read",
+      "description": "Read the current clipboard contents.",
+      "parameters": {"type": "object", "properties": {}}
+    },
+    {
+      "id": "clipboard.write",
+      "description": "Write to the clipboard.",
+      "parameters": {
+        "type": "object",
+        "properties": {"content": {"type": "string"}},
+        "required": ["content"]
+      }
+    },
+    {
+      "id": "audio.play",
+      "description": "Play an audio file or URL in the background.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "url": {"type": "string"},
+          "path": {"type": "string"}
+        }
+      }
+    },
+    {
+      "id": "audio.speak",
+      "description": "Speak text via the system TTS engine.",
+      "parameters": {
+        "type": "object",
+        "properties": {"text": {"type": "string"}},
+        "required": ["text"]
+      }
+    },
+    {
+      "id": "media.control",
+      "description": "Control media playback via playerctl (play/pause/next/previous/stop/status).",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {"type": "string", "enum": ["play", "pause", "play-pause", "stop", "next", "previous", "status"]}
+        },
+        "required": ["action"]
+      }
+    },
+    {
+      "id": "notifications.read",
+      "description": "List current desktop notifications (DE-dependent; returns hint if unavailable).",
+      "parameters": {"type": "object", "properties": {}}
+    },
+    {
+      "id": "notifications.dismiss",
+      "description": "Dismiss all desktop notifications (via dunstctl or similar).",
+      "parameters": {"type": "object", "properties": {}}
+    },
+    {
+      "id": "app.launch",
+      "description": "Launch a desktop app or open a URL.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "app": {"type": "string", "description": "Application name (e.g., 'firefox', 'spotify')"},
+          "url": {"type": "string", "description": "URL to open in the default handler"}
+        }
+      }
+    }
+  ]
+}
