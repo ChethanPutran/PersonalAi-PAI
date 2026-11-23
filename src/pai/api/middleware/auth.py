@@ -1,13 +1,15 @@
 """JWT authentication middleware."""
 from __future__ import annotations
 
+import re
+
 from fastapi import Request
 from loguru import logger
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
-from pai.security.auth import decode_access_token
-
+from pai.security.tokens.auth import decode_access_token
+from pai.common.constants import API_PREFIX
 
 # ============================================================
 # Public paths — exact match after trailing-slash normalization
@@ -19,35 +21,24 @@ _PUBLIC_PATHS: set[str] = {
     "/redoc",
     "/openapi.json",
     "/favicon.ico",
-    "/api/v1/health",
-    "/api/v1/auth/register",
-    "/api/v1/auth/login",
-    "/api/v1/auth/refresh",
-    "/api/v1/auth/forgot-password",
-    "/api/v1/auth/reset-password",
-    "/api/v1/system/admin",
-    "/api/v1/plugins/index.json",
+    f"{API_PREFIX}/health",
+    f"{API_PREFIX}/auth/register",
+    f"{API_PREFIX}/auth/login",
+    f"{API_PREFIX}/auth/refresh",
+    f"{API_PREFIX}/auth/forgot-password",
+    f"{API_PREFIX}/auth/reset-password",
+    f"{API_PREFIX}/system/admin"
 }
+
+
+# GET {API_PREFIX}/tasks/{session_id}/events (SSE). Nothing else accepts a query-string token.
+_SSE_PATH = re.compile(rf"^{re.escape(API_PREFIX)}/tasks/[^/]+/events$")
 
 
 def _normalize_path(path: str) -> str:
     stripped = path.rstrip("/")
     return stripped or "/"
 
-
-def _is_public_registry_path(path: str) -> bool:
-    """Registry downloads are public — signed metadata + verified binaries."""
-    if not path.startswith("/api/v1/plugins/"):
-        return False
-    if path == "/api/v1/plugins/index.json":
-        return True
-    if path.startswith("/api/v1/plugins/catalog"):
-        return False
-    if path.endswith("/manifest.json"):
-        return True
-    if "/artifact/" in path:
-        return True
-    return False
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
@@ -58,14 +49,26 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if method == "OPTIONS":
             return await call_next(request)
 
-        if path in _PUBLIC_PATHS or _is_public_registry_path(path):
+        if path in _PUBLIC_PATHS:
             logger.debug("authz: public {} {}", method, path)
             return await call_next(request)
 
         auth_header = request.headers.get("Authorization", "")
-        if not auth_header.startswith("Bearer "):
+        token = None
+
+        if auth_header.startswith("Bearer "):
+            token = auth_header[len("Bearer "):].strip()
+
+        if not token:
+            token = request.cookies.get("access_token")
+
+        # EventSource cannot set headers: allow ?token= for the SSE status stream ONLY.
+        if not token and method == "GET" and _SSE_PATH.match(path):
+            token = request.query_params.get("token")
+
+        if not token:
             logger.warning(
-                "authz: reject {} {} — missing bearer token",
+                "authz: reject {} {} — missing token",
                 method, path,
             )
             return JSONResponse(
@@ -77,7 +80,6 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
-        token = auth_header[len("Bearer "):].strip()
         user_id = decode_access_token(token)
         if user_id is None:
             logger.warning(

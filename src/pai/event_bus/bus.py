@@ -21,7 +21,8 @@ import nats
 from nats.aio.client import Client as NATSClient
 from nats.errors import Error as NATSError
 
-from pai.event_bus.events import Event, EventResponse
+from pai.config.models.event_bus import EventBusConfig
+from pai.event_bus.events import Event, EventResponse, EventType
 
 
 logger = logging.getLogger(__name__)
@@ -71,21 +72,13 @@ class EventBus:
     """
 
     def __init__(
-        self,
-        nats_url: Optional[str] = None,
-        max_queue_size: int = 1000,
-        source: str = "pai",
-        enable_nats: bool = False,
-        num_workers: int = 1,
+        self,config: EventBusConfig,
     ):
-        self.nats_url = nats_url
-        self.source = source
-        self.enable_nats = enable_nats
-
+        self.config = config
         self.nc: Optional[NATSClient] = None
 
         self._event_queue: asyncio.Queue[Event] = asyncio.Queue(
-            maxsize=max_queue_size
+            maxsize=config.max_queue_size
         )
 
         self._subscriptions: Dict[
@@ -121,18 +114,18 @@ class EventBus:
 
         self._initialized = True
 
-        if not self.enable_nats:
+        if not self.config.nats_enabled:
             logger.info("EventBus initialized with NATS disabled")
             return
 
-        if not self.nats_url:
+        if not self.config.nats.url:
             logger.info("EventBus initialized in local-only mode")
             return
 
         try:
             self.nc = await asyncio.wait_for(
                 nats.connect(
-                    self.nats_url,
+                    self.config.nats.url,
                     allow_reconnect=True,
                     max_reconnect_attempts=3,
                     connect_timeout=1,
@@ -142,7 +135,7 @@ class EventBus:
 
             logger.info(
                 "EventBus connected to NATS: %s",
-                self.nats_url,
+                self.config.nats.url,
             )
 
         except (
@@ -215,7 +208,7 @@ class EventBus:
 
     async def publish(
         self,
-        event_type: str,
+        event_type: EventType,
         data: Optional[Dict[str, Any]] = None,
         *,
         source: Optional[str] = None,
@@ -232,11 +225,19 @@ class EventBus:
         Returns:
             Event ID.
         """
+        if not isinstance(event_type, EventType):
+            # Try to coerce a plain string to a known EventType; if unknown,
+            # allow it through so callers aren't required to enumerate every
+            # event type in the enum before they can publish.
+            try:
+                event_type = EventType(event_type)
+            except ValueError:
+                pass  # Unknown/custom event type — publish as-is
 
         event = Event(
-            event_type=self._normalize_event_type(event_type),
+            event_type=event_type,
             data=data or {},
-            source=source or self.source,
+            source=source ,
             correlation_id=correlation_id,
         )
 
@@ -290,34 +291,41 @@ class EventBus:
 
     async def subscribe(
         self,
-        event_type: str,
+        event_type: EventType | str,
         handler: EventHandler,
     ) -> str:
         """
-        Register a handler.
+        Register an event handler.
 
-        Supports:
-
-            task.created
-            task.*
-            *
+        Supported patterns:
+            task.created  -> exact match
+            task.*        -> one-level hierarchical wildcard
+            *             -> all events
         """
 
-        event_type = self._normalize_event_type(event_type)
+        pattern = (
+            event_type.value
+            if isinstance(event_type, EventType)
+            else event_type
+        )
+
+        if not isinstance(pattern, str) or not pattern:
+            raise ValueError("event_type must be a non-empty string")
+
+        # Only allow '*' as a complete segment.
+        if "*" in pattern and pattern != "*":
+            if not pattern.endswith(".*") or pattern.count("*") != 1:
+                raise ValueError(f"Invalid event subscription pattern: {pattern}")
 
         subscription_id = str(uuid4())
 
-        self._subscriptions[event_type][subscription_id] = Subscription(
+        self._subscriptions[pattern][subscription_id] = Subscription(
             subscription_id=subscription_id,
-            event_type=event_type,
+            event_type=pattern,
             handler=handler,
         )
 
-        logger.debug(
-            "Subscribed %s to %s",
-            subscription_id,
-            event_type,
-        )
+        logger.debug("Subscribed %s to %s", subscription_id, pattern)
 
         return subscription_id
 
@@ -418,35 +426,29 @@ class EventBus:
     ) -> List[Subscription]:
         """Return exact and wildcard matching handlers."""
 
-        subscriptions: Dict[str, Subscription] = {}
+        handlers: Dict[str, Subscription] = {}
 
         # Exact match.
-        for subscription_id, subscription in (
-            self._subscriptions.get(event_type, {}).items()
-        ):
-            subscriptions[subscription_id] = subscription
+        handlers.update(self._subscriptions.get(event_type, {}))
 
         # Global wildcard.
-        for subscription_id, subscription in (
-            self._subscriptions.get("*", {}).items()
-        ):
-            subscriptions[subscription_id] = subscription
+        handlers.update(self._subscriptions.get("*", {}))
 
-        # Hierarchical wildcard:
+        # Hierarchical wildcard.
         #
-        # task.created -> task.*
+        # task.created       -> task.*
+        # task.execution.completed -> task.execution.*
         parts = event_type.split(".")
 
-        if len(parts) > 1:
+        for i in range(1, len(parts)):
+            wildcard = ".".join(parts[:i]) + ".*"
 
-            wildcard = f"{parts[0]}.*"
+            handlers.update(
+                self._subscriptions.get(wildcard, {})
+            )
 
-            for subscription_id, subscription in (
-                self._subscriptions.get(wildcard, {}).items()
-            ):
-                subscriptions[subscription_id] = subscription
+        return list(handlers.values())
 
-        return list(subscriptions.values())
 
     async def _safe_call_handler(
         self,
@@ -511,7 +513,7 @@ class EventBus:
 
     async def emit_and_wait(
         self,
-        event_type: str,
+        event_type: EventType,
         data: Optional[Dict[str, Any]] = None,
         *,
         source: Optional[str] = None,
@@ -576,29 +578,6 @@ class EventBus:
     # ------------------------------------------------------------------
     # Utilities
     # ------------------------------------------------------------------
-
-    @staticmethod
-    def _normalize_event_type(
-        event_type: str,
-    ) -> str:
-        """Normalize EventType or string into a NATS-safe subject."""
-
-        if hasattr(event_type, "value"):
-            event_type = event_type.value
-
-        event_type = str(event_type).strip()
-
-        if not event_type:
-            raise ValueError(
-                "Event type cannot be empty"
-            )
-
-        if " " in event_type:
-            raise ValueError(
-                f"Invalid event type: {event_type!r}"
-            )
-
-        return event_type
 
     @property
     def is_running(self) -> bool:

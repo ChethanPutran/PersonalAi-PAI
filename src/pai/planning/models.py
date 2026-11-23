@@ -8,6 +8,8 @@ from enum import Enum
 from typing import Any, Dict, List, Optional
 import uuid
 
+from pai.tasks.models import TaskType
+
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -38,12 +40,13 @@ class TaskSpec:
     The planning layer only describes what needs to be done.
     """
 
-    type: str
+    name: str = ""          # defaults to the capability / id (see __post_init__)
+    input: str = ""
+    type: TaskType = TaskType.ONE_SHOT
     parameters: Dict[str, Any] = field(default_factory=dict)
 
     id: str = field(default_factory=lambda: f"task_{uuid.uuid4().hex[:12]}")
-    name: Optional[str] = None
-
+    
     # Executor/capability requirements.
     capability: Optional[str] = None
     preferred_executor: Optional[str] = None
@@ -53,11 +56,25 @@ class TaskSpec:
     depends_on: List[str] = field(default_factory=list)
 
     # Planning metadata.
-    timeout: Optional[float] = None
+    timeout: float = field(default=10) #10s
     retry_count: int = 0
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     status: PlanTaskStatus = PlanTaskStatus.PENDING
+
+    # Populated from the capability schema at decompose time
+    requires_confirmation: bool = False
+    confirmation_reason: str = ""
+    # Populated from the capability manifest (never from LLM output); the TaskManager
+    # re-resolves it authoritatively. False => no automatic retry / re-send.
+    retryable: bool = True
+
+    def __post_init__(self) -> None:
+        # The planner often omits these; sensible defaults beat a TypeError mid-plan.
+        if not self.name:
+            self.name = self.capability or self.id
+        if self.timeout is None:
+            self.timeout = 10
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -82,10 +99,14 @@ class TaskSpec:
         if not isinstance(status, PlanTaskStatus):
             status = PlanTaskStatus(status)
 
+        name = data.get("name", f"task_{uuid.uuid4().hex[:12]}")
+
+
         return cls(
             id=data.get("id", f"task_{uuid.uuid4().hex[:12]}"),
+            input=data.get("input", ""),
             type=data["type"],
-            name=data.get("name"),
+            name=name,
             parameters=data.get(
                 "parameters",
                 data.get("params", {}),
@@ -94,7 +115,7 @@ class TaskSpec:
             preferred_executor=data.get("preferred_executor"),
             preferred_device=data.get("preferred_device"),
             depends_on=list(data.get("depends_on", [])),
-            timeout=data.get("timeout"),
+            timeout=data.get("timeout", 10),
             retry_count=int(data.get("retry_count", 0)),
             metadata=dict(data.get("metadata", {})),
             status=status,

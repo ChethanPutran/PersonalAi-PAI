@@ -1,82 +1,142 @@
+
 """HTTP request logging middleware."""
+
 from __future__ import annotations
 
 import asyncio
 import time
+from urllib.parse import parse_qsl, urlencode
 
 from loguru import logger
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 
+_SENSITIVE_QUERY_PARAMS = {
+    "token",
+    "access_token",
+    "refresh_token",
+    "api_key",
+    "apikey",
+    "password",
+    "secret",
+    "authorization",
+}
+
+
+def _sanitize_query_string(query_string: bytes) -> str:
+    """Remove sensitive values from query parameters."""
+
+    if not query_string:
+        return ""
+
+    query = query_string.decode(errors="replace")
+
+    try:
+        params = parse_qsl(
+            query,
+            keep_blank_values=True,
+        )
+
+        sanitized = [
+            (
+                key,
+                "[REDACTED]"
+                if key.lower() in _SENSITIVE_QUERY_PARAMS
+                else value,
+            )
+            for key, value in params
+        ]
+
+        return urlencode(sanitized)
+
+    except Exception:
+        # Avoid exposing an unsanitized query if parsing fails.
+        return "[QUERY_REDACTED]"
+
+
 class LoggingMiddleware:
-    """
-    Per-request access logging.
-
-    Every HTTP request emits exactly one INFO record with structured
-    extras (method, path, status, duration_s, client) tagged with
-    ``http_access=True``. The loguru sinks in
-    ``pai.logging_config`` route these records to ``logs/http_access.log``
-    and keep them out of the terminal + ``app.log``.
-
-    Websocket and lifespan scopes pass through untouched — Starlette's
-    own protocols own those.
-    """
+    """Per-request HTTP access logging."""
 
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
 
     async def __call__(
-        self, scope: Scope, receive: Receive, send: Send
+        self,
+        scope: Scope,
+        receive: Receive,
+        send: Send,
     ) -> None:
+
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
 
         method = scope.get("method", "?")
         path = scope.get("path", "?")
-        query = scope.get("query_string", b"").decode(errors="replace")
+
+        query = _sanitize_query_string(
+            scope.get("query_string", b"")
+        )
+
         full_path = f"{path}?{query}" if query else path
 
         client = scope.get("client")
         client_host = client[0] if client else "-"
 
-        start = time.perf_counter()
+        start_time = time.perf_counter()
+
         status_code = 0
         cancelled = False
 
-        async def _send(message: Message) -> None:
+        async def send_wrapper(message: Message) -> None:
             nonlocal status_code
+
             if message["type"] == "http.response.start":
                 status_code = message["status"]
+
             await send(message)
 
         try:
-            await self.app(scope, receive, _send)
+            await self.app(scope, receive, send_wrapper)
 
         except asyncio.CancelledError:
-            # Shutdown interrupted an in-flight request. Expected
-            # behaviour — log at debug, keep the exception flowing.
             cancelled = True
             raise
 
         except Exception:
-            # Real error — log the traceback so it lands in app.log.
-            # Starlette's error handler will emit the 500 response.
-            logger.exception("{} {} — unhandled exception", method, full_path)
+            # Preserve the original exception.
+            logger.bind(
+                http_access=False,
+                method=method,
+                path=full_path,
+                client=client_host,
+            ).exception(
+                "Unhandled exception while processing HTTP request"
+            )
             raise
 
         finally:
-            duration_s = time.perf_counter() - start
+            duration_s = time.perf_counter() - start_time
+
             if status_code == 0:
-                # Response never started: 499 for cancellation (nginx
-                # convention), 500 for a genuine error before send.
                 status_code = 499 if cancelled else 500
 
-            logger.bind(
-                http_access=True,
-                method=method,
-                path=full_path,
-                status=status_code,
-                duration_s=duration_s,
-                client=client_host,
-            ).info("{} {} - {:.3f}s", method, full_path, duration_s)
+            try:
+                logger.bind(
+                    http_access=True,
+                    method=method,
+                    path=full_path,
+                    status=status_code,
+                    duration_s=duration_s,
+                    client=client_host,
+                ).info(
+                    "{} {} - {:.3f}s",
+                    method,
+                    full_path,
+                    duration_s,
+                )
+
+            except Exception:
+                # Access logging must not replace an application exception.
+                # The application should still complete its request lifecycle.
+                pass

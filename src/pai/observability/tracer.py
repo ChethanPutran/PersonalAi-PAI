@@ -5,6 +5,7 @@ import uuid
 from contextvars import ContextVar
 from typing import Any, Dict, List, Optional
 
+from pai.common.enums.llm import LLMModel, LLMProviderName
 from pai.observability.events import EventKind, TraceEvent
 from pai.observability.redact import redact, truncate
 from pai.observability.store import TraceStore
@@ -208,8 +209,8 @@ class Tracer:
     def log_llm_call(
         self,
         *,
-        provider: str,
-        model: str,
+        provider: LLMProviderName,
+        model: LLMModel,
         prompt: str,
         response: Optional[str] = None,
         error: Optional[str] = None,

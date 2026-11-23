@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
+from pai.common.enums.permission import Origin
 from pai.common.manager import Manager
 
 def utcnow() -> datetime:
@@ -31,6 +32,7 @@ class ExecutionContext:
 
     agent_id: Optional[str] = None
     source_device_id: Optional[str] = None
+    origin: Optional[Origin] = None
 
     goal: Optional[str] = None
 

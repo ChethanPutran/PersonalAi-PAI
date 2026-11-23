@@ -36,6 +36,7 @@ from loguru import logger
 from abc import ABC, abstractmethod
 
 from pai.event_bus.bus import EventBus
+from pai.event_bus.events import EventType
 
 class Lifecycle(ABC):
     """Components that participate in the application's startup/shutdown."""
@@ -83,7 +84,7 @@ class Lifecycle(ABC):
 
     def _emit(
         self,
-        event_type: str,
+        event_type: EventType,
         data: Optional[Dict[str, Any]] = None,
         *,
         distributed: bool = False,
@@ -114,7 +115,7 @@ class Lifecycle(ABC):
 
     async def _do_emit(
         self,
-        event_type: str,
+        event_type: str | EventType,
         data: Optional[Dict[str, Any]],
         *,
         distributed: bool,

@@ -9,9 +9,11 @@ before running.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -19,7 +21,7 @@ from uuid import uuid4
 from loguru import logger
 from pai.api.dependencies import get_current_user, get_db
 from pai.observability.tracer import get_tracer
-from pai.security.auth import (
+from pai.security.tokens.auth import (
     ahash_password,
     averify_password,
     create_access_token,
@@ -156,6 +158,7 @@ async def register(
 @router.post("/login", response_model=TokenResponse)
 async def login(
     payload: LoginRequest,
+    response: Response,
     session: AsyncSession = Depends(get_db),
 ) -> TokenResponse:
     tracer = get_tracer()
@@ -204,12 +207,39 @@ async def login(
         span.set_attribute("outcome", "success")
 
         token = create_access_token(user.id)
+
+        response.set_cookie(
+            key="access_token",
+            value=token,
+            httponly=True,
+            secure=True,       # HTTPS only
+            samesite="lax",
+            max_age=60 * 60,   # 1 hour; align with JWT expiration
+            path="/",
+        )
+        
         return TokenResponse(
             access_token=token,
             user_id=user.id,
             email=user.email,
             is_admin=user.is_admin,
         )
+    
+
+_LOGIN_HTML = Path(__file__).resolve().parent.parent / "user" / "login.html"
+
+
+
+@router.get("/login", response_class=HTMLResponse)
+async def login_panel() -> HTMLResponse:
+    if not _LOGIN_HTML.exists():
+        return HTMLResponse(
+            f"<h1>Login panel not installed</h1>"
+            f"<p>Expected file: {_LOGIN_HTML}</p>",
+            status_code=500,
+        )
+    return HTMLResponse(_LOGIN_HTML.read_text(encoding="utf-8"))
+
 
 
 # ============================================================

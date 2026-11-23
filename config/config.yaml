@@ -1,0 +1,375 @@
+
+# ============================================================
+# PAI APPLICATION CONFIGURATION
+# Non-sensitive settings only.
+# Secrets must be supplied through .env.
+# ============================================================
+
+app:
+  name: PAI
+  environment: development
+  debug: true
+  timezone: Asia/Kolkata
+
+api:
+  host: 0.0.0.0
+  port: 8000
+  prefix: /api/v1
+  cors:
+    enabled: true
+    allow_origins:
+      - http://localhost:3000
+      - http://localhost:5173
+    allow_credentials: true
+    allow_methods:
+      - GET
+      - POST
+      - PUT
+      - PATCH
+      - DELETE
+    allow_headers:
+      - "*"
+
+server:
+  workers: 1
+  reload: true
+  shutdown_timeout: 30
+
+# ============================================================
+# ORCHESTRATION
+# ============================================================
+
+orchestration:
+  goal_tokens_trace_size: 300
+  memory_recall_limit: 10
+  memory_block_max_size: 1000
+  tool_summary_block_max_size: 800
+  prompt_trace_max_size: 800
+  chat_reply_max_tokens: 500
+  chat_reply_temperature: 0.7 
+  max_concurrent_tasks: 10
+  task_timeout: 300
+  max_retries: 3
+  retry_delay: 2
+  enable_planning: true
+  enable_reflection: true
+
+# ============================================================
+# DATABASE
+# ============================================================
+
+database:
+  url: "sqlite+aiosqlite:///./data/pai.db"
+  echo: false
+  pool_size: 5
+
+# ============================================================
+# REDIS
+# ============================================================
+
+redis:
+  host: localhost
+  port: 6379
+  database: 0
+  max_connections: 20
+  socket_timeout: 5
+  socket_connect_timeout: 5
+  decode_responses: true
+
+# ============================================================
+# NATS / EVENT BUS
+# ============================================================
+
+event_bus:
+  nats_enabled: false
+  max_queue_size: 1000
+  num_workers: 1
+  nats:
+    url: nats://localhost:4222
+    servers:
+      - nats://localhost:4222
+    name: pai
+  max_reconnect_attempts: 10
+  reconnect_time_wait: 2
+  connect_timeout: 5
+  drain_timeout: 10
+
+# ============================================================
+# MEMORY
+# ============================================================
+
+memory:
+  enabled: true
+
+  short_term:
+    enabled: true
+    backend: memory  # redis / memory
+    ttl_seconds: 86400
+
+  long_term:
+    enabled: true
+    backend: sqlite  # postgresql / sqlite / mongodb
+    db_url: sqlite+aiosqlite:///./data/long_term.db
+
+  episodic:
+    enabled: true
+    backend: sqlite  # postgresql / sqlite / mongodb
+    db_url: sqlite+aiosqlite:///./data/episodic.db
+
+  vector_store:
+    enabled: true
+    backend: chroma
+    persist_directory: ./data/chroma
+    collection_name: pai_memory
+    embeddings:
+      provider: sentence_transformers
+      model_name: sentence-transformers/all-MiniLM-L6-v2
+      device: auto
+      max_tokens: 8191
+      batch_size: 32
+
+  knowledge_graph:
+    enabled: false
+    backend: neo4j
+    uri: bolt://localhost:7687
+    database: neo4j
+
+# ============================================================
+# LLM PROVIDER
+# ============================================================
+
+llm_provider:
+  provider: openrouter
+  model: nvidia/nemotron-3-ultra-550b-a55b:free
+  base_url: null
+  temperature: 0.2
+  max_tokens: 4096
+  timeout: 60
+  max_retries: 3
+  retry_backoff: 2.0
+
+# ============================================================
+# EXECUTOR
+# ============================================================
+
+executor:
+  default_timeout: 60
+  max_concurrent_executions: 5
+  working_directory: ./workspace
+  allow_shell: false
+  allow_subprocess: true
+
+# ============================================================
+# PLUGINS
+# ============================================================
+
+plugins:
+  plugin_registry_path: ./plugin_registry/plugins
+  plugin_artifact_store: local
+  local_artifact_path: ./plugin_registry/.packages
+
+  s3_config:
+    bucket: null
+    prefix: pai-plugins
+    ttl_seconds: 3600
+
+  enabled_plugins:
+    - browser
+    - desktop
+    - files
+    - screen
+    - camera
+    - shell
+
+  security:
+    require_signature: true
+    verify_signature: true
+    allow_unsigned_plugins: false
+    execution_timeout_seconds: 60
+    allow_remote_plugins: true
+    allow_local_plugins: true
+    allow_third_party_plugins: true
+
+# ============================================================
+# Devices
+# ============================================================
+devices:
+  enabled: true
+  allow_remote_access: false
+  allow_local_access: true
+  allow_web_access: true
+
+
+# ============================================================
+# SECURITY
+# ============================================================
+
+security:
+  authentication:
+    enabled: true
+    access_token_expire_minutes: 30
+    refresh_token_expire_days: 7
+    algorithm: HS256
+
+  authorization:
+    enabled: true
+    auth_policy: default_policy
+    roles:
+      - name: admin
+        permissions:
+          - read
+          - write
+          - delete
+          - execute
+          - manage
+      - name: user
+        permissions:
+          - read
+          - write
+      - name: guest
+        permissions:
+          - read
+
+  encryption:
+    algorithm: AES-256-GCM
+    key_length: 32
+    iv_length: 12
+    tag_length: 16
+
+# ============================================================
+# STORAGE
+# ============================================================
+
+storage:
+  data_directory: ./data
+  temporary_directory: ./tmp
+  artifact_directory: ./artifacts
+  max_storage_size_mb: 100
+
+# ============================================================
+# OBSERVABILITY
+# ============================================================
+
+logging:
+  log_dir: ./logs
+  json_access: false
+
+  terminal:
+    enabled: true
+    level: INFO
+    colorize: true
+
+  app_file:
+    enabled: true
+    filename: app.log
+    level: DEBUG
+    rotation: 20 MB
+    retention: 10 days
+    compression: gz
+
+  debug_file:
+    enabled: true
+    filename: debug.log
+    level: DEBUG
+    rotation: 10 MB
+    retention: 5 days
+    compression: gz
+
+  access_file:
+    enabled: true
+    filename: http_access.log
+    level: INFO
+    rotation: 20 MB
+    retention: 10 days
+    compression: gz
+
+  noise:
+    terminal_cutoff: INFO
+
+    authz_loggers:
+      - pai.api.middleware.auth
+      - pai.security
+
+    device_loggers:
+      - pai.api.routes.devices
+      - pai.devices
+
+    authz_message_prefixes:
+      - "authz:"
+      - "permission denied"
+
+    device_message_prefixes:
+      - "Device message ["
+      - "WebSocket disconnected:"
+      - "WebSocket connected:"
+      - "Connection attached to device"
+      - "Connection detached from device"
+
+  third_party:
+    warning:
+      - uvicorn.access
+      - httpx
+      - httpcore
+      - chromadb
+      - sentence_transformers
+      - huggingface_hub
+      - sqlalchemy
+      - sqlalchemy.engine
+      - aiosqlite
+
+    critical:
+      - chromadb.telemetry.product.posthog
+      - sqlalchemy
+      - sqlalchemy.engine
+
+tracing:
+  enabled: true
+  folder: ./data/traces
+      
+# ============================================================
+# SCHEDULER
+# ============================================================
+
+scheduler:
+  enabled: true
+  max_concurrent_tasks: 5
+  timezone: Asia/Kolkata
+  misfire_grace_time: 60
+
+# ============================================================
+# TASKS
+# ============================================================
+
+tasks:
+  max_history: 1000
+  cleanup_interval_seconds: 3600
+  retry_attempts: 3
+  retry_delay: 10
+  default_timeout: 300
+
+# ============================================================
+# FEATURE FLAGS
+# ============================================================
+
+features:
+  enable_memory: true
+  enable_plugins: true
+  enable_scheduler: true
+  enable_notifications: true
+  enable_observability: true
+
+# ============================================================
+# Prompts
+# ============================================================
+prompts:
+  registry:
+    root: ./prompts
+    frozen: true
+  track_usage: true
+  guard_enabled: true
+  guard:
+    request_mode: warn
+    response_mode: sanitize
+    redact_secrets: true
+    strip_tool_calls: true
+    detect_jailbreak_success: true

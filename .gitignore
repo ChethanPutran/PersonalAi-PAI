@@ -1,4 +1,6 @@
 .env
+example.env
+example2.env
 .idea/*
 docs/*
 data/*
@@ -58,3 +60,11 @@ build/
 artifacts
 
 logs/
+# stray / machine-specific / generated
+sqlite+aiosqlite:/
+local.properties
+**/ephemeral/
+GeneratedPluginRegistrant.*
+Generated.xcconfig
+flutter_export_environment.sh
+frontend/com.android.builder.sdk.*

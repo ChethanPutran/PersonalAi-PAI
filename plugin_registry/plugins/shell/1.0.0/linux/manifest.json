@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "id": "shell",
+  "name": "Shell",
+  "version": "1.0.0",
+  "description": "Execute whitelisted shell commands on the host.",
+  "author": "PAI",
+  "license": "MIT",
+  "type": "native",
+  "runtime": {
+    "kind": "device",
+    "nativeModule": "pai.shell",
+    "minPaiVersion": "0.4.0"
+  },
+
+  "platforms": {
+    "linux": {
+      "artifact": "linux/libpai_shell.so",
+      "entrypoint": "pai_plugin_module_create"
+    }
+  },
+
+  "architectures": ["x86_64"],
+
+  "deviceTypes": ["desktop"],
+
+  "permissions": ["shell"],
+
+  "metadata": {
+    "allowedPrefixes": [
+      "ls", "pwd", "whoami", "date", "uptime", "hostname", "uname",
+      "df", "du", "free", "ps", "top", "htop", "iostat", "vmstat",
+      "cat", "head", "tail", "wc", "grep", "find", "stat", "file",
+      "git status", "git log", "git diff", "git branch", "git show",
+      "systemctl status", "systemctl list-units",
+      "docker ps", "docker images", "docker logs",
+      "echo", "cp", "mv", "mkdir", "xdg-open", "eog", "eom", "xviewer",
+      "display", "feh", "gpicview", "gthumb"
+    ]
+  },
+
+  "capabilities": [
+    {
+      "id": "shell.exec",
+      "description": "Execute a whitelisted shell command on the host. Shell metacharacters (; & | > < $ `) are rejected. Configure PAI_SHELL_WHITELIST env to add prefixes.",
+      "permissions": ["process"],
+      "requireConfirmation": true,
+      "confirmationReason": "Executing shell commands can be dangerous. Please confirm that you want to run this command.",
+      "precondition": {
+          "type": "commandPrefix",
+          "field": "command",
+          "allowedPrefixesRef": "metadata.allowed_prefixes"
+      },
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "command": {"type": "string", "description": "The command to run, e.g. 'ls -la /tmp'"},
+          "timeoutSec": {"type": "integer", "default": 30, "description": "Hard timeout in seconds (1-300)"}
+        },
+        "required": ["command"]
+      }
+    }
+  ]
+}

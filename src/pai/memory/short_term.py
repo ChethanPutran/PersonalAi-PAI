@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 
 from loguru import logger
 
+from pai.config.models.memory import ShortTermBackend, ShortTermMemoryConfig
 from pai.memory.models import MemoryRecord
 from pai.observability.tracer import get_tracer
 
@@ -25,18 +26,12 @@ class ShortTermMemory:
 
     def __init__(
         self,
-        max_size: int = 100,
-        ttl_seconds: int = 3600,
+        config:ShortTermMemoryConfig
     ):
-        if max_size <= 0:
-            raise ValueError("max_size must be greater than zero")
-        if ttl_seconds <= 0:
-            raise ValueError("ttl_seconds must be greater than zero")
+        self.max_size = config.size
+        self.ttl_seconds = config.ttl_seconds
 
-        self.max_size = max_size
-        self.ttl_seconds = ttl_seconds
-
-        self._store: deque[MemoryRecord] = deque(maxlen=max_size)
+        self._store: deque[MemoryRecord] = deque(maxlen=self.max_size)
         self._lock = asyncio.Lock()
 
     async def initialize(self) -> None:
@@ -96,10 +91,17 @@ class ShortTermMemory:
         self,
         limit: int = 10,
         *,
+        user_id: Optional[str],
         session_id: Optional[str] = None,
     ) -> List[MemoryRecord]:
+        """Recent working memory of ONE user (optionally one session).
+
+        user_id is mandatory — the buffer is shared by all users in the process.
+        """
         if limit <= 0:
             return []
+        if not user_id:
+            raise ValueError("user_id is required: memory reads are always scoped to one user")
 
         tracer = get_tracer()
         async with tracer.span(
@@ -112,7 +114,10 @@ class ShortTermMemory:
                 wait_ms = (time.perf_counter() - t0) * 1000
                 self._purge_expired()
 
-                records = list(self._store)
+                records = [
+                    r for r in self._store
+                    if r.user_id == user_id and not r.metadata.get("quarantined")
+                ]
 
                 if session_id is not None:
                     records = [
@@ -181,3 +186,14 @@ class ShortTermMemory:
     async def shutdown(self) -> None:
         await self.clear()
         logger.info("ShortTermMemory shutdown")
+
+
+def create_short_term_memory(
+    config: ShortTermMemoryConfig,
+) -> ShortTermMemory:
+    """Factory function to create a ShortTermMemory instance."""
+    if config.backend != ShortTermBackend.MEMORY:
+        raise NotImplementedError(
+            f"Short-term memory backend '{config.backend.value}' is not supported yet."
+        )
+    return ShortTermMemory(config=config)

@@ -8,6 +8,8 @@ from typing import Any, Dict, List, Optional
 
 from loguru import logger
 
+from pai.config.models.executor import ExecutorConfig
+from pai.event_bus.events import EventType
 from pai.executors.base import BaseExecutor
 from pai.observability.tracer import get_tracer
 from pai.common.manager import Manager
@@ -28,8 +30,9 @@ class ExecutorManager(Manager):
         """
     name = "executor_manager"
     
-    def __init__(self, *, event_bus, **kwargs):
+    def __init__(self, *, event_bus,config:ExecutorConfig, **kwargs):
         super().__init__(event_bus=event_bus)
+        self.config = config
         self._executors: Dict[str, BaseExecutor] = {}
 
 
@@ -50,7 +53,7 @@ class ExecutorManager(Manager):
                 )
 
             self._executors[executor.name] = executor
-            self._emit("executor.registered", {
+            self._emit(EventType.EXECUTOR_REGISTERED, {
                 "name": executor.name,
                 "type": executor.__class__.__name__,
                 "id": executor.executor_id,
@@ -68,7 +71,7 @@ class ExecutorManager(Manager):
             executor_name=executor_name,
         ):
             executor = self._executors.pop(executor_name, None)
-            self._emit("executor.unregistered", {
+            self._emit(EventType.EXECUTOR_UNREGISTERED, {
                 "name": executor_name,
                 "type": executor.__class__.__name__ if executor else None,
                 "id": executor.executor_id if executor else None,
@@ -195,8 +198,7 @@ class ExecutorManager(Manager):
                             timeout=5.0,
                         )
                     except asyncio.TimeoutError as e:
-                        self._emit(
-                            "executor.failed",
+                        self._emit(EventType.EXECUTOR_FAILED,
                             {
                                 "name": executor.name,
                                 "error": str(e),
@@ -217,8 +219,7 @@ class ExecutorManager(Manager):
                             pass
                         failures.append(name)
                     except Exception as exc:
-                        self._emit(
-                                "executor.failed",
+                        self._emit(EventType.EXECUTOR_FAILED,
                                 {
                                     "name": executor.name,
                                     "error": str(exc),
@@ -240,7 +241,7 @@ class ExecutorManager(Manager):
                 continue
             try:
                 await asyncio.wait_for(executor.start(), timeout=5.0)
-                self._emit("executor.started",{
+                self._emit(EventType.EXECUTOR_STARTED,{
                     "name": executor.name
                 })
             except asyncio.TimeoutError:
@@ -266,7 +267,7 @@ class ExecutorManager(Manager):
                 ) as one_span:
                     try:
                         await executor.stop()
-                        self._emit("executor.stopped",{
+                        self._emit(EventType.EXECUTOR_STOPPED,{
                             "name":executor.name
                         })
                     except Exception as exc:

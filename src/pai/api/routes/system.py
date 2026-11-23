@@ -15,7 +15,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from pai.api.dependencies import get_current_admin, get_db
 from pai.app_context import PAIAppContext, get_app_context
-from pai.security.auth import ahash_password
+from pai.plugins.manifest_info import PluginInfo
+from pai.security.tokens.auth import ahash_password
 from pai.storage.models import (
     DevicePluginModel,
     UserPluginModel,
@@ -120,9 +121,7 @@ def _serialize_task(task: Any) -> Dict[str, Any]:
              if not k.startswith("_")}
 
     status = d.get("status")
-    if hasattr(status, "value"):
-        status = status.value
-    elif status is not None:
+    if status is not None:
         status = str(status)
 
     def _ts(k):
@@ -655,7 +654,7 @@ async def _collect_devices(kernel: Any) -> List[Dict[str, Any]]:
 
 def _collect_plugins(kernel: Any, installs: list) -> List[Dict[str, Any]]:
     pm = getattr(kernel, "plugin_manager", None)
-    catalog_info: List[Any] = []
+    catalog_info: List[PluginInfo] = []
     if pm is not None:
         try:
             catalog_info = pm.get_catalog() or []
@@ -676,11 +675,11 @@ def _collect_plugins(kernel: Any, installs: list) -> List[Dict[str, Any]]:
             "name": info.name,
             "version": info.version,
             "description": info.description or "",
-            "plugin_type": info.plugin_type or "action",
+            "type": info.type or "action",
             "platforms": list(info.platforms or []),
             "architectures": list(info.architectures or []),
             "capabilities": list(info.capabilities or []),
-            "package_url": info.package_url,
+            "package_url": info.packageUrl,
             "checksum": info.checksum,
             "size": info.size or 0,
         }

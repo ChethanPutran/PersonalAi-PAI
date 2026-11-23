@@ -6,19 +6,32 @@ import random
 import re
 import time
 from abc import ABC, abstractmethod
-from typing import Any, Awaitable, Callable, Dict, Optional, Type
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Awaitable,
+    Callable,
+    Dict,
+    Optional,
+    Type,
+    cast,
+)
 
 from loguru import logger
 
+from pai.common.enums.llm import LLMModel, LLMProviderName
+from pai.config.models.llm import LLMProviderConfig
 from pai.observability.tracer import get_tracer
 
 from .models import (
     LLMMessage,
-    LLMProviderConfig,
     LLMRequest,
     LLMResponse,
     LLMUsage,
 )
+
+if TYPE_CHECKING:
+    from google.genai.types import GenerateContentConfigOrDict
 
 
 # ---------------------------------------------------------------------------
@@ -140,7 +153,7 @@ def _truncate_for_log(text: str, limit: int = 500) -> str:
 async def _retry_with_backoff(
     fn: Callable[[], Awaitable[Any]],
     *,
-    provider: str,
+    provider: LLMProviderName,
     operation: str,
     max_attempts: int = 3,
     base_delay: float = 1.0,
@@ -203,7 +216,7 @@ async def _retry_with_backoff(
 class LLMProvider(ABC):
     """Abstract interface implemented by every LLM provider."""
 
-    name: str = "unknown"
+    name: LLMProviderName 
 
     def __init__(self, config: LLMProviderConfig):
         self.config = config
@@ -218,8 +231,10 @@ class LLMProvider(ABC):
         self.max_attempts = 3 if raw is None else max(1, int(raw))
 
         if not self.api_key:
+            env_var = f"PAI_LLM_{str(self.name).upper().replace('-', '_')}_KEY"
             raise LLMConfigurationError(
-                f"API key missing for provider '{self.name}'."
+                f"API key missing for provider '{self.name}'. "
+                f"Set it via the config file or environment variable '{env_var}'."
             )
 
         # Retry-count tracking. `_call_with_retry` updates this before
@@ -315,7 +330,7 @@ class LLMProvider(ABC):
         """How many retries the last `_call_with_retry` needed (0 = none)."""
         return max(0, self._last_attempts - 1)
 
-    def _model_for_request(self, request: LLMRequest) -> str:
+    def _model_for_request(self, request: LLMRequest) -> LLMModel:
         return request.model or self.model
 
     async def health_check(
@@ -371,7 +386,7 @@ class LLMProvider(ABC):
     def _trace_llm(
         self,
         *,
-        model: str,
+        model: LLMModel,
         prompt: str,
         response: Optional[str] = None,
         usage: Optional[LLMUsage] = None,
@@ -418,7 +433,7 @@ class LLMProvider(ABC):
 # ---------------------------------------------------------------------------
 
 class OpenAIProvider(LLMProvider):
-    name = "openai"
+    name = LLMProviderName.OPENAI
 
     def __init__(self, config: LLMProviderConfig):
         super().__init__(config)
@@ -475,7 +490,7 @@ class OpenAIProvider(LLMProvider):
         try:
             response = await self._call_with_retry(
                 lambda: client.chat.completions.create(
-                    model=model,
+                    model=model.name,
                     messages=[
                         {"role": m.role, "content": m.content}
                         for m in request.messages
@@ -532,7 +547,7 @@ class OpenAIProvider(LLMProvider):
 # ---------------------------------------------------------------------------
 
 class GeminiProvider(LLMProvider):
-    name = "gemini"
+    name = LLMProviderName.GEMINI
 
     def __init__(self, config: LLMProviderConfig):
         super().__init__(config)
@@ -613,9 +628,9 @@ class GeminiProvider(LLMProvider):
             response = await self._call_with_retry(
                 lambda: asyncio.to_thread(
                     client.models.generate_content,
-                    model=model,
+                    model=model.name,
                     contents=body,
-                    config=config,
+                    config=cast(GenerateContentConfigOrDict, config),
                 ),
                 operation="models.generate_content",
             )
@@ -674,7 +689,7 @@ class GeminiProvider(LLMProvider):
 # ---------------------------------------------------------------------------
 
 class OpenRouterProvider(LLMProvider):
-    name = "openrouter"
+    name = LLMProviderName.OPENROUTER
     _endpoint = "https://openrouter.ai/api/v1/chat/completions"
 
     def __init__(self, config: LLMProviderConfig):
@@ -720,7 +735,7 @@ class OpenRouterProvider(LLMProvider):
             "Content-Type": "application/json",
         }
         payload = {
-            "model": model,
+            "model": model.value,
             "messages": [
                 {"role": m.role, "content": m.content}
                 for m in request.messages
@@ -831,7 +846,7 @@ class OpenRouterProvider(LLMProvider):
 # ---------------------------------------------------------------------------
 
 class KimiProvider(LLMProvider):
-    name = "kimi"
+    name = LLMProviderName.KIMI
     _endpoint = "https://api.moonshot.ai/v1/chat/completions"
 
     def __init__(self, config: LLMProviderConfig):
@@ -972,11 +987,11 @@ class KimiProvider(LLMProvider):
 # Factory
 # ---------------------------------------------------------------------------
 
-PROVIDER_CLASSES: Dict[str, Type[LLMProvider]] = {
-    "openai": OpenAIProvider,
-    "gemini": GeminiProvider,
-    "openrouter": OpenRouterProvider,
-    "kimi": KimiProvider,
+LLM_PROVIDER_CLASSES: Dict[LLMProviderName, Type[LLMProvider]] = {
+    LLMProviderName.OPENAI: OpenAIProvider,
+    LLMProviderName.GEMINI: GeminiProvider,
+    LLMProviderName.OPENROUTER: OpenRouterProvider,
+    LLMProviderName.KIMI: KimiProvider,
 }
 
 
@@ -986,10 +1001,10 @@ def create_provider(config: LLMProviderConfig) -> LLMProvider:
     Raises `LLMConfigurationError` (with the list of valid names) on an
     unknown provider rather than a bare `KeyError` with no context.
     """
-    cls = PROVIDER_CLASSES.get(config.provider)
+    cls = LLM_PROVIDER_CLASSES.get(config.provider)
     if cls is None:
         raise LLMConfigurationError(
             f"Unknown LLM provider {config.provider!r}. "
-            f"Available: {sorted(PROVIDER_CLASSES.keys())}"
+            f"Available: {sorted(name.value for name in LLM_PROVIDER_CLASSES)}"
         )
     return cls(config)

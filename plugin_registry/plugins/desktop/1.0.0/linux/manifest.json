@@ -1,0 +1,108 @@
+{
+  "schemaVersion": 1,
+  "id": "desktop",
+  "name": "Desktop",
+  "version": "1.0.0",
+  "description": "Desktop conveniences: clipboard, audio, media, notifications, app launcher.",
+  "author": "PAI",
+  "license": "MIT",
+  "type": "native",
+  "runtime": {
+    "kind": "device",
+    "nativeModule": "pai.desktop",
+    "minPaiVersion": "0.4.0"
+  },
+
+  "platforms": {
+    "linux": {
+      "artifact": "linux/libpai_desktop.so",
+      "entrypoint": "pai_plugin_module_create"
+    }
+  },
+
+  "architectures": ["x86_64"],
+  "deviceTypes": ["desktop"],
+  "permissions": ["clipboard", "notifications", "network"],
+
+  "capabilities": [
+    {
+      "id": "clipboard.read",
+      "requireConfirmation": true,
+      "confirmationReason": "Reading clipboard contents can be sensitive. Please confirm that you want to read the clipboard.",
+      "description": "Read the current clipboard contents.",
+      "parameters": {"type": "object", "properties": {}}
+    },
+    {
+      "id": "clipboard.write",
+      "requireConfirmation": true,
+      "confirmationReason": "Writing to the clipboard can be sensitive. Please confirm that you want to write to the clipboard.",
+      "description": "Write to the clipboard.",
+      "parameters": {
+        "type": "object",
+        "properties": {"content": {"type": "string"}},
+        "required": ["content"]
+      }
+    },
+    {
+      "id": "audio.play",
+      "requireConfirmation": false,
+      "description": "Play an audio file or URL in the background.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "url": {"type": "string"},
+          "path": {"type": "string"}
+        }
+      }
+    },
+    {
+      "id": "audio.speak",
+      "requireConfirmation": false,
+      "description": "Speak text via the system TTS engine.",
+      "parameters": {
+        "type": "object",
+        "properties": {"text": {"type": "string"}},
+        "required": ["text"]
+      }
+    },
+    {
+      "id": "media.control",
+      "requireConfirmation": false,
+      "description": "Control media playback via playerctl (play/pause/next/previous/stop/status).",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {"type": "string", "enum": ["play", "pause", "play-pause", "stop", "next", "previous", "status"]}
+        },
+        "required": ["action"]
+      }
+    },
+    {
+      "id": "notifications.read",
+      "requireConfirmation": true,
+      "confirmationReason": "Reading desktop notifications can be sensitive. Please confirm that you want to read the notifications.",
+      "description": "List current desktop notifications (DE-dependent; returns hint if unavailable).",
+      "parameters": {"type": "object", "properties": {}}
+    },
+    {
+      "id": "notifications.dismiss",
+      "requireConfirmation": true,
+      "confirmationReason": "Dismissing desktop notifications can be sensitive. Please confirm that you want to dismiss the notifications.",
+      "description": "Dismiss all desktop notifications (via dunstctl or similar).",
+      "parameters": {"type": "object", "properties": {}}
+    },
+    {
+      "id": "app.launch",
+      "description": "Launch a desktop app or open a file/URL. To open a local file use url with file:// scheme (e.g. 'file:///home/user/image.jpg'). To launch an app by name use the app field.",
+      "requireConfirmation": true,
+      "confirmationReason": "Launching applications or opening URLs can be sensitive. Please confirm that you want to proceed.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "app": {"type": "string", "description": "Application name to launch (e.g., 'firefox', 'eog', 'spotify'). Do NOT include file arguments here — use the url field for files."},
+          "url": {"type": "string", "description": "URL or local file to open with the default handler. For local files use file:// scheme, e.g. 'file:///home/chethan/Pictures/image.jpg'. For web URLs use https://."}
+        }
+      }
+    }
+  ]
+}

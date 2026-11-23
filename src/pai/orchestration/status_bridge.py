@@ -17,7 +17,7 @@ from typing import Any, Dict
 from loguru import logger
 
 from pai.event_bus.bus import EventBus
-from pai.event_bus.events import Event
+from pai.event_bus.events import Event, EventType
 
 
 class StatusBridge:
@@ -35,13 +35,13 @@ class StatusBridge:
     async def start(self) -> None:
         # Orchestration-level events → chat.status narrative
         self._subs.append(await self._bus.subscribe(
-            "plan.created", self._on_plan_created,
+            EventType.PLAN_CREATING, self._on_plan_creating,
         ))
         self._subs.append(await self._bus.subscribe(
-            "plan.completed", self._on_plan_completed,
+            EventType.PLAN_CREATED, self._on_plan_created,
         ))
         self._subs.append(await self._bus.subscribe(
-            "plan.failed", self._on_plan_failed,
+            EventType.PLAN_FAILED, self._on_plan_failed,
         ))
 
         # Task-level events → device WS (TasksScreen live refresh)
@@ -66,14 +66,14 @@ class StatusBridge:
     # plan.* → chat.status
     # ------------------------------------------------------------------
 
-    async def _on_plan_created(self, event: Event) -> None:
+    async def _on_plan_creating(self, event: Event) -> None:
         session_id = event.data.get("session_id")
         if not session_id:
             return
         total = int(event.data.get("task_count", 0) or 0)
         self._progress[session_id] = (0, total)
         await self._bus.publish(
-            "chat.status",
+            EventType.CHAT_STATUS,
             {
                 "session_id": session_id,
                 "request_id": event.data.get("request_id", ""),
@@ -84,13 +84,13 @@ class StatusBridge:
             distributed=False,
         )
 
-    async def _on_plan_completed(self, event: Event) -> None:
+    async def _on_plan_created(self, event: Event) -> None:
         session_id = event.data.get("session_id")
         if not session_id:
             return
         self._progress.pop(session_id, None)
         await self._bus.publish(
-            "chat.status",
+            EventType.CHAT_STATUS,
             {
                 "session_id": session_id,
                 "request_id": event.data.get("request_id", ""),
@@ -107,7 +107,7 @@ class StatusBridge:
             return
         self._progress.pop(session_id, None)
         await self._bus.publish(
-            "chat.status",
+            EventType.CHAT_STATUS,
             {
                 "session_id": session_id,
                 "request_id": event.data.get("request_id", ""),

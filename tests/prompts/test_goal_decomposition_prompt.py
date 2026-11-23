@@ -3,10 +3,15 @@ from pathlib import Path
 
 import pytest
 from pai.prompts.registry import PromptRegistry
+from pai.config.models.prompts import PromptRegistryConfig
+
+
+def _registry() -> PromptRegistry:
+    return PromptRegistry(PromptRegistryConfig(root="prompts", frozen=True))
 
 
 def test_current_version_renders():
-    registry = PromptRegistry(Path("prompts"), frozen=True)
+    registry = _registry()
     t = registry.get("planning.goal_decomposition")
     out = t.render(
         goal="remind me at 3pm",
@@ -26,7 +31,7 @@ def test_current_version_renders():
 
 
 def test_retry_rule_appears_only_when_is_retry():
-    registry = PromptRegistry(Path("prompts"), frozen=True)
+    registry = _registry()
     t = registry.get("planning.goal_decomposition")
     base = dict(
         goal="x", capabilities_block="", memory_block="",
@@ -39,7 +44,7 @@ def test_retry_rule_appears_only_when_is_retry():
 
 
 def test_missing_variable_raises_clearly():
-    registry = PromptRegistry(Path("prompts"), frozen=True)
+    registry = _registry()
     t = registry.get("planning.goal_decomposition")
     with pytest.raises(ValueError, match="missing variable"):
         t.render(goal="x")   # deliberately missing everything else

@@ -2,19 +2,41 @@
 environment: development
 debug: true
 
+app:
+  name: "Personal AI System"
+  description: "Context-Aware Autonomous Personal Agent System for Personal Productivity and Assistance"
+  version: "1.0.0"
+
 # API Server
 api:
+  prefix: "/api/v1"
+  cors:
+    allow_origins: ["*"]
+    allow_methods: ["*"]
+    allow_headers: ["*"]
+    allow_credentials: true
   host: "0.0.0.0"
   port: 8000
+
+server:
   reload: true
   workers: 1
+
+orchestration:
+    goal_tokens_trace_size: 300
+    memory_recall_limit: 10
+    memory_block_max_size: 1000
+    tool_summary_block_max_size: 800
+    prompt_trace_max_size: 800
+    chat_reply_max_tokens: 500
+    chat_reply_temperature: .7
+
 
 # Database
 database:
   url: "sqlite+aiosqlite:///./data/pai.db"
   echo: true
   pool_size: 5
-  max_overflow: 10
 
 # Redis Cache & Pub/Sub
 redis:
@@ -24,12 +46,17 @@ redis:
   password: null
   decode_responses: true
 
-# NATS Event Bus
-nats:
-  servers:
-    - "nats://localhost:4222"
-  connect_timeout: 5
-  max_reconnect_attempts: 5
+event_bus:
+  nats_enabled: false
+  nats:
+    url: "nats://localhost:4222"
+    servers:
+      - "nats://localhost:4222"
+  max_queue_size: 1000
+  num_workers: 1
+
+context:
+  max_history: 5
 
 # Memory System
 memory:

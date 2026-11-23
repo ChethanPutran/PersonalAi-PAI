@@ -14,12 +14,14 @@ from pai.orchestration.capability_router import (
     CapabilityTarget,
 )
 from pai.plugins.manager import PluginManager
+from pai.plugins.manifest import PluginManifest
 
 
 @dataclass(frozen=True)
 class CapabilityResolution:
     capability: str
-    plugin_name: str
+    plugin_id: str
+    plugin_manifest: PluginManifest
     targets: list[CapabilityTarget] = field(default_factory=list)
     provider: Any = None
 
@@ -127,6 +129,7 @@ class CapabilityResolver(Lifecycle):
 
             return CapabilityResolution(
                 capability=capability,
-                plugin_name=primary.plugin_id,
+                plugin_id=primary.plugin_id,
+                plugin_manifest=self.plugin_manager.get_manifest(primary.plugin_id),
                 targets=targets,
             )

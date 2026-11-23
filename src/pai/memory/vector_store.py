@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 import time
 import uuid
 from typing import Any, Dict, List, Optional
@@ -8,6 +9,7 @@ from loguru import logger
 import chromadb
 from chromadb.config import Settings
 from chromadb.utils import embedding_functions
+from pai.config.models.memory import VectorStoreConfig, VectorStoreProvider
 from pai.memory.utils import _matches_where
 from pai.observability.tracer import get_tracer
 
@@ -23,9 +25,9 @@ class VectorStore:
 
     def __init__(
         self,
-        persistence_path: str = "./data/chroma",
-        collection_name: str = "pai_memories",
-        embedding_model: str = "all-MiniLM-L6-v2",
+        persistence_path: str,
+        collection_name: str, 
+        embedding_model: str,
     ):
         self.persistence_path = persistence_path
         self.collection_name = collection_name
@@ -421,12 +423,30 @@ class VectorStore:
                 )
                 return results
 
+            # Clamp n_results to the live index size — Chroma warns (and
+            # internally clamps) when you over-ask, but only after a
+            # round-trip. Do it ourselves so the warning never fires and
+            # the trace shows the effective limit.
+            try:
+                index_size = await asyncio.to_thread(self.collection.count)
+            except Exception:
+                index_size = None
+
+            effective_limit = limit
+            if index_size is not None and index_size > 0:
+                effective_limit = min(limit, index_size)
+            if effective_limit != limit:
+                span.set_attribute("clamped_limit", effective_limit)
+            if effective_limit <= 0:
+                span.set_attribute("result_count", 0)
+                return []
+
             t0 = time.perf_counter()
             try:
                 results = await asyncio.to_thread(
                     self.collection.query,
                     query_texts=[query],
-                    n_results=limit,
+                    n_results=effective_limit,
                     where=where,
                 )
             except Exception as exc:
@@ -526,3 +546,25 @@ class VectorStore:
         self.collection = None
         self.embed_fn = None
         logger.info("VectorStore shutdown")
+
+
+def create_vector_store(
+    config: VectorStoreConfig,
+) -> VectorStore:
+    """
+    Create a VectorStore instance based on the provided configuration.
+
+    Args:
+        config (VectorStoreConfig): The configuration for the vector store.
+
+    Returns:
+        VectorStore: An instance of the VectorStore class.
+    """
+    if config.backend ==VectorStoreProvider.CHROMA:
+        return VectorStore(
+            persistence_path=config.persist_directory,
+            collection_name=config.collection_name,
+            embedding_model=config.embeddings.model_name,
+        )
+    else:
+        raise ValueError(f"Unsupported vector store backend: {config.backend}")

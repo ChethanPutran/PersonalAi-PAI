@@ -1,5 +1,4 @@
 #pragma once
-#include <optional>
 #include <string>
 #include <vector>
 
@@ -8,41 +7,62 @@ namespace pai::sys {
 struct CommandResult {
     int exit_code = -1;
     std::string stdout_data;
+    std::string stderr_data;
     bool timed_out = false;
+    bool output_truncated = false;  // stdout or stderr hit the 10 MB cap
 };
 
-/// Execute a command with a hard timeout. Uses /usr/bin/timeout. Never
-/// goes through a shell — args are exec'd directly.
+/// Execute `argv` directly (no shell) with a hard timeout. Enforced by
+/// killing the child's process group on expiry. Captures stdout/stderr.
 CommandResult RunCommand(
     const std::vector<std::string>& argv,
     int timeout_sec = 30);
 
-/// Same, but goes through `sh -c`. Caller MUST have validated the string
-/// against a whitelist before calling this.
+/// Run `sh -c command` with a hard timeout. Captures stdout/stderr.
+/// Caller MUST have validated `command` against a whitelist first.
 CommandResult RunShell(
     const std::string& command,
     int timeout_sec = 30);
 
-/// Expand ~ to $HOME, ~user is not supported.
+/// Same as above, but the child runs with its cwd set to `cwd`.
+/// If `cwd` is empty, behaves identically to RunShell(command, timeout_sec).
+CommandResult RunShell(const std::string& command,
+                       const std::string& cwd,
+                       int timeout_sec = 30);
+
+/// Run `argv` with stdin fed from `input_file`, stdout/stderr discarded,
+/// and no output capture. Safe for tools that daemonize (xclip, wl-copy)
+/// because we only wait for the direct child — the daemon continues
+/// independently. Returns the direct child's exit code.
+CommandResult RunCommandSilent(
+    const std::vector<std::string>& argv,
+    const std::string& input_file,
+    int timeout_sec = 30);
+
+/// Fork+exec `argv` fully detached (double-fork, setsid, fds to /dev/null).
+/// Returns true if the spawn succeeded. Does not wait for the child.
+bool SpawnDetached(const std::vector<std::string>& argv);
+
+/// Expand `~` to $HOME. `~user` is not supported.
 std::string ExpandTilde(const std::string& path);
 
-/// Realpath, if the file exists. Returns "" if not.
+/// realpath() if the path exists, "" otherwise.
 std::string ResolvePath(const std::string& path);
 
-/// True if `path` resolves to a location inside one of `roots`.
-/// Used by system.files before touching anything.
+/// True if `path` resolves inside one of `roots`. Rejects `..` and any
+/// symlink that escapes. Used by system.files before touching anything.
 bool PathInRoots(
     const std::string& path,
     const std::vector<std::string>& roots,
     std::string& resolved_out);
 
 /// True if `cmd` starts with one of `prefixes` AND contains no shell
-/// metacharacters. See ./pai_system_helpers.cpp for the exact check.
+/// metacharacters (`; & | > < $ \` \n \r`). This is the hard backstop.
 bool CommandAllowed(
     const std::string& cmd,
     const std::vector<std::string>& prefixes);
 
-/// True if `name` is on PATH.
+/// True if `name` is executable on PATH.
 bool CommandExists(const std::string& name);
 
 /// "x11" | "wayland" | "unknown"

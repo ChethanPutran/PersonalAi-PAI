@@ -1,6 +1,7 @@
 """Device routes: register, list, heartbeat, and WebSocket."""
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 from typing import Any, Dict, List, Optional
@@ -14,12 +15,15 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pai.api.dependencies import get_current_user, get_db
 from pai.app_context import get_app_context, PAIAppContext
-from pai.devices.models import DeviceInfo, DevicePlatform, DeviceRegistration, DeviceStatus, DeviceType
+from pai.common.enums.device import DeviceArchitecture, DeviceMessageType
+from pai.devices.manager import DeviceManager
+from pai.devices.models import DeviceFrame, DeviceInfo, DevicePlatform, DeviceRegistration, DeviceRegistrationInfo, DeviceRegistrationResponse, DeviceStatus, DeviceType
 from pai.devices.websocket import WebSocketDeviceConnection
 from pydantic import BaseModel
 from fastapi import Body
@@ -58,7 +62,7 @@ async def register_device(
     payload: DeviceRegistration,
     user_id: str = Depends(get_current_user),
     context: PAIAppContext = Depends(get_app_context),
-):
+)-> DeviceRegistrationResponse:
     """
     Register a device.
 
@@ -68,8 +72,6 @@ async def register_device(
     caller-supplied id. Otherwise mint a new id.
     """
     try:
-        device_manager = context.orchestrator.device_manager
-
         client = request.client.host if request.client else "unknown"
         logger.info(
             "Device registration from %s: name=%s existing_id=%s",
@@ -77,101 +79,19 @@ async def register_device(
             payload.device.name,
             payload.device_id,
         )
+        
+        device_manager = context.orchestrator.device_manager
 
-        # ---------- Reuse existing (in-memory) device ----------
-        if payload.device_id:
-            existing = await device_manager.get(payload.device_id)
-
-            if existing is not None:
-                update = {
-                    "name": payload.device.name or existing.name,
-                    "platform": payload.device.platform or existing.platform,
-                    "architecture": payload.device.architecture or existing.architecture,
-                    "device_type": payload.device.device_type or existing.device_type,
-                    "platform_version": payload.device.platform_version or existing.platform_version,
-                    "os_version": payload.device.os_version or existing.os_version,
-                    "hostname": payload.device.hostname or existing.hostname,
-                    "app_version": payload.device.app_version or existing.app_version,
-                    "runtime_version": payload.device.runtime_version or existing.runtime_version,
-                }
-
-                try:
-                    await device_manager.refresh_metadata(
-                        payload.device_id, update, user_id=user_id,
-                    )
-                except AttributeError:
-                    logger.debug(
-                        "device_manager.refresh_metadata not available; "
-                        "skipping refresh"
-                    )
-
-                logger.info(
-                    "Device re-registered: %s (%s)",
-                    payload.device_id,
-                    update["name"],
-                )
-
-                return {
-                    "success": True,
-                    "device_id": payload.device_id,
-                    "device": existing.model_dump() if hasattr(existing, "model_dump") else existing,
-                    "message": "Device re-registered",
-                }
-
-            # ---------- Not in memory — restore into memory with the caller's id ----------
-            logger.info(
-                "Existing device id %s not in memory — restoring with caller's id",
-                payload.device_id,
-            )
-
-            device = await device_manager.register(
-                DeviceInfo(
-                    id=payload.device_id,
-                    name=payload.device.name,
-                    device_type=payload.device.device_type or DeviceType.UNKNOWN,
-                    status=DeviceStatus.OFFLINE,
-                    platform=payload.device.platform or DevicePlatform.UNKNOWN,
-                    platform_version=payload.device.platform_version or "",
-                    os_version=payload.device.os_version or "",
-                    architecture=payload.device.architecture or "",
-                    hostname=payload.device.hostname or "",
-                    app_version=payload.device.app_version or "",
-                    runtime_version=payload.device.runtime_version or "",
-                    capabilities=list(payload.device.capabilities or []),
-                    user_id=user_id,       # ← carry ownership through
-                ),
-                user_id=user_id,
-            )
-
-            logger.info("Device restored: %s (%s)", device.id, device.name)
-
-            return {
-                "success": True,
-                "device_id": device.id,
-                "device": device.model_dump() if hasattr(device, "model_dump") else device,
-                "message": "Device restored",
-            }
-
-        # ---------- Mint a new device ----------
-        device = await device_manager.register(payload, user_id=user_id)
-
-        logger.info("Device registered: %s (%s)", device.id, device.name)
-
-        # Best-effort ownership attach (in case register() didn't persist it).
-        try:
-            await device_manager.assign_user(device.id, user_id)
-        except AttributeError:
-            logger.debug(
-                "device_manager.assign_user not available; "
-                "user_id will not be stored on the device row"
-            )
-
-        return {
-            "success": True,
-            "device_id": device.id,
-            "device": device.model_dump() if hasattr(device, "model_dump") else device,
-            "message": "Device registered",
-        }
+        device = await device_manager.register(
+            registration=payload,
+            user_id=user_id
+        )
+        return DeviceRegistrationResponse(
+            success=True,
+            device_id=device.id,
+            device=device,
+            message="Device registered",
+        )
 
     except Exception as exc:
         logger.exception("Device registration failed")
@@ -194,7 +114,7 @@ async def list_devices(
     if user_id != current_user:
         raise HTTPException(403, "You can only list your own devices")
     devices = await context.orchestrator.device_manager.list_devices(user_id)
-    return {"devices": devices}
+    return devices
 
 
 
@@ -241,14 +161,13 @@ async def device_heartbeat(
     payload: Dict[str, Any],
     context: PAIAppContext = Depends(get_app_context),
 ):
+    logger.info("Heartbeat from device %s: %s", device_id, payload)
     result = await context.orchestrator.device_manager.update_status(
         device_id, status=DeviceStatus.ONLINE,
     )
     if not result:
         raise HTTPException(status_code=404, detail="device not found")
     return {"status": "ok"}
-
-
 
 
 
@@ -310,7 +229,16 @@ async def invoke_on_device(
         # between the is_connected check and the actual send.
         raise HTTPException(409, str(exc)) from exc
 
-    return {"ok": True, "device_id": device_id, "capability": payload.capability, "result": result}
+    return JSONResponse(
+        content={
+            "ok": True,
+            "device_id": device_id,
+            "capability": payload.capability,
+            "result": result,
+        },
+        # charset=utf-8 tells Dart http to decode as UTF-8, not Latin-1.
+        media_type="application/json; charset=utf-8",
+    )
 
 
 @router.post("/{device_id}/trust")
@@ -339,6 +267,54 @@ async def untrust_device(
 # ============================================================
 # Device WebSocket
 # ============================================================
+
+async def dispatch_device_frame(
+    frame: DeviceFrame,
+    *,
+    device_id: str,
+    context: PAIAppContext,
+    websocket: WebSocket,
+) -> None:
+    """Handle one frame received from a device (device → backend)."""
+    device_manager = context.orchestrator.device_manager
+    ftype = frame.type
+    logger.debug("Device frame [%s]: %s", device_id, ftype)
+
+    if ftype == DeviceMessageType.PING.value:
+        await websocket.send_json({"type": "pong", "device_id": device_id})
+
+    elif ftype == DeviceMessageType.HEARTBEAT.value:
+        await device_manager.registry.heartbeat(device_id)
+        await device_manager.mark_seen(device_id)
+        await websocket.send_json({"type": "heartbeat_ack", "device_id": device_id})
+
+    elif ftype == DeviceMessageType.RESULT.value:
+        logger.info("Result from %s: request_id=%s", device_id, frame.request_id)
+        device_executor = context.orchestrator.executor_manager.get("device_executor")
+        if device_executor is not None and frame.request_id:
+            device_executor.deliver_result(frame.request_id, frame)
+
+    elif ftype == DeviceMessageType.CONTROL_ACK.value:
+        device_executor = context.orchestrator.executor_manager.get("device_executor")
+        if device_executor is None or not device_executor.handle_control_ack(frame):
+            logger.debug("Unmatched control_ack from %s: %s", device_id, frame.request_id)
+
+    elif ftype in (DeviceMessageType.STREAM_START.value,
+                   DeviceMessageType.STREAME_FRAME.value,
+                   DeviceMessageType.STREAM_END.value):
+        await context.orchestrator.task_manager.on_stream_frame(frame)
+        if ftype == DeviceMessageType.STREAM_END.value:
+            # End of stream completes the (otherwise open-ended) task.
+            device_executor = context.orchestrator.executor_manager.get("device_executor")
+            if device_executor is not None and frame.request_id:
+                device_executor.deliver_result(frame.request_id, frame)
+
+    elif ftype == DeviceMessageType.EVENT.value:
+        logger.info("Event from %s: %s", device_id, frame.model_dump_json())
+
+    else:
+        logger.warning("Unknown device message type [%s]: %s", device_id, ftype)
+
 
 @router.websocket("/{device_id}/ws")
 async def device_websocket(websocket: WebSocket, device_id: str):
@@ -374,7 +350,7 @@ async def device_websocket(websocket: WebSocket, device_id: str):
         return
 
     try:
-        from pai.security.auth import decode_access_token
+        from pai.security.tokens.auth import decode_access_token
         user_id = decode_access_token(token)
     except Exception as exc:
         # Log the actual reason + a safe token fingerprint so the next
@@ -407,7 +383,7 @@ async def device_websocket(websocket: WebSocket, device_id: str):
     )
 
     context = websocket.app.state.context
-    device_manager = context.orchestrator.device_manager
+    device_manager: DeviceManager = context.orchestrator.device_manager
 
     logger.info(
         "Device WS connect: device=%s user=%s", device_id, user_id,
@@ -418,53 +394,21 @@ async def device_websocket(websocket: WebSocket, device_id: str):
 
     # ---------- 3. Auto-register if the device is missing ----------
     if device is None:
-        logger.info(
+        logger.error(
             "Device %s not in registry — auto-registering for user %s",
             device_id, user_id,
         )
-        try:
-            device = await device_manager.register(
-                DeviceInfo(
-                    id=device_id,
-                    name=device_id,
-                    device_type=DeviceType.UNKNOWN,
-                    status=DeviceStatus.ONLINE,
-                    platform=DevicePlatform.UNKNOWN,
-                    platform_version="",
-                    os_version="",
-                    architecture="",
-                    hostname="",
-                    app_version="",
-                    runtime_version="",
-                    capabilities=[],
-                    user_id=user_id,
-                ),
-                user_id=user_id,
-            )
-            # Ensure ownership is persisted for future restarts.
-            try:
-                await device_manager.assign_user(device_id, user_id)
-            except Exception as exc:
-                logger.warning(
-                    "assign_user failed for %s (user=%s): %s",
-                    device_id, user_id, exc,
-                )
-            logger.info("Device %s auto-registered", device_id)
-        except Exception as exc:
-            logger.exception(
-                "Auto-register failed for %s: %s", device_id, exc,
-            )
-            await websocket.accept()
-            await websocket.send_json({
-                "type": "error",
-                "code": "device_register_failed",
-                "message": str(exc),
-            })
-            await websocket.close(code=4500)
-            return
+        await websocket.accept()
+        await websocket.send_json({
+            "type": "error",
+            "code": "device_register_failed",
+            "message": "Device not found",
+        })
+        await websocket.close(code=4500)
+        return
 
     # ---------- 4. Ownership check ----------
-    if getattr(device, "user_id", None) and device.user_id != user_id:
+    if device.user_id is not None and device.user_id != user_id:
         logger.warning(
             "Device WS ownership mismatch: device=%s owner=%s caller=%s",
             device_id, device.user_id, user_id,
@@ -497,46 +441,34 @@ async def device_websocket(websocket: WebSocket, device_id: str):
             "device_id": device_id,
         })
 
+        HEARTBEAT_TIMEOUT_SECONDS = 90.0   # 3× client heartbeat interval
+
         while True:
             try:
-                message = await websocket.receive_json()
+                message = await asyncio.wait_for(
+                    websocket.receive_json(),
+                    timeout=HEARTBEAT_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Device %s: no frame in %.0fs — closing stale socket",
+                    device_id, HEARTBEAT_TIMEOUT_SECONDS,
+                )
+                break                       # ← exits the OUTER loop → finally runs
             except WebSocketDisconnect:
                 raise
             except Exception as exc:
                 logger.warning("Bad frame from %s: %s", device_id, exc)
                 continue
-            message_type = message.get("type")
-            logger.debug("Device message [%s]: %s", device_id, message)
 
-            if message_type == "ping":
-                await websocket.send_json({
-                    "type": "pong",
-                    "device_id": device_id,
-                })
-
-            elif message_type == "heartbeat":
-                await device_manager.registry.heartbeat(device_id)
-                await websocket.send_json({
-                    "type": "heartbeat_ack",
-                    "device_id": device_id,
-                })
-
-            elif message_type == "result":
-                request_id = message.get("request_id")
-                logger.info("Result from %s: request_id=%s", device_id, request_id)
-
-                executor_manager = context.orchestrator.executor_manager
-                device_executor = executor_manager.get("device_executor")
-                if device_executor is not None and hasattr(device_executor, "deliver_result"):
-                    device_executor.deliver_result(request_id, message.get("result") or message)
-            elif message_type == "event":
-                logger.info("Event from %s: %s", device_id, message)
-
-            else:
-                logger.warning(
-                    "Unknown device message type [%s]: %s",
-                    device_id, message_type,
-                )
+            try:
+                frame = DeviceFrame.model_validate(message)
+            except Exception as exc:
+                logger.warning("Malformed frame from %s: %s", device_id, exc)
+                continue
+            await dispatch_device_frame(
+                frame, device_id=device_id, context=context, websocket=websocket,
+            )
 
     except WebSocketDisconnect:
         logger.info("Device WebSocket disconnected: %s", device_id)

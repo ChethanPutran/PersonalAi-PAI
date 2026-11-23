@@ -1,8 +1,12 @@
 from __future__ import annotations
+import asyncio
 from enum import Enum
 
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional
+
+from pai.common.enums.permission import Origin
+from pai.security.authorization.context import ScopeContext
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -149,8 +153,14 @@ class TaskStatus(str, Enum):
     FAILED = "failed"
     CANCELLED = "cancelled"
     RETRYING = "retrying"
+    PENDING = "pending"
 
 
+class TaskType(str, Enum):
+    ONE_SHOT = "one_shot"
+    LONG_RUNNING = "long_running"
+    STREAM = "stream"
+    
 class TaskPriority(str, Enum):
     LOW = "low"
     NORMAL = "normal"
@@ -173,10 +183,11 @@ class TaskResult(BaseModel):
     Executors operate devices/resources.
     TaskResult stores the normalized outcome of that execution.
     """
+    task_id: str
 
     model_config = ConfigDict(extra="allow")
 
-    success: bool
+    success: bool = False
     output: Any = None
     error: Optional[str] = None
 
@@ -189,19 +200,62 @@ class TaskResult(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
-        def _iso(dt):
-            return dt.isoformat() if isinstance(dt, datetime) else dt
+        return self.model_dump(mode="json")
 
-        return {
-            "success": self.success,
-            "output": _json_safe(self.output),
-            "metadata": _json_safe(self.metadata),
-            "error": self.error,
-            "executor_id": self.executor_id,
-            "device_id": self.device_id,
-            "started_at": _iso(self.started_at),
-            "completed_at": _iso(self.completed_at)
-        }
+def get_task_timeout(task: Task) -> float:
+    """
+    Determine the timeout for a task based on its type.
+    """
+    if task.type == TaskType.LONG_RUNNING:
+        return float("inf")  # No timeout for long-running tasks
+    elif task.type == TaskType.STREAM:
+        return float("inf")  # No timeout for streaming tasks
+    else:
+        return task.timeout  # Use the specified timeout for one-shot tasks
+
+class TaskRetryPolicy(BaseModel):
+    """How failed tasks are retried (exponential backoff, capped)."""
+    default_max_retries: int = 3        # applied when the plan doesn't say
+    base_delay_seconds: float = 2.0
+    max_delay_seconds: float = 60.0
+
+    def delay_for(self, attempt: int) -> float:
+        """Seconds to wait before retry number ``attempt`` (1-based)."""
+        return min(self.max_delay_seconds, self.base_delay_seconds * (2 ** max(0, attempt - 1)))
+
+
+class TaskRetryingEvent(BaseModel):
+    """Realtime payload: a failed attempt is being retried (not a final failure)."""
+    task_id: str
+    user_id: Optional[str] = None
+    session_id: Optional[str] = None
+    attempt: int
+    max_attempts: int
+    delay_seconds: float = 0.0
+    error: Optional[str] = None
+
+
+class TaskStreamEvent(BaseModel):
+    """Realtime payload for a streaming task's start / frame / end."""
+    task_id: str
+    user_id: Optional[str] = None
+    session_id: Optional[str] = None
+    kind: Literal["start", "frame", "end"]
+    sequence: Optional[int] = None
+    data: Any = None
+
+
+class TaskAuthorization(BaseModel):
+    """Everything needed to (re-)authorize a task and prove it was authorized."""
+    required: bool = False   # executor must be handed valid tokens
+    pending: bool = False    # authorize() returned APPROVAL_REQUIRED
+    tokens: List[str] = Field(default_factory=list, exclude=True)
+
+    # Trusted facts replayed on re-authorization.
+    agent_id: Optional[str] = None
+    origin: Origin = Origin.AGENT_AUTONOMOUS
+    source_device_id: Optional[str] = None
+    scope: ScopeContext = Field(default_factory=ScopeContext)
 
 
 class Task(BaseModel):
@@ -227,17 +281,16 @@ class Task(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     id: str = Field(default_factory=lambda: str(uuid4()))
-    title: str
+    name: str
 
     # Human-level information
     user_id: Optional[str] = None
     session_id: Optional[str] = None
 
     source: TaskSource = TaskSource.USER
-    input: str = ""
 
     # Normalized task representation
-    type: str
+    type: TaskType = Field(default=TaskType.ONE_SHOT)
     action: Optional[str] = None
     parameters: Dict[str, Any] = Field(default_factory=dict)
 
@@ -267,6 +320,26 @@ class Task(BaseModel):
     result: Optional[TaskResult] = None
     error: Optional[str] = None
 
+    requires_confirmation: bool = False  # Whether the task requires user confirmation before execution
+    confirmation_reason: str = ""  # The reason for requiring confirmation
+
+    # Authorization state (typed; tokens are runtime-only and never serialized).
+    authorization: "TaskAuthorization" = Field(default_factory=lambda: TaskAuthorization())
+
+    # Times this task was re-queued because the server stopped under it (not the task's fault,
+    # so it does not consume the retry budget).
+    recovery_count: int = 0
+
+    # From the capability manifest. False: never auto-retried, never auto-re-sent after an
+    # interruption (the action may already have happened); manual retry still works.
+    retryable: bool = True
+
+    # The planner's id for this task (what DAG depends_on refers to).
+    spec_id: Optional[str] = None
+
+    # Stable across retries/recovery so a device can de-duplicate re-sent work.
+    idempotency_key: Optional[str] = None
+
     # Arbitrary metadata
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
@@ -274,8 +347,6 @@ class Task(BaseModel):
     parent_task_id: Optional[str] = None
     child_task_ids: List[str] = Field(default_factory=list)
 
-    # Task kind
-    kind: Literal["one_shot", "long_running", "stream"] = "one_shot"
 
     @property
     def terminal(self) -> bool:
@@ -371,6 +442,18 @@ class Task(BaseModel):
         self.started_at = None
         self.completed_at = None
 
+    def mark_interrupted(self) -> None:
+        """The server stopped while this was in flight: make it runnable again.
+
+        Deliberately outside the normal state machine and not counted as a retry.
+        """
+        self.status = TaskStatus.INITIALIZED
+        self.recovery_count += 1
+        self.error = None
+        self.result = None
+        self.started_at = None
+        self.completed_at = None
+
     def add_child(self, task_id: str) -> None:
         if task_id not in self.child_task_ids:
             self.child_task_ids.append(task_id)
@@ -385,39 +468,48 @@ class Task(BaseModel):
         self.completed_at = None
 
     def to_dict(self) -> Dict[str, Any]:
-        def _iso(dt):
-            return dt.isoformat() if isinstance(dt, datetime) else dt
+        return self.model_dump(mode="json")
 
-        def _enum(v):
-            return v.value if isinstance(v, Enum) else v
+    async def wait_for_completion(self, timeout: Optional[float] = None) -> TaskResult:
+        """
+        Wait for the task to reach a terminal state (COMPLETED, FAILED, or CANCELLED).
+        If the task is already in a terminal state, return immediately.
 
-        return {
-            "id": self.id,
-            "title": self.title,
-            "user_id": self.user_id,
-            "session_id": self.session_id,
-            "source": _enum(self.source),
-            "input": self.input,
-            "type": self.type,
-            "action": self.action,
-            "parameters": _json_safe(self.parameters),
-            "plugin": self.plugin,
-            "capability": self.capability,
-            "device_id": self.device_id,
-            "executor_id": self.executor_id,
-            "status": _enum(self.status),
-            "priority": _enum(self.priority),
-            "timeout": self.timeout,
-            "max_retries": self.max_retries,
-            "retry_count": self.retry_count,
-            "created_at": _iso(self.created_at),
-            "initialized_at": _iso(self.initialized_at),
-            "queued_at": _iso(self.queued_at),
-            "started_at": _iso(self.started_at),
-            "completed_at": _iso(self.completed_at),
-            "result": self.result.to_dict() if self.result else None,
-            "error": self.error,
-            "metadata": _json_safe(self.metadata),
-            "parent_task_id": self.parent_task_id,
-            "child_task_ids": list(self.child_task_ids),
-        }
+        Args:
+            timeout: Optional timeout in seconds. If None, wait indefinitely.
+
+        Returns:
+            The TaskResult if the task completed successfully.
+
+        Raises:
+            asyncio.TimeoutError: If the timeout is reached before the task completes.
+            RuntimeError: If the task fails or is cancelled.
+        """
+        if self.terminal:
+            if self.status == TaskStatus.COMPLETED:
+                return self.result
+            else:
+                raise RuntimeError(f"Task {self.id} did not complete successfully: {self.error}")
+
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+
+        def check_terminal():
+            if self.terminal:
+                if self.status == TaskStatus.COMPLETED:
+                    future.set_result(self.result)
+                else:
+                    future.set_exception(RuntimeError(f"Task {self.id} did not complete successfully: {self.error}"))
+
+        # Register a callback to check for terminal state
+        # This assumes there's some mechanism to notify when the task state changes
+        # For example, an event bus or observer pattern could be used here
+        # For simplicity, we'll just poll in this example
+        async def poll_task():
+            while not self.terminal:
+                await asyncio.sleep(0.1)
+            check_terminal()
+
+        asyncio.create_task(poll_task())
+
+        return await asyncio.wait_for(future, timeout=timeout)

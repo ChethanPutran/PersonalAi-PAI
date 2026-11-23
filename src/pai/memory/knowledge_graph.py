@@ -7,6 +7,7 @@ from loguru import logger
 from neo4j import AsyncGraphDatabase
 from neo4j.exceptions import AuthError, Neo4jError, ServiceUnavailable
 
+from pai.config.models.memory import KnowledgeGraphBackend, KnowledgeGraphConfig
 from pai.observability.tracer import get_tracer
 
 
@@ -20,10 +21,10 @@ class KnowledgeGraph:
     whether the driver is connected and authenticated.
     """
 
-    def __init__(self, uri: str, user: str, password: str):
-        self.uri = uri
-        self.user = user
-        self.password = password
+    def __init__(self, config: KnowledgeGraphConfig):
+        self.uri = config.uri
+        self.user = config.username
+        self.password = config.password
         self.driver = None
         self._available = False
         self._auth_warned = False          # log the auth failure only once
@@ -245,3 +246,9 @@ class KnowledgeGraph:
             """,
             {"user_id": user_id, "limit": limit},
         )
+
+def create_knowledge_graph(config: KnowledgeGraphConfig) -> KnowledgeGraph:
+    """Factory function to create a KnowledgeGraph instance."""
+    if config.backend == KnowledgeGraphBackend.NEO4J:
+        return KnowledgeGraph(config)
+    raise ValueError(f"Unsupported knowledge graph backend: {config.backend}")

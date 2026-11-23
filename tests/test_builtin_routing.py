@@ -1,56 +1,40 @@
 # tests/test_builtin_routing.py
 import pytest
+
 from pai.planning.models import TaskSpec
+from pai.tasks.models import TaskStatus
 
 
 @pytest.mark.asyncio
-async def test_builtin_echo_via_taskrunner(task_runner, app_context, task_manager):
-    """A built-in capability resolves, executes, and completes end-to-end."""
-    spec = TaskSpec(
-        id="t1",
-        type="echo",
-        capability="test.echo",
-        parameters={"x": 1, "message": "hi"},
-    )
+async def test_builtin_echo_via_task_manager(task_manager, app_context):
+    """A built-in capability resolves, executes in-process and completes."""
+    spec = TaskSpec(id="t1", name="t1", input="echo", type="one_shot",
+                    capability="test.echo", parameters={"x": 1, "message": "hi"})
 
-    result = await task_runner.run(spec, app_context)
-    print(f"result: {result}")
+    result = await task_manager.run(spec, app_context)
 
-    assert result["status"] == "completed"
-    assert result["capability"] == "test.echo"
-    assert result["executor_id"] == "builtin_executor"
-    assert result["result"].success
-    assert result["result"].output == {"echoed": {"x": 1, "message": "hi"}}
+    assert result.success, result.error
+    assert result.output == {"echoed": {"x": 1, "message": "hi"}}
+    assert result.executor_id == "builtin_executor"
 
-    # Runtime task must have no device_id — built-ins aren't device-bound
-    runtime = await task_manager.get(result["task_id"])
-    assert runtime.device_id=="self"  # built-ins are never device-bound
+    (runtime,) = await task_manager.list()
+    assert runtime.spec_id == "t1"
+    assert runtime.status == TaskStatus.COMPLETED
     assert runtime.executor_id == "builtin_executor"
-    assert runtime.status.value == "completed"
 
 
 @pytest.mark.asyncio
-async def test_builtin_skips_authorization(
-    task_runner, app_context, capability_router,
-):
-    """Built-ins must not hit the device-authorization path."""
-    spec = TaskSpec(
-        id="t1", type="echo", capability="test.echo", parameters={},
-    )
-    await task_runner.run(spec, app_context)
-
-    # The StubAuthorizer records every call; a built-in should be zero.
-    auth = task_runner.authorizer
-    assert auth.calls == [], (
-        f"built-in should skip authorize(), got: {auth.calls}"
-    )
+async def test_builtin_skips_authorization(task_manager, app_context, security_manager):
+    """Built-ins must not hit the device/plugin authorization path."""
+    spec = TaskSpec(id="t1", name="t1", input="echo", type="one_shot",
+                    capability="test.echo", parameters={})
+    await task_manager.run(spec, app_context)
+    assert security_manager.calls == []
 
 
 @pytest.mark.asyncio
-async def test_unknown_capability_rejected(task_runner, app_context):
-    """Router rejects a capability that isn't built-in and isn't a plugin."""
-    spec = TaskSpec(
-        id="t1", type="nope", capability="does.not.exist", parameters={},
-    )
+async def test_unknown_capability_rejected(task_manager, app_context):
+    spec = TaskSpec(id="t1", name="t1", input="x", type="one_shot",
+                    capability="does.not.exist", parameters={})
     with pytest.raises(Exception):
-        await task_runner.run(spec, app_context)
+        await task_manager.run(spec, app_context)

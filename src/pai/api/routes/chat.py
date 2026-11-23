@@ -4,11 +4,12 @@ Chat endpoint — receives a user goal as text and drives the orchestrator.
 from __future__ import annotations
 
 import asyncio
+import os
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Response
 from loguru import logger
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,7 +18,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 from sqlalchemy import select
 
 from pai.event_bus.events import Event
-from pai.security.auth import decode_access_token
+from pai.security.tokens.auth import decode_access_token
 from pai.storage.models import ChatSessionModel
 from pai.api.dependencies import get_current_user
 from pai.app_context import get_app_context, get_orchestrator, get_db_session
@@ -26,6 +27,7 @@ from pai.orchestration.orchestrator import (
     OrchestrationError,
     TaskOrchestrator,
 )
+from pai.orchestration.idempotency import IdempotencyKey, IdempotentRunAborted
 from pai.storage.repositories.chat import ChatRepository
 
 
@@ -34,7 +36,7 @@ from pai.storage.repositories.chat import ChatRepository
 router = APIRouter(prefix="/chat", tags=["chat"])
 
 # Total time we allow a synchronous chat request to spend in the orchestrator.
-CHAT_TIMEOUT_SECONDS = 120.0
+CHAT_TIMEOUT_SECONDS = float(os.getenv("PAI_CHAT_TIMEOUT_SECONDS", "120.0"))
 
 
 # ------------------------------------------------------------------
@@ -144,9 +146,50 @@ def _title_from_goal(goal: str) -> str:
 @router.post("", response_model=ChatResponse)
 async def chat(
     request: ChatRequest,
+    response: Response,
     user_id: str = Depends(get_current_user),
     orchestrator: TaskOrchestrator = Depends(get_orchestrator),
     db_session: AsyncSession = Depends(get_db_session),
+    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
+) -> ChatResponse:
+    """Submit a goal.
+
+    ``Idempotency-Key`` (optional): a retried POST with the same key never runs the goal
+    twice. While the first is in flight a duplicate waits for it; afterwards it gets the
+    stored response (``Idempotent-Replay: true``). Scoped per user and session.
+    """
+    try:
+        key = IdempotencyKey.from_header(
+            idempotency_key, user_id=user_id, session_id=request.session_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    try:
+        async with orchestrator.idempotency.guard(key) as guard:
+            if guard.is_replay:
+                response.headers["Idempotent-Replay"] = "true"
+                return guard.replay
+            result = await _run_chat(
+                request, user_id, orchestrator, db_session,
+                request_id=key.key if key else None,
+            )
+            # A failed outcome is only briefly cached so the client can retry soon.
+            guard.set_result(result, success=result.status == "completed")
+            return result
+    except IdempotentRunAborted:
+        raise HTTPException(
+            status_code=409,
+            detail="The original request with this Idempotency-Key was interrupted; retry.",
+        )
+
+
+async def _run_chat(
+    request: ChatRequest,
+    user_id: str,
+    orchestrator: TaskOrchestrator,
+    db_session: AsyncSession,
+    *,
+    request_id: Optional[str],
 ) -> ChatResponse:
     logger.info(
         "chat: user={} device={} goal={!r}",
@@ -176,6 +219,7 @@ async def chat(
                 goal=request.message,
                 session_id=session_id,
                 source_device_id=request.device_id,
+                request_id=request_id,
                 context={
                     "mode": request.mode,
                     "device_id": request.device_id,

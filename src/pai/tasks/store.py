@@ -29,6 +29,7 @@ class TaskStoreProtocol(Protocol):
         *, status: Optional[TaskStatus] = None,
     ) -> int: ...
     async def clear(self) -> None: ...
+    async def recover_orphaned(self) -> List[Task]: ...
 
 class TaskStore:
     """
@@ -136,3 +137,11 @@ class TaskStore:
     async def clear(self) -> None:
         async with self._lock:
             self._tasks.clear()
+
+    async def recover_orphaned(self) -> List[Task]:
+        """
+        Recover tasks that were left in a RUNNING or QUEUED state by a prior
+        process. This is a no-op for the in-memory store because memory is
+        fresh on restart.
+        """
+        return []

@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.orm import DeclarativeBase
 
+from pai.config.models.database import DatabaseBackend, DatabaseConfig
 from pai.observability.tracer import get_tracer
 
 
@@ -41,13 +42,13 @@ class Database:
           await s.close()
     """
 
-    def __init__(self, url: str, *, echo: bool = False) -> None:
-        self.url = url
-        self.echo = echo
+    def __init__(self, config: DatabaseConfig) -> None:
+        self.url = config.url
+        self.echo = config.echo
 
         self.engine: AsyncEngine = create_async_engine(
-            url,
-            echo=echo,
+            self.url,
+            echo=self.echo,
             future=True,
             pool_pre_ping=True,
         )
@@ -172,3 +173,11 @@ class Database:
         tracer = get_tracer()
         async with tracer.span("db.close"):
             await self.engine.dispose()
+
+
+def create_database(config: DatabaseConfig) -> Database:
+    """Create a Database instance from a config."""
+    if config.backend == DatabaseBackend.SQLITE:
+        return Database(config)
+    else:
+        raise ValueError(f"Unsupported database backend: {config.backend}")

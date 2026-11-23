@@ -17,6 +17,7 @@ process for server plugins.
 """
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
@@ -111,6 +112,7 @@ class CapabilityRouter(Manager):
         self.device_manager = device_manager
         self.builtin_registry = builtin_registry
         self._cache: Dict[str, _CacheEntry] = {}
+        self._cache_lock = asyncio.Lock()
         # user_id → list of async callbacks fired on invalidate
         self._on_change: list = []
 
@@ -287,19 +289,61 @@ class CapabilityRouter(Manager):
                     continue
 
                 # ── Plugin: look up schema in the catalog ──
+                # `catalog` holds PluginInfo (lightweight, no schemas).
+                # Use get_manifest() to get the full PluginManifest which
+                # has capability_schemas with parameter definitions.
                 schema_entry = None
+                plugin = None
                 for target in targets:
-                    plugin = catalog.get(target["plugin_id"])
+                    plugin_id_candidate = target["plugin_id"]
+                    plugin = catalog.get(plugin_id_candidate)
+                    # Try full manifest first (has parameters)
+                    manifest = self.plugin_manager.get_manifest(plugin_id_candidate)
+                    if manifest and cap_id in manifest.capability_schemas:
+                        schema_entry = manifest.capability_schemas[cap_id]
+                        # Also attach requires_confirmation and precondition from manifest
+                        cap_spec = manifest.get_capability(cap_id)
+                        if cap_spec:
+                            schema_entry = dict(schema_entry)
+                            schema_entry.setdefault(
+                                "requires_confirmation",
+                                getattr(cap_spec, "requireConfirmation", False),
+                            )
+                            schema_entry.setdefault(
+                                "retryable",
+                                getattr(cap_spec, "retryable", True),
+                            )
+                            schema_entry.setdefault(
+                                "confirmation_reason",
+                                getattr(cap_spec, "confirmationReason", ""),
+                            )
+                            schema_entry.setdefault(
+                                "precondition",
+                                getattr(cap_spec, "precondition", None),
+                            )
+                        break
+                    # Fallback: check PluginInfo (no schemas, rarely set)
                     if plugin and cap_id in getattr(plugin, "capability_schemas", {}):
                         schema_entry = plugin.capability_schemas[cap_id]
                         break
+
                 if schema_entry is None:
                     schema_entry = {"description": "", "parameters": {}}
                     missing_schema += 1
 
+                plugin_metadata = getattr(plugin, "metadata", None)
+
                 out[cap_id] = {
                     "id": cap_id,
+                    "requires_confirmation": schema_entry.get("requires_confirmation", False),
+                    "confirmation_reason": schema_entry.get("confirmation_reason", ""),
+                    "retryable": schema_entry.get("retryable", True),
+                    "precondition": schema_entry.get("precondition"),
                     "description": schema_entry.get("description", ""),
+                    "plugin_metadata": {
+                        k: v for k, v in (plugin_metadata or {}).items()
+                        if k in {"allowed_prefixes"}  # whitelist which keys pass through
+                    },
                     "parameters": schema_entry.get("parameters", {}),
                     "targets": targets,
                 }
@@ -322,12 +366,14 @@ class CapabilityRouter(Manager):
     # ------------------------------------------------------------------
 
     async def _get_index(self, user_id: str) -> Dict[str, List[CapabilityTarget]]:
-        entry = self._cache.get(user_id)
-        if entry and (time.time() - entry.built_at) < _CACHE_TTL_SECONDS:
-            return entry.index
+        async with self._cache_lock:
+            entry = self._cache.get(user_id)
+            if entry and (time.time() - entry.built_at) < _CACHE_TTL_SECONDS:
+                return entry.index
 
         index = await self._build_index(user_id)
-        self._cache[user_id] = _CacheEntry(index=index, built_at=time.time())
+        async with self._cache_lock:
+            self._cache[user_id] = _CacheEntry(index=index, built_at=time.time())
         return index
 
     async def _build_index(self, user_id: str) -> Dict[str, List[CapabilityTarget]]:
@@ -711,7 +757,17 @@ class CapabilityRouter(Manager):
           2. `plugin.package_url` — the reliable signal on PluginInfo
           3. Default to server_executor
         """
-        # 1. Explicit runtime kind (full manifests)
+        # 1. Explicit runtime kind — PluginInfo uses runtimeKind/runtimeSpec;
+        #    legacy objects may use runtime.kind.
+        runtime_kind = getattr(plugin, "runtimeKind", None)
+        if runtime_kind is not None:
+            kind = str(runtime_kind).lower()
+            if "device" in kind or "native" in kind:
+                return _EXECUTOR_DEVICE
+            if "server" in kind:
+                return _EXECUTOR_SERVER
+
+        # Fallback: legacy objects with a .runtime attribute
         runtime = getattr(plugin, "runtime", None)
         if runtime is not None:
             kind = str(getattr(runtime, "kind", "") or "").lower()
@@ -720,8 +776,8 @@ class CapabilityRouter(Manager):
             if kind == "server":
                 return _EXECUTOR_SERVER
 
-        # 2. Downloadable artifact → device plugin
-        if getattr(plugin, "package_url", None):
+        # 2. Downloadable artifact → device plugin (PluginInfo uses packageUrl)
+        if getattr(plugin, "packageUrl", None) or getattr(plugin, "package_url", None):
             return _EXECUTOR_DEVICE
 
         # 3. Everything else runs in-process

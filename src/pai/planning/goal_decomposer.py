@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Dict, List
 import json
 import time
 from typing import Any, Dict, List, Optional
@@ -21,7 +20,7 @@ import re
 
 from pai.prompts.registry import PromptRegistry, PromptTemplate
 from pai.prompts.tracker import PromptVersionTracker
-from pai.security.llm_guard import PromptGuard
+from pai.security.guards.llm_guard import PromptGuard
 from pai.storage.repositories.chat import ChatRepository
 
 # Sentinel used end-to-end. Never gets a DB row; orchestrator handles it.
@@ -87,7 +86,6 @@ class GoalDecomposer(Lifecycle):
             # Cheap sanity: render with dummies to catch undeclared vars now,
             # not at 3am when the first user runs a goal.
             declared = set(meta.get("variables", {}))
-            import re
             used = set(re.findall(r"{{\s*(\w+)", template.source))
             undeclared = used - declared - {"loop"}  # `loop` is Jinja builtin
             if undeclared:
@@ -434,11 +432,117 @@ class GoalDecomposer(Lifecycle):
             raise ValueError("Planner response must be a JSON array")
         return parsed
 
+
+    @staticmethod
+    def _validate_params(
+        capability: str,
+        params: Dict[str, Any],
+        schema: Dict[str, Any],
+    ) -> None:
+        """Raise ValueError if params violate the capability schema.
+
+        Only covers schema-level constraints — required, enum, type.
+        Domain-level constraints (shell whitelist, filesystem roots) are
+        validated by the plugin at invoke time.
+        """
+        props = schema.get("properties") or {}
+        required = schema.get("required") or []
+
+        for key in required:
+            if key not in params:
+                raise ValueError(
+                    f"{capability}: missing required parameter {key!r}"
+                )
+
+        for key, value in params.items():
+            spec = props.get(key)
+            if not isinstance(spec, dict):
+                continue  # unknown param — plugin decides; some plugins accept extras
+
+            # Enum check — this is the big one for LLM hallucinations
+            enum = spec.get("enum")
+            if enum and value not in enum:
+                raise ValueError(
+                    f"{capability}: parameter {key!r} = {value!r} is not one "
+                    f"of {enum}"
+                )
+
+            # Type check (only fail on obvious mismatch, not on lossless coercion)
+            t = spec.get("type")
+            if t == "integer" and not isinstance(value, int):
+                raise ValueError(
+                    f"{capability}: parameter {key!r} must be integer, got {type(value).__name__}"
+                )
+            if t == "string" and not isinstance(value, str):
+                raise ValueError(
+                    f"{capability}: parameter {key!r} must be string, got {type(value).__name__}"
+                )
+            if t == "boolean" and not isinstance(value, bool):
+                raise ValueError(
+                    f"{capability}: parameter {key!r} must be boolean, got {type(value).__name__}"
+                )
+    
+    @staticmethod
+    def _check_precondition(
+        capability: str,
+        params: Dict[str, Any],
+        cap_schema: Dict[str, Any],
+        plugin_metadata: Dict[str, Any],
+    ) -> None:
+        """Enforce domain-level preconditions declared in the schema.
+
+        Currently supports `command_prefix` (shell) — the plugin still
+        enforces this at invoke time; this is a fast-fail layer so the
+        user isn't asked to confirm a command that will definitely be
+        rejected.
+        """
+        pre = cap_schema.get("precondition") or {}
+        if pre.get("type") != "command_prefix":
+            return
+
+        field = pre.get("field", "command")
+        command = params.get(field)
+        if not command:
+            return
+
+        # Resolve allowed prefixes from plugin metadata
+        ref = pre.get("allowed_prefixes_ref", "metadata.allowed_prefixes")
+        allowed = plugin_metadata.get("allowed_prefixes", [])
+
+        # Command must contain no metacharacters
+        forbidden = ";&|<>$`\n\r"
+        if any(c in forbidden for c in command):
+            raise ValueError(
+                f"{capability}: command contains forbidden metacharacters"
+            )
+
+        # Must match a whitelisted prefix
+        trimmed = command.strip()
+        ok = any(
+            trimmed == prefix or trimmed.startswith(prefix + " ")
+            for prefix in allowed
+        )
+        if not ok:
+            raise ValueError(
+                f"{capability}: command {trimmed[:60]!r} is not whitelisted. "
+                f"Allowed prefixes: {allowed}"
+            )
+        
     @staticmethod
     def _normalize_tasks(
         raw_tasks: List[Dict[str, Any]],
         available: Dict[str, dict],
     ) -> List[TaskSpec]:
+        """
+        Layer 1 — Schema-level validation 
+        Normalize raw task dicts into TaskSpec objects, validating against
+        the available capabilities and their schemas.
+        Raises ValueError on any validation error.
+        """
+        
+
+        # TODO: Check if the capability requires confirmation or HTL add requires_confirmation to the task spec and set it accordingly. 
+        # This is a temporary fix until the capability spec is updated to include requires_confirmation.
         tasks: List[TaskSpec] = []
         seen_ids: set[str] = set()
 
@@ -464,8 +568,28 @@ class GoalDecomposer(Lifecycle):
             seen_ids.add(task_id)
 
             schema = available[capability].get("parameters") or {}
-            params_in = dict(raw.get("parameters", raw.get("params", {})))
+            params_raw = raw.get("parameters") or raw.get("params") or {}
+            params_in = dict(params_raw) if isinstance(params_raw, dict) else {}
             params = GoalDecomposer._coerce_params(params_in, schema)
+
+            # Validate parameters against the capability schema.
+            GoalDecomposer._validate_params(capability, params, schema)
+
+            # Check domain-level preconditions (e.g., shell command prefix).
+            plugin_metadata = available[capability].get("metadata") or {}
+            GoalDecomposer._check_precondition(
+                capability, params, schema, plugin_metadata
+            )
+
+            # Read confirmation flag from the capability schema.
+            # SECURITY: do not read requires_confirmation from `raw` (the LLM's
+            # output). An LLM that hallucinated a shell command could also
+            # hallucinate `requires_confirmation=false` to skip the user gate.
+            # Only the manifest decides.
+            cap_meta = available[capability]
+            requires_confirmation = bool(cap_meta.get("requires_confirmation", False))
+            confirmation_reason = str(cap_meta.get("confirmation_reason", "") or "")
+            retryable = bool(cap_meta.get("retryable", True))     # manifest only, like the above
 
             task = TaskSpec(
                 id=task_id,
@@ -479,6 +603,9 @@ class GoalDecomposer(Lifecycle):
                 timeout=raw.get("timeout"),
                 retry_count=int(raw.get("retry_count", 0)),
                 metadata=dict(raw.get("metadata", {})),
+                requires_confirmation=requires_confirmation,
+                confirmation_reason=confirmation_reason,
+                retryable=retryable,
             )
             tasks.append(task)
 

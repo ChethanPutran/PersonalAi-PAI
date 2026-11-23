@@ -1,15 +1,14 @@
 """Application context shared by API handlers."""
 
 from dataclasses import dataclass
-import os
-import os
 from typing import AsyncIterator, Optional
 
 from fastapi import FastAPI, Request, WebSocket
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pai.agents.manager import AgentManager
-from pai.config import Config
+from pai.config.app import Config
+from pai.config.models.memory import KnowledgeGraphConfig
 from pai.executors.builtin import BuiltinExecutor
 from pai.executors.builtin import BuiltinExecutor
 from pai.notifications.push_service import PushService
@@ -19,17 +18,18 @@ from pai.orchestration.builtins.tasks import build_task_capabilities
 from pai.orchestration.builtins.tasks import build_task_capabilities
 from pai.orchestration.builtins.schedule import build_schedule_capabilities
 from pai.orchestration.execution_context import ContextManager
-from pai.orchestration.task_runner import TaskRunner
 from pai.orchestration.device_selector import DeviceSelector
-from pai.orchestration.authorization import AuthorizationManager
 from pai.planning.planner import Planner
+from pai.plugins.packager import PluginPackager
+from pai.plugins.store import PluginArtifactStore
 from pai.prompts.registry import PromptRegistry
 from pai.prompts.tracker import PromptVersionTracker
-from pai.security.llm_guard import PromptGuard
-from pai.security.plugin_guard import PluginGuard
-from pai.storage.database import Database
+from pai.security.guards.llm_guard import PromptGuard
+from pai.security.guards.plugin_guard import PluginGuard
+from pai.storage.database import Database, create_database
 from pai.storage.repositories.chat import ChatRepository
 from pai.storage.repositories.task import TaskRepository
+from pai.tasks.models import TaskRetryPolicy
 from pai.tasks.manager import TaskManager
 from pai.devices.manager import DeviceManager
 from pai.plugins.manager import PluginManager
@@ -46,6 +46,7 @@ from pai.orchestration.orchestrator import TaskOrchestrator
 from pai.session.manager import SessionManager
 from pai.llm.router import LLMRouter
 from pai.scheduler.scheduler_service import SchedulerService
+from pai.plugins.store import LocalArtifactStore
 
 
 @dataclass
@@ -66,37 +67,16 @@ class PAIAppContext:
 def create_app_context(config: Config) -> PAIAppContext:
     """Create the application context with injectable runtime dependencies."""
 
-    # ── Event bus — wire NATS config through if EventBus supports it ──
-    # If EventBus has no NATS kwargs today, either add them or remove
-    # the config fields; leaving them dangling in config is a trap.
-    event_bus = EventBus(
-        nats_url=config.event_bus.nats.url,
-        max_queue_size=config.event_bus.max_queue_size,
-        num_workers=config.event_bus.num_workers,
-    )
+    # ── Event bus —
+    event_bus = EventBus(config=config.event_bus)
 
-    database = Database(
-        url=config.database.url,
-        echo=config.database.echo,
-    )
+    # ── Database — create a single shared database instance for the app ──
+    database = create_database(config.database)
 
-    # Parse overrides from env
-    overrides = {}
-    for pair in (os.getenv("PROMPTS_OVERRIDES") or "").split(","):
-        pair = pair.strip()
-        if "=" in pair:
-            k, v = pair.split("=", 1)
-            overrides[k.strip()] = v.strip()
-
-    prompt_registry = PromptRegistry(
-        root=os.getenv("PROMPTS_ROOT", "./prompts"),
-        frozen=os.getenv("PROMPTS_FROZEN", "true").lower() == "true",
-        override_versions=overrides,
-    )
-
+    prompt_registry = PromptRegistry(config.prompts.registry)
     prompt_tracker = PromptVersionTracker(
         session_factory=database.sessionmaker,
-        enabled=os.getenv("PROMPTS_TRACK_USAGE", "true").lower() == "true",
+        enabled=config.prompts.track_usage,
     )
 
     # Registry
@@ -104,42 +84,34 @@ def create_app_context(config: Config) -> PAIAppContext:
 
     # ── Context manager — honor context_history_size ──
     context_manager = ContextManager(
-        max_history=config.memory.context_history_size,
+        max_history=config.context.max_history,
     )
 
-    # ── Memory — fix the _url / _path parameter mismatch ──
+    # ── Memory — 
     memory_manager = MemoryManager(
         event_bus=event_bus,
-        user_id="default",
-        knowledge_graph_enabled=config.memory.knowledge_graph_enabled,
-        vector_store_enabled=config.memory.vector_store_enabled,
-        short_term_size=config.memory.short_term_size,
-        short_term_ttl=config.memory.short_term_ttl,
-        # MemoryManager expects *_path, config exposes *_url — adapt here.
-        long_term_db_url=config.memory.long_term_db_url,
-        episodic_db_url=config.memory.episodic_db_url,
-        vector_store_path=config.memory.vector_store_path,
-        procedural_path=config.memory.procedural_path,
-        embedding_model=config.memory.embedding_model,
-        # Knowledge-graph credentials flow from NEO4J_* env vars:
-        #   .env → Config.memory → here → KnowledgeGraph
-        knowledge_graph_uri=config.memory.neo4j_url,
-        knowledge_graph_user=config.memory.neo4j_user,
-        knowledge_graph_password=config.memory.neo4j_password,
+        config=config.memory
     )
 
     device_manager = DeviceManager(session_factory=database.factory,
-                                   event_bus=event_bus
+                                   event_bus=event_bus,
+                                   config = config.devices
                                    )
     agent_manager = AgentManager(event_bus=event_bus)
-    security_manager = SecurityManager(session_factory=database.factory,event_bus=event_bus)
+    security_manager = SecurityManager(session_factory=database.factory,
+                                       event_bus=event_bus,
+                                       authorization_config=config.security.authorization)
 
-    plugin_registry = PluginRegistry()
+    plugin_artifact_store = LocalArtifactStore(packages_root=config.plugins.plugin_local_artifact_path)
+    packager = PluginPackager(packages_root=config.plugins.plugin_local_artifact_path)
     plugin_manager = PluginManager(
         event_bus=event_bus,
-        plugin_registry=plugin_registry,
+        plugin_registry_dir=config.plugins.plugin_registry_path,
+        artifact_store=plugin_artifact_store,
         session_factory=database.factory,
+        packager=packager
     )
+
     capability_router = CapabilityRouter(
         device_manager=device_manager,
         plugin_manager=plugin_manager,
@@ -150,16 +122,10 @@ def create_app_context(config: Config) -> PAIAppContext:
     # ── Wire router into managers for cache invalidation ──
     plugin_manager.set_capability_router(capability_router)
     device_manager.set_capability_router(capability_router)
-
     llm_router = LLMRouter(default_config=config.llm_provider)
-
     chat_repo = ChatRepository(session_factory=database.sessionmaker)
 
-
-    prompt_guard = PromptGuard(
-        request_mode="warn",     # "warn" in dev, "reject" only if you want to block
-        response_mode="sanitize",
-    )
+    prompt_guard = PromptGuard(config.prompts.guard)
 
     planning_engine = Planner(
         event_bus=event_bus,
@@ -172,11 +138,7 @@ def create_app_context(config: Config) -> PAIAppContext:
         prompt_guard=prompt_guard  
     )
 
-    # ── Task store — in-memory for now, DB-backed later ──
-    # --- dev: in-memory ---
-    # task_store = TaskStore()
-
-    # --- production: DB-backed ---
+    # ── Task store — 
     task_store = TaskRepository(session_factory=database.sessionmaker)
 
     # ── ExecutorManager — pass executor URLs from config ──
@@ -186,8 +148,7 @@ def create_app_context(config: Config) -> PAIAppContext:
     # pass them to ExecutorScheduler instead.
 
 
-    executor_manager = ExecutorManager(event_bus=event_bus)
-
+    executor_manager = ExecutorManager(event_bus=event_bus, config=config.executor)
 
     executor_scheduler = ExecutorScheduler(
         llm_service=llm_router,
@@ -196,12 +157,6 @@ def create_app_context(config: Config) -> PAIAppContext:
         device_manager=device_manager,
     )
 
-    authorization_manager = AuthorizationManager(
-        event_bus=event_bus,
-        security_manager=security_manager,
-        plugin_manager=plugin_manager,
-        device_manager=device_manager,
-    )
     device_selector = DeviceSelector(
         device_manager=device_manager,
         executor_manager=executor_manager,
@@ -209,24 +164,24 @@ def create_app_context(config: Config) -> PAIAppContext:
     )
     capability_resolver = CapabilityResolver(plugin_manager, capability_router)
 
+    # TaskManager now owns task running (capability resolution, device
+    # selection, authorization) — the separate TaskRunner was merged into it.
     task_manager = TaskManager(
         store=task_store,
         scheduler=executor_scheduler,
-        event_bus=event_bus,
         executor_manager=executor_manager,
-        session_factory=database.factory,
-    )
-
-    task_runner = TaskRunner(
-        task_manager=task_manager,
         capability_resolver=capability_resolver,
         device_selector=device_selector,
-        authorization_manager=authorization_manager,
-        executor_manager=executor_manager,
+        security_manager=security_manager,
         event_bus=event_bus,
+        session_factory=database.factory,
+        retry_policy=TaskRetryPolicy(
+            default_max_retries=config.tasks.retry_attempts,
+            base_delay_seconds=config.tasks.retry_delay,
+        ),
     )
 
-    dag_scheduler = DAGScheduler(task_runner=task_runner, event_bus=event_bus)
+    dag_scheduler = DAGScheduler(task_manager=task_manager, event_bus=event_bus)
 
     push_service = PushService()
 
@@ -261,17 +216,16 @@ def create_app_context(config: Config) -> PAIAppContext:
         agent_manager=agent_manager,
         task_manager=task_manager,
         device_manager=device_manager,
+        plugin_artifact_store=plugin_artifact_store,
         plugin_manager=plugin_manager,
         security_manager=security_manager,
         executor_manager=executor_manager,
         capability_router=capability_router,
         event_bus=event_bus,
-        task_runner=task_runner,
         capability_resolver=capability_resolver,
         memory_manager=memory_manager,
         dag_scheduler=dag_scheduler,
         chat_repo=chat_repo,
-        authorization_manager=authorization_manager,
         device_selector=device_selector,
         scheduler_service=scheduler_service,
         push_service=push_service,
@@ -291,7 +245,7 @@ def create_app_context(config: Config) -> PAIAppContext:
         orchestrator=orchestrator,
         database=database,
         session_manager=session_manager,
-        session=session_manager.factory(),   # see note below
+        session=session_manager.factory()
     )
 
 

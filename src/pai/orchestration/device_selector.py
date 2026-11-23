@@ -45,9 +45,9 @@ class DeviceSelector(Lifecycle):
         *,
         user_id: str,
         capability: str,
-        task: dict,
+        task_spec: Any,
         preferred_device: Optional[str] = None,
-        targets: Optional[List[CapabilityTarget]] = None,
+        targets: List[CapabilityTarget] = [],
     ) -> CapabilityTarget:
         """Choose a target for capability.
 
@@ -69,9 +69,7 @@ class DeviceSelector(Lifecycle):
                 targets = await self.capability_router.resolve(
                     capability=capability,
                     user_id=user_id,
-                    preferred_device_id=(
-                        preferred_device or task.get("preferred_device")
-                    ),
+                    preferred_device_id=preferred_device,
                 )
 
             if not targets:

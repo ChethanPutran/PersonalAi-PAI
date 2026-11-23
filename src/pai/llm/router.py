@@ -6,11 +6,11 @@ from typing import Dict, Optional
 
 from loguru import logger
 
+from pai.config.models.llm import LLMProviderConfig
 from pai.observability.tracer import get_tracer
 
 from .models import (
     LLMMessage,
-    LLMProviderConfig,
     LLMRequest,
     LLMResponse,
 )

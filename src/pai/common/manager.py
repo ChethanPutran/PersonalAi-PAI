@@ -120,6 +120,9 @@ class Manager(Lifecycle):
         if not self._initialized:
             await self.initialize()
 
+    # _publish() and _emit() are inherited from Lifecycle (core/lifecycle.py)
+    # which supports the full `distributed=` keyword argument.
+
     def get_session(self) -> Optional[AsyncSession]:
         """Get a session from the session manager, if any."""
         if self._sessions is None:
