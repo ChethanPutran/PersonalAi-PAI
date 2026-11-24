@@ -37,7 +37,7 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
-      - uses: actions/setup-node@v4          # tests/admin/test_js_units.py runs the admin UI's JS tests with node
+      - uses: actions/setup-node@v7          # tests/admin/test_js_units.py runs the admin UI's JS tests with node
         with:
           node-version: "22"
 
