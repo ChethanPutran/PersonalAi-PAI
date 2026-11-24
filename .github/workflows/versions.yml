@@ -57,7 +57,7 @@ jobs:
           fetch-depth: 0              # the released state (base branch / previous commit) is needed
           persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
