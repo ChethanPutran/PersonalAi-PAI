@@ -13,9 +13,10 @@
 uv sync
 
 # Run the server
-.venv/bin/pai-server
+.venv/bin/pai
 # or
 .venv/bin/uvicorn pai.server.app:create_app --factory --reload
+# (`pai-server` is the DEVICE AGENT entry point, not the API)
 
 # Run all tests (use the venv python)
 .venv/bin/python -m pytest tests/ -q

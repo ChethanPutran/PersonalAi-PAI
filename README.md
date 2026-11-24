@@ -1,541 +1,265 @@
 # Personal AI System (PAI)
 
-**A distributed personal AI runtime for planning, orchestrating, and executing tasks across connected devices.**
+[![tests](https://github.com/ChethanPutran/PersonalAi-PAI/actions/workflows/tests.yml/badge.svg)](https://github.com/ChethanPutran/PersonalAi-PAI/actions/workflows/tests.yml)
+[![versions](https://github.com/ChethanPutran/PersonalAi-PAI/actions/workflows/versions.yml/badge.svg)](https://github.com/ChethanPutran/PersonalAi-PAI/actions/workflows/versions.yml)
+[![plugin-manifests](https://github.com/ChethanPutran/PersonalAi-PAI/actions/workflows/plugin-manifests.yml/badge.svg)](https://github.com/ChethanPutran/PersonalAi-PAI/actions/workflows/plugin-manifests.yml)
 
-PAI is a modular personal AI system designed to go beyond a traditional chatbot. It separates **goal understanding, planning, task execution, device selection, authorization, plugins, memory, and communication** into independent components.
+**A distributed personal AI runtime: you state a goal in words, PAI plans it as a graph of tasks, and runs them on whichever
+of your devices (phone, desktop, server) can do the job.**
 
-A request can originate from one device and be executed on another.
-
-```text
-                         User
-                          │
-                          ▼
-                    PAI Client
-                   Mobile / Web
-                          │
-                    HTTP / WebSocket
-                          │
-                          ▼
-                  FastAPI Backend
-                          │
-                          ▼
-                  Task Orchestrator
-                          │
-          ┌───────────────┼────────────────┐
-          ▼               ▼                ▼
-       Context          Planner          Memory
-       Manager        + Task Graph      Manager
-                          │
-                          ▼
-                     Task Runner
-                          │
-              ┌───────────┼───────────┐
-              ▼           ▼           ▼
-        Authorization  Capability   Device
-          Manager       Resolver    Selector
-                          │
-                          ▼
-                  Executor Scheduler
-                          │
-             ┌────────────┼────────────┐
-             ▼            ▼            ▼
-          Server       Desktop      Android
-         Executor      Executor     Executor
-```
-
-## Core Idea
-
-PAI treats an AI assistant as an **execution system**, not just a conversational interface.
+PAI is an *execution system*, not just a chatbot. Understanding, planning, authorization, device selection, plugins, memory
+and voice are separate components, and the device that receives a request does not have to be the one that carries it out:
 
 ```text
-User Goal
-    ↓
-Context
-    ↓
-Planning
-    ↓
-Task Graph
-    ↓
-Authorization
-    ↓
-Capability Resolution
-    ↓
-Device Selection
-    ↓
-Execution
-    ↓
-Result + Memory
-```
-
-The key architectural principle is:
-
-> **The device that receives a request does not have to be the device that executes it.**
-
-For example:
-
-```text
-Phone
-  │
-  │ "Open Chrome on my desktop"
-  ▼
-PAI Backend
-  │
-  ▼
-Planner
-  │
-  ▼
-Device Selection
-  │
-  ▼
-Desktop Executor
-  │
-  ▼
-Chrome
+Phone: "open Spotify on my desktop and play something calm"
+   │
+   ▼
+PAI backend ── plan ──► [desktop.app.open] → [screen.capture] → [input.click] → [chat.reply]
+                                │
+                      authorization + confirmation
+                                │
+                                ▼
+                       Desktop device runs the plugins
 ```
 
 ---
 
-## Architecture
+## Contents
 
-### Task Orchestration
-
-The `TaskOrchestrator` coordinates the major stages of execution:
-
-* context management
-* planning
-* task execution
-* capability resolution
-* authorization
-* device selection
-* executor scheduling
-* event handling
-
-The orchestration layer remains independent of device-specific implementations.
-
-### Planning
-
-Natural-language goals are converted into structured tasks and dependency graphs.
-
-```text
-Natural Language Goal
-        ↓
-    Goal Decomposition
-        ↓
-       TaskSpec
-        ↓
-        Plan
-        ↓
-    Plan Verification
-        ↓
-     Task Graph
-```
-
-Tasks can contain dependencies, allowing independent operations to execute separately while dependent tasks wait for their prerequisites.
-
-### Capability-Based Execution
-
-Tasks request **capabilities** rather than directly depending on a particular device.
-
-```text
-Task
-  ↓
-Capability
-  ↓
-Provider
-  ↓
-Executor
-```
-
-Examples include:
-
-```text
-browser.navigate
-camera.capture
-calendar.event
-notification.send
-```
-
-This allows capabilities to be extended through plugins without tightly coupling them to the orchestration layer.
-
-### Multi-Device Execution
-
-PAI separates the **source device** from the **execution device**.
-
-```text
-Source Device
-      ↓
-     PAI
-      ↓
-Device Selection
-      ↓
-Execution Device
-```
-
-The system currently includes execution targets for:
-
-* Server
-* Desktop
-* Android
+- [Features](#features) · [How it works](#how-it-works) · [Quick start](#quick-start)
+- [Configuration](#configuration) · [Admin panel](#admin-panel) · [LLM providers, models and cost](#llm-providers-models-and-cost)
+- [Voice](#voice) · [Plugins](#plugins) · [Versioning and releases](#versioning-and-releases) · [Security](#security)
+- [Development](#development) · [Repository layout](#repository-layout) · [Documentation](#documentation) · [License](#license)
 
 ---
 
-## Plugin System
+## Features
 
-PAI uses a plugin-oriented architecture for extending system capabilities.
+- **Goal → plan → execution.** An LLM turns a request into a validated dependency graph (`TaskSpec`s); the runner executes
+  it respecting `depends_on`, retries, pausing and cancelling.
+- **Multi-device.** Capabilities are routed to the best connected device (Android, Linux desktop, server) over WebSocket.
+- **Plugins.** Capabilities come from versioned plugins (browser, camera, desktop, files, input, screen, shell) with
+  manifests, risk levels and per-action consent. Native plugins load through a C-compatible ABI.
+- **Authorization you can audit.** Plan ≠ permission: every action passes policy, risk and consent checks, and every
+  decision is written to the audit log. Confirmation flags come from the plugin manifest, never from LLM output.
+- **ReAct agents.** Long-running agents that observe, act and repeat (e.g. drive an app through screenshots and input),
+  using only the user's own capabilities and the same authorization path.
+- **Real-time voice.** Streaming speech in and out (WebSocket), with barge-in; AIRouter, OpenAI or free local engines.
+- **Memory.** Short-term, episodic, long-term, vector, procedural and knowledge-graph memory, all written through a safety
+  guard that stops tool/web text from becoming a "preference".
+- **Cost-aware.** Token, voice and credit tracking, with prices from a model registry.
+- **Admin panel.** Live DAGs, traces with token/cost charts, usage and credits, persistent event history, and a Settings
+  editor with a "Reload system" button.
+- **Flutter client** for Android and desktop that acts both as a UI and as a device that executes plugins.
 
-Plugins can provide:
-
-* new capabilities
-* permissions
-* platform-specific functionality
-* device-side functionality
-
-The project also includes a native plugin runtime based on a **C-compatible interface**, allowing native modules to be dynamically loaded by the system.
-
-```text
-Plugin Registry
-      ↓
-Plugin Manager
-      ↓
-Capability
-      ↓
-Execution
-```
-
----
-
-## Authorization
-
-Authorization is integrated into the execution pipeline.
+## How it works
 
 ```text
-Task
- ↓
-Capability
- ↓
-Authorization
- ↓
-Device Selection
- ↓
-Execution
+User goal (text / voice)
+   │
+   ▼
+GoalDecomposer ── LLM → List[TaskSpec] (a DAG)
+   │
+   ▼
+PlanVerifier ──── capabilities exist? parameters match the schema? confirmation from the manifest
+   │
+   ▼
+TaskOrchestrator ─┬─ AuthorizationManager   JWT → permissions → policy → consent → audit
+                  ├─ CapabilityRouter       capability → plugin → executor (device-aware, version-aware)
+                  ├─ DeviceSelector         best connected device for the capability
+                  ├─ TaskRunner / DAG       dependencies, retries, pause/cancel
+                  └─ MemoryManager          recall for the prompt, guarded writes
+   │
+   ▼
+ExecutorManager ─┬─ DeviceExecutor   invoke/result frames over WebSocket to phone/desktop
+                 ├─ ServerExecutor   in-process Python plugins
+                 └─ BuiltinExecutor  chat.reply, task/schedule capabilities, agents
 ```
 
-A plan describes what the system intends to do; authorization determines whether the action is permitted.
-
-> **Plan ≠ Permission**
-
----
-
-## Memory
-
-PAI includes a modular memory system designed to support persistent context and retrieval.
-
-```text
-                    Memory Manager
-                          │
-          ┌───────────────┼───────────────┐
-          ▼               ▼               ▼
-      Short-Term      Long-Term        Episodic
-          │               │               │
-          └───────────────┼───────────────┘
-                          ▼
-                    Vector Retrieval
-                          │
-                          ▼
-                    Knowledge Graph
-```
-
-The architecture supports short-term, long-term, episodic, procedural, and semantic/vector-based memory.
+Prompts are versioned Jinja2 templates (`prompts/`); every LLM call goes through `PromptGuard`; replies stream through a
+sanitizer; tool output is always treated as untrusted data.
 
 ---
 
-## Agents and Events
+## Quick start
 
-PAI separates agents from task execution.
-
-```text
-Agent
-  ↓
-Goal
-  ↓
-Planner
-  ↓
-Tasks
-  ↓
-Executors
-```
-
-The system also uses an event-driven architecture for task and system lifecycle events, enabling clients and other components to observe execution progress.
-
----
-
-## API & Client
-
-The backend is built with **FastAPI** and provides REST and WebSocket interfaces.
-
-The repository also contains a **Flutter mobile client** that communicates with the backend and participates as a client/device within the PAI ecosystem.
-
-```text
-Flutter Client
-      │
-      │ REST / WebSocket
-      ▼
-FastAPI Backend
-      │
-      ▼
-PAI Runtime
-```
-
----
-
-## Technology Stack
-
-| Area           | Technologies                                           |
-| -------------- | ------------------------------------------------------ |
-| Backend        | Python, FastAPI, Uvicorn, Pydantic                     |
-| AI / Agents    | OpenAI, Google Generative AI, LangChain, LangGraph     |
-| Storage        | SQLAlchemy, SQLite, PostgreSQL-compatible architecture |
-| Memory         | ChromaDB, Sentence Transformers, Neo4j                 |
-| Automation     | Playwright, OpenCV, PyAudio                            |
-| Communication  | REST, WebSocket, HTTPX, Redis, NATS                    |
-| Client         | Flutter / Dart                                         |
-| Native Runtime | C/C++ compatible plugin interface                      |
-| Development    | uv, pytest, Black                                      |
-
----
-
-## Project Structure
-
-```text
-PersonalAi-PAI/
-│
-├── src/pai/
-│   ├── agents/
-│   ├── api/
-│   ├── devices/
-│   ├── executors/
-│   ├── event_bus/
-│   ├── memory/
-│   ├── orchestration/
-│   ├── planning/
-│   ├── plugins/
-│   ├── security/
-│   ├── storage/
-│   └── tasks/
-│
-├── frontend/
-│   └── pai_mobile/
-│
-├── tests/
-├── pyproject.toml
-└── uv.lock
-```
-
----
-
-## Getting Started
-
-### Backend
+**Prerequisites:** Python 3.12, [uv](https://docs.astral.sh/uv/), and (for the client) Flutter. NATS and Neo4j are optional
+services; SQLite is the default database.
 
 ```bash
 git clone https://github.com/ChethanPutran/PersonalAi-PAI.git
 cd PersonalAi-PAI
 
-uv sync
-uv run uvicorn pai.main:app --host 0.0.0.0 --port 8000
+uv sync                       # installs the locked dependencies into .venv
+cp example.env .env           # then fill in the secrets (see "Configuration")
+uv run pai                    # starts the API on http://localhost:8000
 ```
 
-API documentation:
+Useful URLs once it is running:
 
-```text
-http://localhost:8000/docs
-```
+| What | URL |
+|------|-----|
+| API docs (Swagger) | http://localhost:8000/docs |
+| Health | http://localhost:8000/api/v1/system/health |
+| **Admin panel** | http://localhost:8000/api/v1/system/admin |
 
-Health check:
+**First admin account.** Register a user (`POST /api/v1/auth/register`) whose email is listed in `PAI_ADMIN_EMAILS`
+(comma-separated, in `.env`); that user is promoted to admin on login and can open the admin panel.
 
-```text
-/api/v1/health
-```
-
-### Mobile Client
+**Flutter client**
 
 ```bash
-cd frontend/pai_mobile
-
+cd frontend
 flutter pub get
-flutter run
+flutter run -d linux          # or an Android device id
 ```
 
-Additional environment configuration may be required depending on the devices and services being used.
+> `pai-server` is the *device agent* entry point (the device-side runtime in `src/pai/server/`), not the API. The API is
+> `uv run pai` (or `uvicorn pai.server.app:create_app --factory --reload`).
 
 ---
 
-## Example
+## Configuration
 
-A request such as:
+Everything non-secret is YAML in `config/`; secrets are environment variables.
 
-```text
-"Open Chrome on my desktop"
+| File | Purpose |
+|------|---------|
+| `config/config.yaml` | The main configuration. Every key must be a real field of the models in `src/pai/config/`. |
+| `config/models.yaml` | **Model registry**: which models exist, what they can do (`tool_use`, `reasoning`, `vision`, context) and what they cost (LLM per million tokens, STT per minute, TTS per 1K characters). |
+| `config/overrides.yaml` | Written by the admin panel (**Settings**), deep-merged *over* `config.yaml` at startup. Git-ignored; delete a key to fall back. |
+| `.env` | Secrets only (`LLM_PROVIDER__API_KEY`, `SECURITY__JWT_SECRET`, `SECURITY__ENCRYPTION_KEY`, DB/Redis/NATS/Neo4j credentials). Copy from `example.env`. |
+
+- **A typo is an error, not a silent no-op.** Unknown keys anywhere in the YAML fail at startup with a "did you mean…?"
+  hint. Check the files without starting the server: `uv run pai-validate-config`.
+- **Your LLM provider** is `llm_provider` (provider + default model), with a model per role in `llm_routes`
+  (`planner`, `chat`, `agent`). Prices come from `models.yaml`; `llm_pricing` overrides them per deployment.
+- **Credits:** set `llm_cost.initial_credits_usd`, or set the balance from the admin panel (that wins until you reset it).
+
+## Admin panel
+
+`/api/v1/system/admin` (admin users only):
+
+| Page | What you get |
+|------|--------------|
+| Overview · Live DAGs · Active Tasks · Tasks | Runtime health, DAGs with per-node status and kill, task tables. DAG and event **history** is kept for `admin.history_retention_days` (default 7), so it survives restarts. |
+| Traces | Span tree for each goal, with prompts/responses, **tokens and cost per LLM call**, the prompt split by part, and charts. |
+| **Usage & Cost** | Credits remaining (settable), voice cost in real time, tokens and cost over time, per goal, per role/model, and a **Models & prices** table. |
+| Events | Task/DAG events with history and live updates. |
+| Devices · Plugins · Users | Management. |
+| **Settings** | Every setting from the config schema: enums are dropdowns, each field shows its default and can be reset, secrets are locked. Saves to `config/overrides.yaml` after validating with the real config model. |
+| **Reload system** | Applies saved settings to the *running* server without a restart or touching the admin session: models/routes/prices, voice, starting credits, history retention. Anything else is listed as "needs a restart". |
+
+## LLM providers, models and cost
+
+Providers: **AIRouter** (OpenAI-compatible gateway, default), OpenAI, Gemini, OpenRouter, Kimi. Model ids are gateway slugs such
+as `anthropic/claude-haiku-5.5`; any id is accepted, and `models.yaml` supplies prices and capabilities.
+
+- Per-role models: a strong model for planning/agents, a fast one for chat (see `llm_routes`).
+- Startup checks warn when a configured model is missing from `models.yaml` or lacks tool support for a role that needs it.
+- Every call records tokens and cost (configured price, else the cost the gateway reports, else "unknown") to a JSONL
+  ledger, and deducts it from your credits. `GET /system/llm/usage` (admin) returns the totals.
+
+## Voice
+
+`WS /voice/stream` carries realtime audio. Configure the engines under `voice:` in `config.yaml`:
+
+| | Options |
+|---|---------|
+| Speech-to-text | `airouter` (per utterance), `openai_realtime`, `openai_batch`, `vosk` (free, offline), `auto` |
+| Text-to-speech | `airouter`, `openai`, `piper` (free, offline), `espeak`, `auto` |
+
+AIRouter speech uses the models and prices in `voice.airouter` / `models.yaml`. Free local engines:
+`uv sync --extra voice-local`. See [`src/pai/voice/README.md`](src/pai/voice/README.md) for the wire protocol.
+
+## Plugins
+
+Plugins live in `plugin_registry/plugins/<id>/<version>/<platform>/` with a `manifest.json` and an `artifact/` folder
+(the only thing that gets packaged). Current plugins: `browser`, `camera`, `desktop`, `files`, `input`, `screen`, `shell`.
+
+```bash
+uv run pai-validate-manifests plugin_registry/plugins     # JSON Schema + Pydantic validation
+plugin_registry/shared/build_linux.sh                     # build the native Linux plugins into artifact/
 ```
 
-can be processed as:
+A capability declares its risk, whether it needs confirmation, how long consent may be remembered, its task type
+(one-shot / long-running / stream) and its parameter schema. Full format and authoring guide:
+[`plugin_registry/README.md`](plugin_registry/README.md).
 
+## Versioning and releases
+
+Three independent version axes, configured in one place — `[tool.pai.versions]` and `[tool.pai.plugins]` in
+`pyproject.toml`: the **runtime**, the **manifest schema** range, and the **app**.
+
+```bash
+uv run pai-sync-versions --write         # update every copy of a version (pai/version.py, pubspec.yaml, …)
+uv run pai-check-plugin-versions         # manifests valid; a released plugin version never changes
+python scripts/bump_plugin.py desktop patch   # publish a change as a NEW plugin version
+uv run pai-package-plugin plugin/desktop/v1.2.0 --out dist   # what a release publishes
 ```
-docker run -d \
-    --name neo4j \
-    --publish 7474:7474 \
-    --publish 7687:7687 \
-    --volume=$HOME/neo4j/data:/data \
-    neo4j:latest
-```
 
-## `.env.example` – Environment template
+A plugin version that exists on `main` is immutable; a change is a new version with a `changelog.summary`. Pushing the tag
+`plugin/<id>/v<version>` from `main` publishes the packages as a GitHub release (`release-plugin.yml`).
 
-```ini
-# PAI Environment
-PAI_ENV=development
-PAI_DEBUG=true
-PAI_HOST=0.0.0.0
-PAI_PORT=8000
+## Security
 
-# Databases
-DATABASE_URL=sqlite+aiosqlite:///./data/pai.db
-REDIS_HOST=localhost
-REDIS_PORT=6379
-NATS_SERVERS=nats://localhost:4222
+- `requires_confirmation` is read from the manifest, never from LLM output; shell commands are checked against a prefix
+  whitelist at plan time and again at invoke time.
+- Input control (keyboard/mouse) is approved once per action by default (`security.authorization.input_grant_scope`).
+- Device-reported permissions are advisory (the device re-checks before every invoke).
+- Memory writes go through `MemoryGuard`; voice requests can never confirm a risky action by speech.
+- Secrets never appear in the admin Settings page or in `config/overrides.yaml`.
 
-# LLM Provider (openai or local)
-LLM_PROVIDER=openai
-LLM_MODEL=gpt-4
-OPENAI_API_KEY=your_openai_key_here
-
-# External APIs
-GOOGLE_MAPS_API_KEY=your_google_maps_key
-UBER_API_KEY=your_uber_api_key
-GOOGLE_CALENDAR_CREDENTIALS=path/to/credentials.json
-```
+Details: [`src/pai/security/README.md`](src/pai/security/README.md).
 
 ---
-flutter run -d linux --verbose --target lib/main.dart
 
-## Final Steps
+## Development
 
-1. Create the `.env` file from the example.
-2. Run `python scripts/setup_db.py` to initialize databases.
-3. Execute `./scripts/run_tests.sh` to verify everything works.
-4. Start the system with `python -m pai.main` or `docker-compose up`.
-
-The Personal AI System is now fully operational, with all components, tests, and documentation ready.
-
-# RUn backend
-source .env && PYTHONPATH=src uvicorn pai.main:app --reload --host 0.0.0.0 --port 8000
-
-# RUn frontend
-cd frontend/ui/apps/pai_mobile && flutter pub get && flutter run -d <device-id>
-
-Backend                       Dart (host)                  Native (host)              Plugin .so
-   │                             │                             │                        │
-   │── catalog (REST) ──────────▶│                             │                        │
-   │                             │                             │                        │
-   │                             │── index.json (REST) ──▶ Registry                     │
-   │                             │◀── manifest + artifact ── Registry                    │
-   │                             │                             │                        │
-   │                             │  write to disk, verify SHA  │                        │
-   │                             │                             │                        │
-   │── plugin.install (WS) ─────▶│                             │                        │
-   │                             │── loadNativeModule (MC) ──▶ dlopen ────────────────▶ │
-   │                             │◀── ok ───────────────────── │                        │
-   │◀── result (WS) ─────────────│                             │                        │
-   │                             │                             │                        │
-   │── capability.invoke (WS) ──▶│                             │                        │
-   │                             │── invoke (MC) ────────────▶ module->invoke ────────▶ │
-   │                             │◀── map ─────────────────── │                        │
-   │◀── result (WS) ─────────────│                             │                        │
-
-### Install the command-line tools
-   mkdir -p ~/Android/Sdk/cmdline-tools
-cd ~/Android/Sdk/cmdline-tools
-
-# Latest Linux command-line tools (adjust URL if a newer one exists)
-wget https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
-unzip commandlinetools-linux-11076708_latest.zip
-mv cmdline-tools latest
-
-
-# Set environment variables
-export ANDROID_HOME="$HOME/Android/Sdk"
-export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
-
-
-# Install the NDK
-sdkmanager --install "ndk;26.1.10909125"
-
-
-# Verify
-ls ~/Android/Sdk/ndk
-# should print: 26.1.10909125
-
-ls ~/Android/Sdk/ndk/26.1.10909125/build/cmake/android.toolchain.cmake
-# should print the path
-
-### Device task flow
-
-```text
-Backend                                              Device (Flutter)
-─────────────────────────────────────────────        ─────────────────────────────
-1. Orchestrator decides camera.capture
-2. Router: target = (device_executor, device=63c755b3)
-3. TaskManager._execute → scheduler.schedule_task
-4. ExecutorScheduler → DeviceExecutor.execute_task
-5. DeviceExecutor:
-     request_id = uuid()
-     pending[request_id] = Future
-     device_manager.send(device_id, {
-         type: "invoke",
-         request_id: "abc",
-         capability: "camera.capture",
-         parameters: { lens: "back" }
-     })
-                                           ─────────────────────────────────────►
-                                                 6. DeviceConnection receives
-                                                    { type: "invoke", ... }
-                                                 7. Looks up capability → nativeModule
-                                                    (from manifest.json)
-                                                 8. PluginRuntime.invoke(
-                                                      nativeModule: "pai.camera",
-                                                      capability: "camera.capture",
-                                                      parameters: {...}
-                                                    )
-                                                 9. Method channel → native Linux
-                                                    PluginChannel → .so
-                                                 10. .so captures JPEG, returns
-                                                     { ok: true, path: "/tmp/..." }
-                                                 11. PluginRuntime returns result
-                                                 12. DeviceConnection sends:
-                                                     {
-                                                       type: "result",
-                                                       request_id: "abc",
-                                                       result: { ok: true, path: ... }
-                                                     }
-6. Backend WS route receives ◄─────────────────────────────────────────────────
-   { type: "result", request_id, result }
-7. Routes to DeviceExecutor.deliver_result
-8. pending["abc"].set_result(result)
-9. await fut returns → execute_task returns
-10. TaskManager marks COMPLETED
-11. DAG next task (chat.reply) runs with the camera output
+```bash
+uv run pytest tests -q -p no:cacheprovider \
+  --ignore=tests/leaks --ignore=tests/memory/test_memory.py --ignore=tests/tasks/test_task_fail_undelivered.py
+uv run pytest tests/leaks -q          # heap-growth checks: run in their own process
+cd frontend && flutter test           # Flutter tests
 ```
 
+- `tests/memory/test_memory.py` and `tests/tasks/test_task_fail_undelivered.py` call APIs whose signatures changed and
+  currently fail; one consent test (`test_preflight_device_scope`) is order-dependent in full runs.
+- **CI** (`.github/workflows`): `tests` (backend + admin UI unit tests), `versions` (version drift, config/YAML validity,
+  plugin release rules), `plugin-manifests` (schema, models, deterministic packaging), `release-plugin` (tag → GitHub
+  release). Dependabot keeps actions and dependencies current.
+- The CLI tools (`pai-validate-config`, `pai-sync-versions`, `pai-check-plugin-versions`, `pai-package-plugin`,
+  `pai-validate-manifests`) need only pydantic, jsonschema, packaging, PyYAML and loguru, so CI does not install the full runtime.
+- Project conventions and "how do I add X" recipes (endpoint, capability, prompt, manager, memory type): [`CLAUDE.md`](CLAUDE.md).
 
-### Server task flow
+## Repository layout
+
 ```text
-Orchestrator → scheduler → ServerExecutor.execute_task
-    ↓
-ServerExecutor._browser_navigate → plugin.execute()
-    ↓
-BrowserPlugin.navigate(url)   ← in-process, no WebSocket
-    ↓
-Returns result synchronously
-    ↓
-TaskManager marks COMPLETED
+src/pai/            backend (api, orchestration, planning, plugins, devices, executors, memory, voice, agent,
+                    security, llm, config, storage, tasks, observability, server)
+prompts/            versioned Jinja2 prompt templates
+config/             config.yaml, models.yaml (and overrides.yaml, written by the admin panel)
+plugin_registry/    plugins (manifests + native sources), shared build tooling, plugin tests
+plugin-api/         Kotlin plugin API for Android
+frontend/           Flutter app (Android, Linux, macOS, Windows, web)
+tests/              per-area test folders (admin, config, llm, voice, plugins, tasks, security, …)
+scripts/            helper scripts (bump_plugin.py, run_backend.sh, create_admin.sh, …)
+docker/             Dockerfile and docker-compose.yml
+docs/               earlier design notes and status documents
 ```
+
+## Documentation
+
+| Topic | Where |
+|-------|-------|
+| Plugin format and authoring | [`plugin_registry/README.md`](plugin_registry/README.md) |
+| Realtime voice protocol | [`src/pai/voice/README.md`](src/pai/voice/README.md) |
+| Agents | [`src/pai/agent/README.md`](src/pai/agent/README.md) |
+| Security model | [`src/pai/security/README.md`](src/pai/security/README.md) |
+| Device agent | [`src/pai/server/README.md`](src/pai/server/README.md) |
+| Flutter client | [`frontend/README.md`](frontend/README.md) |
+| Architecture and conventions | [`CLAUDE.md`](CLAUDE.md), [`docs/`](docs/) |
+
+## License
+
+[MIT](LICENSE) © 2026 Chethan
