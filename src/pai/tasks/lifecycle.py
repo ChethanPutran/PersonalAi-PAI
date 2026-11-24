@@ -11,6 +11,22 @@ from pai.tasks.models import Task, TaskStatus, TaskResult
 class InvalidTaskTransition(Exception):
     """Raised when a task lifecycle transition is invalid."""
 
+    code = "invalid_state"
+
+
+class TaskControlError(InvalidTaskTransition):
+    """A pause/resume/cancel was refused (HTTP 409).
+
+    ``code``: ``invalid_state`` (wrong status), ``control_not_supported`` (the capability
+    does not offer it), ``control_not_acknowledged`` (the device did not confirm; the task
+    state was NOT changed).
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
 
 class TaskLifecycle:
     """
@@ -31,6 +47,7 @@ class TaskLifecycle:
         },
         TaskStatus.QUEUED: {
             TaskStatus.RUNNING,
+            TaskStatus.PAUSED,          # held before it starts
             TaskStatus.CANCELLED,
         },
         TaskStatus.RUNNING: {
@@ -39,12 +56,14 @@ class TaskLifecycle:
             TaskStatus.CANCELLED,
             TaskStatus.PAUSED,
         },
-        TaskStatus.PAUSED: {           
-        TaskStatus.RUNNING,        
-        TaskStatus.COMPLETED,       
-        TaskStatus.FAILED,         
-        TaskStatus.CANCELLED,      
-    },
+        TaskStatus.PAUSED: {
+            TaskStatus.RUNNING,
+            TaskStatus.QUEUED,          # resume of a pause taken while queued
+            TaskStatus.RETRYING,        # resume of a pause taken while waiting to retry
+            TaskStatus.COMPLETED,
+            TaskStatus.FAILED,
+            TaskStatus.CANCELLED,
+        },
         TaskStatus.FAILED: {
             TaskStatus.RETRYING,
             TaskStatus.CANCELLED,
@@ -52,6 +71,7 @@ class TaskLifecycle:
         TaskStatus.RETRYING: {
             TaskStatus.QUEUED,
             TaskStatus.RUNNING,
+            TaskStatus.PAUSED,          # held while waiting to retry
             TaskStatus.FAILED,
             TaskStatus.CANCELLED,
         },
@@ -158,14 +178,23 @@ class TaskLifecycle:
 
     @classmethod
     def resume(cls, task: Task) -> Task:
+        """PAUSED -> wherever the pause was taken (RUNNING, QUEUED or RETRYING).
+
+        Set directly (not via mark_running/mark_retrying): resuming must not reset
+        ``started_at`` or count as another retry.
+        """
         if task.status != TaskStatus.PAUSED:
             raise InvalidTaskTransition(
                 f"Task {task.id} cannot be resumed "
                 f"from state {task.status.value}"
             )
+        target = task.paused_from or TaskStatus.RUNNING
+        if not cls.can_transition(TaskStatus.PAUSED, target):
+            raise InvalidTaskTransition(f"Task {task.id} cannot be resumed to {target.value}")
+        task.status = target
+        task.paused_from = None
+        return task
 
-        return cls.transition(task, TaskStatus.RUNNING)
-    
     @classmethod
     def complete(
         cls,
@@ -228,4 +257,7 @@ class TaskLifecycle:
 
     @classmethod
     def pause(cls, task: Task) -> Task:
-        return cls.transition(task, TaskStatus.PAUSED)
+        came_from = task.status
+        cls.transition(task, TaskStatus.PAUSED)
+        task.paused_from = came_from          # so resume goes back to the right place
+        return task

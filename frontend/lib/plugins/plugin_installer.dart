@@ -164,7 +164,7 @@ class PluginInstaller {
     _validatePathSegment(version, 'version');
 
     // 1. Fetch plugin catalog information.
-    final pluginJson = await repository.fetchPlugin(id);
+    final pluginJson = await repository.fetchPlugin(id, version: version);
 
     final pluginInfo = PluginInfo.fromJson(pluginJson);
 
@@ -273,7 +273,7 @@ class PluginInstaller {
       // STEP 4: Fetch and validate manifest.
       // -----------------------------------------------------------
 
-      final manifest = await repository.fetchManifest(id);
+      final manifest = await repository.fetchManifest(id, version: version);
 
       _validateManifest(manifest, id: id, version: version);
 

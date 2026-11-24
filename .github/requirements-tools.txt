@@ -1,0 +1,11 @@
+# Everything the command-line tools need (pai-validate-manifests, pai-sync-versions, pai-check-plugin-versions,
+# pai-package-plugin). `pai/__init__` imports the orchestrator lazily, so CI does NOT install the full runtime
+# (chromadb, neo4j, torch, ...) for these jobs: install the project with `pip install --no-deps -e .` plus this file.
+pydantic>=2
+pydantic-settings>=2
+pyyaml>=6
+jsonschema>=4.20
+loguru>=0.7
+packaging>=24
+pytest>=8
+pytest-asyncio>=0.23

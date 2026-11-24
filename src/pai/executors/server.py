@@ -252,4 +252,8 @@ class ServerExecutor(BaseExecutor):
 
     async def shutdown(self) -> None:
         logger.info("ServerExecutor shutting down")
+        for fut in list(self._pending.values()):          # nobody is going to answer them now
+            if not fut.done():
+                fut.cancel()
+        self._pending.clear()
         await super().shutdown()

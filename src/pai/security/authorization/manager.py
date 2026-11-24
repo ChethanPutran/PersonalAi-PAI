@@ -18,7 +18,15 @@ class AuthorizationManager:
         self.audit_logger = audit_logger
         self.token_issuer = token_issuer
 
-    async def authorize(self, request: AuthorizationRequest, ctx: AuthorizationContext) -> AuthorizationDecision:
+    async def authorize(
+        self, request: AuthorizationRequest, ctx: AuthorizationContext, *, dry_run: bool = False,
+    ) -> AuthorizationDecision:
+        """``dry_run=True`` evaluates everything (scope, risk, consent, policies) but writes no
+        audit event and issues no token — for "would this need approval?" questions."""
+        def _log(decision: AuthorizationDecision) -> None:
+            if not dry_run:
+                self.audit_logger.log(request, decision)
+
         tracer = get_tracer()
         async with tracer.span(
             "authz.authorize",
@@ -36,10 +44,12 @@ class AuthorizationManager:
                 if not ctx.scope_result.allowed:
                     decision = AuthorizationEvaluator.build_decision(
                         ctx, DecisionEffect.DENY, ctx.scope_result.reason)
-                    self.audit_logger.log(request, decision)
+                    _log(decision)
                     return decision
                 ctx.risk = self.risk_classifier.classify(request, permission)
-                ctx.consent = self.consent_manager.check(
+                # check_with_grants = the legacy permission-level record, then any standing
+                # (session / always, parameter-bound) grant that covers this exact call.
+                ctx.consent = await self.consent_manager.check_with_grants(
                     request, permission,
                     manifest_requires_confirmation=ctx.manifest.requires_confirmation,
                 )
@@ -53,12 +63,14 @@ class AuthorizationManager:
                     ctx, effect, reason, policy_ids, obligations)
                 decision.confirmation_reason = ctx.manifest.confirmation_reason
                 if decision.allowed:
+                    decision.consent_grant_id = getattr(ctx.consent, "grant_id", None)
+                if decision.allowed and not dry_run:
                     decision.token = self.token_issuer.issue(
                         request, permission, ctx.scope_result, ctx.risk)
-                self.audit_logger.log(request, decision)
+                _log(decision)
                 return decision
             except Exception as exc:
                 decision = AuthorizationEvaluator.build_decision(
                     ctx, DecisionEffect.DENY, f"Security evaluation error: {exc}")
-                self.audit_logger.log(request, decision)
+                _log(decision)
                 return decision

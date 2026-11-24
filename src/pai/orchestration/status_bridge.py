@@ -18,6 +18,32 @@ from loguru import logger
 
 from pai.event_bus.bus import EventBus
 from pai.event_bus.events import Event, EventType
+from pydantic import BaseModel, ConfigDict
+
+# Per-frame stream events are for the realtime SSE/WS streams, not for TasksScreen: forwarding
+# them would make every device reload its task list dozens of times a second.
+_NOT_FORWARDED = {EventType.TASK_STREAM, EventType.TASK_STREAM.value}
+
+
+class TaskEventFrame(BaseModel):
+    """The frame a device receives for a task event.
+
+    ``type`` is ALWAYS the event name (e.g. ``task.started``). A task's own data has a ``type``
+    too (one_shot / long_running / stream); merging the two dicts used to let the task's value
+    overwrite the event name, so clients saw ``type: one_shot`` and ignored every task event.
+    The task's own type travels as ``task_type``.
+    """
+    model_config = ConfigDict(extra="allow")
+
+    type: str
+    task_type: str | None = None
+
+    @classmethod
+    def from_event(cls, event: Event) -> "TaskEventFrame":
+        data = dict(event.data)
+        task_type = data.pop("type", None)
+        name = getattr(event.event_type, "value", str(event.event_type))
+        return cls(type=name, task_type=task_type if isinstance(task_type, str) else None, **data)
 
 
 class StatusBridge:
@@ -72,6 +98,8 @@ class StatusBridge:
             return
         total = int(event.data.get("task_count", 0) or 0)
         self._progress[session_id] = (0, total)
+        while len(self._progress) > 1000:                  # entries are removed on completion/failure;
+            self._progress.pop(next(iter(self._progress)))  # this bounds the ones that never finish
         await self._bus.publish(
             EventType.CHAT_STATUS,
             {
@@ -123,15 +151,35 @@ class StatusBridge:
     # ------------------------------------------------------------------
 
     async def _on_task_event(self, event: Event) -> None:
-        device_id = event.data.get("device_id")
-        if not device_id or self._dm is None:
+        """task.* -> every connected device of the task's OWNER (TasksScreen live refresh).
+
+        Not just the executing device: the phone that shows the Tasks screen is usually not
+        the device that runs the task (a reminder on the desktop, a photo on the phone...).
+        Never sent to other users' devices.
+        """
+        if self._dm is None or event.event_type in _NOT_FORWARDED:
             return
+        frame = TaskEventFrame.from_event(event)
+        for device_id in await self._target_devices(event.data):
+            try:
+                await self._dm.send(device_id, frame.model_dump(mode="json"))
+            except Exception:
+                # Device went offline between the check and the send: best-effort.
+                # (TasksScreen also refreshes on a timer as a fallback.)
+                pass
+
+    async def _target_devices(self, data: Dict[str, Any]) -> list[str]:
+        user_id = data.get("user_id")
+        if not user_id:
+            device_id = data.get("device_id")           # legacy events without an owner
+            return [device_id] if device_id else []
         try:
-            await self._dm.send(device_id, {
-                "type": event.event_type,
-                **event.data,
-            })
+            devices = await self._dm.list_devices(user_id)
         except Exception:
-            # Device offline — best-effort. TasksScreen polls as a
-            # fallback so the user still sees fresh state.
-            pass
+            return []
+        out: list[str] = []
+        for d in devices:
+            dev_id = getattr(d, "id", None)
+            if dev_id and await self._dm.is_connected(dev_id):
+                out.append(dev_id)
+        return out

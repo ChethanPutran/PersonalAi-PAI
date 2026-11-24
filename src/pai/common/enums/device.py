@@ -7,9 +7,9 @@ compile-time error on both sides.
 """
 from __future__ import annotations
 
-from enum import Enum
+from enum import Enum, StrEnum
 
-class DevicePlatform(str, Enum):
+class DevicePlatform(StrEnum):
     """The `platform` field on a device registration frame."""
 
     ANDROID = "android"
@@ -18,22 +18,43 @@ class DevicePlatform(str, Enum):
     MACOS = "macos"
     WINDOWS = "windows"
 
-class DeviceArchitecture(str, Enum):
+class DeviceArchitecture(StrEnum):
     """The `architecture` field on a device registration frame."""
 
     ARM64 = "arm64"
     X86_64 = "x86_64"
     X86 = "x86"
 
-class DeviceType(str, Enum):
+    @classmethod
+    def _missing_(cls, value):
+        """Accept the names other toolchains use (Android ABI names, uname output...)."""
+        aliases = {
+            "arm64-v8a": cls.ARM64, "aarch64": cls.ARM64, "armv8": cls.ARM64,
+            "x64": cls.X86_64, "amd64": cls.X86_64, "x86-64": cls.X86_64,
+            "i386": cls.X86, "i686": cls.X86,
+        }
+        return aliases.get(str(value).strip().lower())
+
+class DeviceType(StrEnum):
     """The `device_type` field on a device registration frame."""
 
     PHONE = "phone"
     TABLET = "tablet"
     LAPTOP = "laptop"
     DESKTOP = "desktop"
+    SERVER = "server"       # the backend host itself (server-side plugins, embedded agent)
+    UNKNOWN = "unknown"     # device that did not report a type
 
-class DeviceOpStatus(str, Enum):
+    @classmethod
+    def _missing_(cls, value):
+        """Old rows/manifests used 'mobile' (= phone) and similar loose names."""
+        aliases = {
+            "mobile": cls.PHONE, "smartphone": cls.PHONE, "handset": cls.PHONE,
+            "notebook": cls.LAPTOP, "pc": cls.DESKTOP, "workstation": cls.DESKTOP,
+        }
+        return aliases.get(str(value).strip().lower())
+
+class DeviceOpStatus(StrEnum):
     """The `status` field on a CONTROL_ACK frame — what the device reports."""
 
     SUCCESS = "success"
@@ -42,7 +63,7 @@ class DeviceOpStatus(str, Enum):
     UNKNOWN = "unknown"  # Used in CONTROL_ACK frames to indicate that the device does not know the status of the operation.
     NONE = "none"  # Used in CONTROL_ACK frames to indicate that the device does not support the operation.
     
-class DeviceMessageType(str, Enum):
+class DeviceMessageType(StrEnum):
     """The `type` field on any frame in either direction."""
 
     # ── Lifecycle / handshake ──
@@ -83,7 +104,7 @@ class DeviceMessageType(str, Enum):
     PLAN_FAILED = "plan.failed"
 
 
-class DeviceControlOp(str, Enum):
+class DeviceControlOp(StrEnum):
     """The `op` field on a CONTROL frame — what the backend wants done."""
 
     PAUSE = "pause"

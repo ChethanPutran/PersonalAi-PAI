@@ -87,6 +87,121 @@ enum TaskSource {
 }
 
 
+/// How a cancel behaves for this task's capability (what the plugin can actually do).
+///
+///  * cooperative — the plugin stops when told;
+///  * bestEffort  — the server stops waiting and tells the device, which may still finish;
+///  * none        — not cancellable once started.
+enum TaskCancelMode {
+  cooperative,
+  bestEffort,
+  none;
+
+  static TaskCancelMode? fromWire(String? wire) {
+    switch (wire) {
+      case 'cooperative':
+        return TaskCancelMode.cooperative;
+      case 'best_effort':
+        return TaskCancelMode.bestEffort;
+      case 'none':
+        return TaskCancelMode.none;
+    }
+    return null;
+  }
+}
+
+
+/// What happened when a task was cancelled.
+enum TaskCancelOutcome {
+  acked, // the device confirmed it stopped
+  abandoned, // the server stopped waiting; the device may have finished it
+  notStarted; // it never ran
+
+  static TaskCancelOutcome? fromWire(String? wire) {
+    switch (wire) {
+      case 'acked':
+        return TaskCancelOutcome.acked;
+      case 'abandoned':
+        return TaskCancelOutcome.abandoned;
+      case 'not_started':
+        return TaskCancelOutcome.notStarted;
+    }
+    return null;
+  }
+}
+
+
+/// The control capabilities of a task's plugin (`controls` in the task JSON).
+class TaskControls {
+  final bool pause;
+  final TaskCancelMode cancel;
+  const TaskControls({required this.pause, required this.cancel});
+
+  static TaskControls? fromJson(dynamic raw) {
+    if (raw is! Map) return null;
+    return TaskControls(
+      pause: raw['pause'] == true,
+      cancel: TaskCancelMode.fromWire(raw['cancel']?.toString()) ??
+          TaskCancelMode.bestEffort,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'pause': pause,
+        'cancel': switch (cancel) {
+          TaskCancelMode.cooperative => 'cooperative',
+          TaskCancelMode.bestEffort => 'best_effort',
+          TaskCancelMode.none => 'none',
+        },
+      };
+}
+
+
+/// While a task is backing off before another attempt (`status == retrying`), the server tells us
+/// which attempt is next and WHEN (`retry` in the task JSON):
+/// `{"attempt": 2, "max_attempts": 3, "next_retry_at": "2026-11-23T12:00:12Z", "delay_seconds": 10.0,
+///   "last_error": "Device did not respond in 60s"}`.
+class TaskRetry {
+  final int attempt;
+  final int maxAttempts;
+
+  /// When the next attempt starts (an absolute instant). The UI counts down to it locally.
+  final DateTime? nextRetryAt;
+  final double? delaySeconds;
+  final String? lastError;
+
+  const TaskRetry({
+    required this.attempt,
+    required this.maxAttempts,
+    this.nextRetryAt,
+    this.delaySeconds,
+    this.lastError,
+  });
+
+  /// Tolerant: a missing/odd field degrades to "unknown", never throws.
+  static TaskRetry? fromJson(dynamic raw) {
+    if (raw is! Map) return null;
+    final attempt = _intOr(raw['attempt'], 0);
+    final max = _intOr(raw['max_attempts'], 0);
+    return TaskRetry(
+      attempt: attempt < 0 ? 0 : attempt,
+      maxAttempts: max < 0 ? 0 : max,
+      nextRetryAt: _parseDate(raw['next_retry_at']),
+      delaySeconds: raw['delay_seconds'] == null ? null : _doubleOr(raw['delay_seconds'], 0),
+      lastError: _strOrNull(raw['last_error']),
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'attempt': attempt,
+        'max_attempts': maxAttempts,
+        'next_retry_at': nextRetryAt?.toUtc().toIso8601String(),
+        'delay_seconds': delaySeconds,
+        'last_error': lastError,
+      };
+}
+
+
 // ---------------------------------------------------------------------------
 // TaskResult
 // ---------------------------------------------------------------------------
@@ -198,6 +313,18 @@ class Task {
   final String? parentTaskId;
   final List<String> childTaskIds;
 
+  // Capability-driven controls, decided by the SERVER (null from an older server → we fall back
+  // to the status-based rules below).
+  final TaskControls? controls;
+  final bool? _canPause;
+  final bool? _canResume;
+  final bool? _canCancel;
+  final TaskCancelOutcome? cancelOutcome;
+  final String? controlBlockedReason;
+
+  /// Present while `status == retrying`: which attempt is next and when.
+  final TaskRetry? retry;
+
   Task({
     required this.id,
     required this.title,
@@ -226,7 +353,17 @@ class Task {
     this.metadata = const {},
     this.parentTaskId,
     this.childTaskIds = const [],
-  }) : createdAt = createdAt ?? DateTime.now();
+    this.controls,
+    bool? canPause,
+    bool? canResume,
+    bool? canCancel,
+    this.cancelOutcome,
+    this.controlBlockedReason,
+    this.retry,
+  })  : createdAt = createdAt ?? DateTime.now(),
+        _canPause = canPause,
+        _canResume = canResume,
+        _canCancel = canCancel;
 
   // ------------------------------------------------------------------
   // Derived state
@@ -234,11 +371,32 @@ class Task {
 
   bool get isTerminal => status.isTerminal;
 
-  bool get canPause => status == TaskStatus.running;
+  /// Whether the UI should offer Pause. The server decides (a plugin may not support it); an
+  /// older server that sends no flags gets the old status-based rule.
+  bool get canPause => _canPause ?? (status == TaskStatus.running);
 
-  bool get canResume => status == TaskStatus.paused;
+  bool get canResume => _canResume ?? (status == TaskStatus.paused);
 
-  bool get canCancel => !isTerminal;
+  bool get canCancel => _canCancel ?? !isTerminal;
+
+  bool get isRetrying => status == TaskStatus.retrying;
+
+  /// "Retrying 2/3" for the status chip. Uses the server's `retry` block; an older server that
+  /// only sends retry_count / max_retries still gets a useful label.
+  String get retryLabel {
+    final r = retry;
+    final attempt = r?.attempt ?? retryCount;
+    final max = r?.maxAttempts ?? maxRetries;
+    return (attempt > 0 && max > 0) ? 'Retrying $attempt/$max' : 'Retrying';
+  }
+
+  /// True when the server told us pause is unavailable for a task that is running.
+  bool get pauseBlocked => status == TaskStatus.running && !canPause;
+
+  /// The task was cancelled but the device could not confirm it stopped.
+  bool get cancelAbandoned =>
+      status == TaskStatus.cancelled &&
+      cancelOutcome == TaskCancelOutcome.abandoned;
 
   Duration? get duration {
     if (startedAt == null) return null;
@@ -300,6 +458,13 @@ class Task {
           (json['metadata'] as Map?)?.cast<String, dynamic>() ?? const {},
       parentTaskId: _strOrNull(json['parent_task_id']),
       childTaskIds: children,
+      controls: TaskControls.fromJson(json['controls']),
+      canPause: _boolOrNull(json['can_pause']),
+      canResume: _boolOrNull(json['can_resume']),
+      canCancel: _boolOrNull(json['can_cancel']),
+      cancelOutcome: TaskCancelOutcome.fromWire(json['cancel_outcome']?.toString()),
+      controlBlockedReason: _strOrNull(json['control_blocked_reason']),
+      retry: TaskRetry.fromJson(json['retry']),
     );
   }
 
@@ -335,6 +500,17 @@ class Task {
         'metadata': metadata,
         'parent_task_id': parentTaskId,
         'child_task_ids': childTaskIds,
+        if (controls != null) 'controls': controls!.toJson(),
+        if (_canPause != null) 'can_pause': _canPause,
+        if (_canResume != null) 'can_resume': _canResume,
+        if (_canCancel != null) 'can_cancel': _canCancel,
+        if (cancelOutcome != null) 'cancel_outcome': switch (cancelOutcome!) {
+          TaskCancelOutcome.acked => 'acked',
+          TaskCancelOutcome.abandoned => 'abandoned',
+          TaskCancelOutcome.notStarted => 'not_started',
+        },
+        if (controlBlockedReason != null) 'control_blocked_reason': controlBlockedReason,
+        if (retry != null) 'retry': retry!.toJson(),
       };
 
   // ------------------------------------------------------------------
@@ -369,6 +545,13 @@ class Task {
     Map<String, dynamic>? metadata,
     String? parentTaskId,
     List<String>? childTaskIds,
+    TaskControls? controls,
+    bool? canPause,
+    bool? canResume,
+    bool? canCancel,
+    TaskCancelOutcome? cancelOutcome,
+    String? controlBlockedReason,
+    TaskRetry? retry,
   }) {
     return Task(
       id: id ?? this.id,
@@ -398,6 +581,13 @@ class Task {
       metadata: metadata ?? this.metadata,
       parentTaskId: parentTaskId ?? this.parentTaskId,
       childTaskIds: childTaskIds ?? this.childTaskIds,
+      controls: controls ?? this.controls,
+      canPause: canPause ?? _canPause,
+      canResume: canResume ?? _canResume,
+      canCancel: canCancel ?? _canCancel,
+      cancelOutcome: cancelOutcome ?? this.cancelOutcome,
+      controlBlockedReason: controlBlockedReason ?? this.controlBlockedReason,
+      retry: retry ?? this.retry,
     );
   }
 }
@@ -412,6 +602,8 @@ String? _strOrNull(dynamic v) {
   final s = v.toString();
   return s.isEmpty ? null : s;
 }
+
+bool? _boolOrNull(dynamic v) => v is bool ? v : null;
 
 int _intOr(dynamic v, int fallback) {
   if (v == null) return fallback;

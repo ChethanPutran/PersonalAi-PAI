@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../core/api/api_client.dart';
+import '../plugins/permissions/permission_models.dart';
 
 class PendingConfirmation {
   final String taskId;
@@ -14,12 +15,23 @@ class PendingConfirmation {
   final Map<String, dynamic> parameters;
   final String reason;
 
+  /// What the approval dialog shows: risk, parameter summary and — from the server — which
+  /// scopes (once / session / always) and parameter bindings may be offered. Built from the
+  /// event's `confirmation` block; older events without one get a "once only" request.
+  final ConfirmationRequest request;
+
   PendingConfirmation({
     required this.taskId,
     required this.capability,
     required this.parameters,
     required this.reason,
-  });
+    ConfirmationRequest? request,
+  }) : request = request ??
+            ConfirmationRequest.legacy(
+              capability: capability,
+              parameters: parameters,
+              reason: reason,
+            );
 }
 
 class ConfirmationService extends ChangeNotifier {
@@ -68,22 +80,7 @@ class ConfirmationService extends ChangeNotifier {
       _ws = WebSocketChannel.connect(url);
 
       _sub = _ws!.stream.listen(
-        (raw) {
-          try {
-            final data = jsonDecode(raw as String);
-            if (data is Map && data['type'] == 'task.confirmation_requested') {
-              _pending = PendingConfirmation(
-                taskId: data['task_id'] as String,
-                capability: data['capability'] as String? ?? 'Unknown Capability',
-                parameters: Map<String, dynamic>.from(data['parameters'] ?? {}),
-                reason: data['reason'] as String? ?? '',
-              );
-              notifyListeners();
-            }
-          } catch (e) {
-            debugPrint('[ConfirmationService] Error parsing incoming WS message: $e');
-          }
-        },
+        handleMessage,
         onError: (error) {
           debugPrint('[ConfirmationService] WebSocket error: $error');
         },
@@ -95,6 +92,52 @@ class ConfirmationService extends ChangeNotifier {
       debugPrint('[ConfirmationService] Failed to connect WebSocket: $e');
     }
   
+  }
+
+  /// Parses one frame of the confirmation stream. Public so tests can feed it directly.
+  @visibleForTesting
+  void handleMessage(dynamic raw) {
+    try {
+      final data = raw is String ? jsonDecode(raw) : raw;
+      if (data is Map && (data['type'] == 'task.confirmation_requested' || data['event'] == 'task.confirmation_requested')) {
+        final capability = data['capability'] as String? ?? 'Unknown Capability';
+        final parameters = Map<String, dynamic>.from(data['parameters'] ?? {});
+        final reason = data['reason'] as String? ?? '';
+        _pending = PendingConfirmation(
+          taskId: (data['task_id'] ?? data['id']) as String,
+          capability: capability,
+          parameters: parameters,
+          reason: reason,
+          request: data['confirmation'] is Map
+              ? ConfirmationRequest.fromJson(data['confirmation'], fallbackCapability: capability)
+              : null,
+        );
+        notifyListeners();
+      }
+    } catch (e) {
+      debugPrint('[ConfirmationService] Error parsing incoming WS message: $e');
+    }
+  }
+
+  /// Approves the pending task with the user's chosen scope/binding (the shared approval
+  /// dialog calls this). Unlike [confirm] it does NOT swallow server errors: a 409/422 is
+  /// thrown as [ConfirmationException] so the dialog can show it and keep the task pending.
+  Future<void> confirmWith(ConfirmationDecision decision) async {
+    final taskId = _pending?.taskId;
+    if (taskId == null) {
+      throw const ConfirmationException('There is nothing waiting for approval.');
+    }
+    try {
+      await api.post('/tasks/$taskId/confirm', decision.toBody());
+    } on ApiException catch (e) {
+      debugPrint('[ConfirmationService] confirm($taskId) rejected: ${e.statusCode} ${e.body}');
+      if (e.statusCode == 409 || e.statusCode == 422 || e.statusCode == 400 || e.statusCode == 403) {
+        throw ConfirmationException.fromBody(e.statusCode, e.body);
+      }
+      rethrow;
+    }
+    _pending = null;
+    notifyListeners();
   }
 
   Future<void> confirm() async {

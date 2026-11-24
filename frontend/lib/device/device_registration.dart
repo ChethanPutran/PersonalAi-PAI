@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../core/api/api_client.dart';
+import '../core/app_version.dart';
 import '../models/device.dart';
 
 
@@ -23,7 +24,7 @@ class DeviceRegistration {
       'device': {
         'name': 'PAI ${Platform.localHostname}',
         'device_type': _deviceType(),
-        'app_version': '1.0.0',
+        'app_version': kAppVersion,
         'runtime_version': '1.0.0',
         'platform': _platform(),
         'platform_version': Platform.operatingSystemVersion,

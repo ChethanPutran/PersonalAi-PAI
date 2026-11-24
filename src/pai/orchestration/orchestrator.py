@@ -13,6 +13,7 @@ from loguru import logger
 from pai.agents.manager import AgentManager
 from pai.config.models.orchestration import OrchestratorConfig
 from pai.event_bus.events import EventType
+from pai.llm.breakdown import CAPABILITIES, HISTORY, MEMORY, TOOL_DATA, USER_PROMPT, prompt_breakdown
 from pai.llm.models import LLMMessage, LLMRequest
 from pai.notifications.push_service import PushService
 from pai.planning.models import TaskSpec
@@ -43,7 +44,9 @@ from pai.orchestration.commands import (
     default_command_registry,
 )
 from pai.orchestration.idempotency import IdempotencyPolicy, IdempotencyRegistry
+from pai.orchestration.streaming import ChatDeltaEvent, ChatReplyDoneEvent, ReplySink
 from pai.planning.dag_models import DagResult, DagStatus
+from pai.security.guards.stream_guard import StreamingSanitizer
 from pai.planning.dag_scheduler import DAGScheduler
 from pai.planning.planner import Planner
 from pai.plugins.manager import PluginManager
@@ -74,6 +77,13 @@ _RETRY_PATTERNS = [
     re.compile(r"\bwhat\s+happened\b", re.I),
     re.compile(r"\b(?:didn'?t|did\s+not)\s+work\b", re.I),
 ]
+
+
+def _clip_clarify(value: Any, limit: int) -> str:
+    """Single-line, boundary-escaped, length-clipped text for the clarification block."""
+    from pai.security.guards.llm_guard import BOUNDARY_ESCAPE_RE, BOUNDARY_REPLACEMENT
+    text = " ".join(str(value or "").split())[:limit]
+    return BOUNDARY_ESCAPE_RE.sub(BOUNDARY_REPLACEMENT, text)
 
 
 def _looks_like_retry(text: str) -> bool:
@@ -343,9 +353,13 @@ class TaskOrchestrator(Manager):
         source_device_id: Optional[str] = None,
         context: Optional[Dict[str, Any]] = None,
         request_id: Optional[str] = None,
+        reply_sink: Optional[ReplySink] = None,
     ) -> Dict[str, Any]:
         """``request_id``: pass the client's Idempotency-Key so task-level idempotency
-        (request_id:spec_id) lines up with the goal-level one."""
+        (request_id:spec_id) lines up with the goal-level one.
+
+        ``reply_sink``: receives the assistant's reply incrementally (sanitized) while it is
+        generated. ``chat.delta`` events are also published on the bus either way."""
 
         if not self._initialized:
             await self.initialize()
@@ -374,6 +388,14 @@ class TaskOrchestrator(Manager):
         )
         if request_id:
             execution_context.request_id = request_id
+        if execution_context.origin is None:
+            # Who started this: a person typing, a person speaking, or an agent acting alone.
+            if agent_id:
+                execution_context.origin = Origin.AGENT_AUTONOMOUS
+            elif (context or {}).get("mode") == "voice":
+                execution_context.origin = Origin.VOICE
+            else:
+                execution_context.origin = Origin.USER_DIRECT
 
         logger.info(
             "Orchestrating request={} user={} goal={!r}",
@@ -514,6 +536,7 @@ class TaskOrchestrator(Manager):
                     plan=plan,
                     task_specs=task_specs,
                     context=execution_context,
+                    reply_sink=reply_sink,
                 )
                 exec_span.set_attribute(
                     "status", result.get("status", "unknown"),
@@ -596,6 +619,7 @@ class TaskOrchestrator(Manager):
         plan: Any,
         task_specs: list[TaskSpec],
         context: ExecutionContext,
+        reply_sink: Optional[ReplySink] = None,
     ) -> Dict[str, Any]:
 
         tracer = get_tracer()
@@ -672,6 +696,7 @@ class TaskOrchestrator(Manager):
                     task=chat_task,
                     context=context,
                     prior_results=all_results,
+                    reply_sink=reply_sink,
                 )
                 all_results.append({
                     "task_id": chat_id,
@@ -731,8 +756,9 @@ class TaskOrchestrator(Manager):
         task: Any,
         context: ExecutionContext,
         prior_results: list,
+        reply_sink: Optional[ReplySink] = None,
     ) -> str:
-        """Generate a natural-language reply via the LLM.
+        """Generate a natural-language reply via the LLM (streamed).
 
         Injects:
         • Live capabilities   — ground truth about what's installable
@@ -756,11 +782,24 @@ class TaskOrchestrator(Manager):
             task_dict = self._to_dict(task)
             params = task_dict.get("parameters") or {}
             tone = params.get("tone", "friendly")
+            # Clarification turn: the planner (LLM or its code safety net) asked us to put ONE
+            # question to the user. Params are plan output, so they are sanitized and clipped
+            # here and rendered inside a boundary the template treats as data.
+            clarify = str(params.get("intent") or "") == "clarify"
+            clarify_question, clarify_options = "", ""
+            if clarify:
+                clarify_question = _clip_clarify(params.get("question"), 300)
+                opts = params.get("options")
+                if isinstance(opts, (list, tuple)):
+                    clarify_options = ", ".join(
+                        _clip_clarify(o, 60) for o in list(opts)[:10] if o is not None)
 
             # Retry intent: when the user says "try again" / "what happened"
             # / "why did it fail", we surface the previous attempt from
             # *this* session in the memory block. Otherwise it stays excluded.
             is_retry = _looks_like_retry(goal or "")
+            modality = "voice" if (context.metadata or {}).get("mode") == "voice" else "text"
+            span.set_attribute("modality", modality)
             span.set_attribute("tone", tone)
             span.set_attribute("is_retry", is_retry)
 
@@ -867,9 +906,17 @@ class TaskOrchestrator(Manager):
                 prior_results_block=prior_results_block,
                 tone=tone,
                 is_retry=is_retry,
+                modality=modality,
+                intent="clarify" if clarify else "reply",
+                clarify_question=clarify_question,
+                clarify_options=clarify_options,
             )
             span.set_attribute("prompt", prompt[:self.prompt_trace_max_size])
             span.set_attribute("prompt_length", len(prompt))
+            prompt_tokens_by_part = prompt_breakdown(prompt, {
+                CAPABILITIES: capability_block, HISTORY: history_block, MEMORY: memory_block,
+                TOOL_DATA: prior_results_block, USER_PROMPT: goal})
+            span.set_attribute("prompt_tokens_estimate", prompt_tokens_by_part)
 
             # ── 5b. Track version (non-fatal) ──
             await self.prompt_tracker.record(
@@ -887,37 +934,69 @@ class TaskOrchestrator(Manager):
             )
             
 
+            # ── 6. Stream the reply; sanitize incrementally (post-LLM guard) ──
+            sanitizer = StreamingSanitizer(self.prompt_guard)
+            finish_reason: Optional[str] = None
+            usage = None
+            seq = 0
+
+            async def _out(piece: str) -> None:
+                nonlocal seq
+                if not piece:
+                    return
+                seq += 1
+                if reply_sink is not None:
+                    try:
+                        await reply_sink.on_delta(piece)
+                    except Exception as exc:        # a slow/broken consumer must not kill the reply
+                        logger.warning("reply_sink.on_delta failed: {}", exc)
+                await self._publish(EventType.CHAT_DELTA, ChatDeltaEvent(
+                    session_id=context.session_id, request_id=context.request_id,
+                    seq=seq, delta=piece).model_dump(mode="json"))
+
             try:
-                # Use `generate()` instead of `complete()` here because
-                # we want `finish_reason` and `usage` in the trace.
-                # `complete()` returns only the text, hiding truncation.
-                llm_response = await self.planner.llm.generate_request(LLMRequest(
+                async for chunk in self.planner.llm.stream_request(LLMRequest(
                     messages=[LLMMessage(role="user", content=prompt)],
                     temperature=self.chat_reply_temperature,
                     max_tokens=self.chat_reply_max_tokens,
-                ))
+                    breakdown=prompt_tokens_by_part,
+                ), route="chat"):
+                    if chunk.delta:
+                        await _out(sanitizer.feed(chunk.delta))
+                    if chunk.finish_reason:
+                        finish_reason = chunk.finish_reason
+                    if chunk.usage is not None:
+                        usage = chunk.usage
+                await _out(sanitizer.flush())
             except Exception as exc:
                 span.set_error(f"llm_failed: {exc}")
                 raise
 
-            raw_reply = llm_response.content or ""
+            if sanitizer.needs_fallback():
+                await _out(sanitizer.fallback_reply)
+                reply = sanitizer.fallback_reply
+            else:
+                reply = sanitizer.text.strip()
+            span.set_attribute("guard.response.tool_calls_stripped", sanitizer.stats.tool_calls_stripped)
+            span.set_attribute("guard.response.secrets_redacted", sanitizer.stats.secrets_redacted)
+            span.set_attribute("guard.response.jailbreak_success", sanitizer.stats.jailbreak_markers > 0)
 
-            # ── 6b. SANITIZE THE RESPONSE (post-LLM) ──
-            sanitized = self.prompt_guard.sanitize_response(
-                raw_text=raw_reply,
-                span=span,
-                request_id=context.request_id,
-            )
-            reply = sanitized.clean_text
+            if reply_sink is not None:
+                try:
+                    await reply_sink.on_done(reply)
+                except Exception as exc:
+                    logger.warning("reply_sink.on_done failed: {}", exc)
+            await self._publish(EventType.CHAT_REPLY_DONE, ChatReplyDoneEvent(
+                session_id=context.session_id, request_id=context.request_id,
+                text=reply).model_dump(mode="json"))
 
-            finish_reason = llm_response.finish_reason
             span.set_attribute("reply", reply)
             span.set_attribute("reply_length", len(reply))
             span.set_attribute("finish_reason", finish_reason)
-            if llm_response.usage is not None:
-                span.set_attribute("prompt_tokens", llm_response.usage.prompt_tokens)
-                span.set_attribute("completion_tokens", llm_response.usage.completion_tokens)
-                span.set_attribute("total_tokens", llm_response.usage.total_tokens)
+            if usage is not None:
+                span.set_attribute("prompt_tokens", usage.prompt_tokens)
+                span.set_attribute("completion_tokens", usage.completion_tokens)
+                span.set_attribute("total_tokens", usage.total_tokens)
 
             if finish_reason == "length":
                 logger.warning(
@@ -929,7 +1008,7 @@ class TaskOrchestrator(Manager):
                 "Chat reply generated: request={} length={} finish_reason={} "
                 "sanitized=%s",
                 context.request_id, len(reply), finish_reason,
-                sanitized.tool_calls_stripped or sanitized.secrets_redacted,
+                sanitizer.stats.tool_calls_stripped or sanitizer.stats.secrets_redacted,
             )
             return reply
          
@@ -948,6 +1027,7 @@ class TaskOrchestrator(Manager):
         session_id: Optional[str] = None,
         source_device_id: Optional[str] = None,
         request_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
     ) -> Dict[str, Any]:
 
         params = params or {}
@@ -955,6 +1035,7 @@ class TaskOrchestrator(Manager):
         context = await self.context_manager.create_context(
             user_id=user_id,
             session_id=session_id,
+            agent_id=agent_id,          # set when an agent is acting: authorization + audit attribute it
             source_device_id=source_device_id,
             goal=capability,
         )
@@ -1018,6 +1099,8 @@ class TaskOrchestrator(Manager):
                 parameters=params
             )
             task_spec.retryable = self.task_manager.manifest_retryable(plugin_resolution, task_spec)
+            for attr, value in self.task_manager.manifest_execution(plugin_resolution).items():
+                setattr(task_spec, attr, value)
 
 
             # ---- Select device ----
@@ -1037,28 +1120,34 @@ class TaskOrchestrator(Manager):
                 sel_span.set_attribute("executor_id", target.executor_id)
 
             # ---- Authorize ----
+            # Same rule as TaskRunner: only plugin capabilities (target.requires_device) go through
+            # device+plugin authorization. Built-ins are system-provided (no installable plugin to
+            # be "enabled"), so they skip it exactly as they do on the planner path.
+            authorization = None
             async with tracer.span(
                 "action.authorize",
                 capability=capability,
                 device_id=target.device_id,
+                builtin=not target.requires_device,
             ):
-                authorization = await self.security_manager.authorize(
-                    user_id=user_id,
-                    plugin_id=plugin_resolution.plugin_id,
-                    capability=capability,
-                    device_id=target.device_id,
-                    plugin_manifest=plugin_resolution.plugin_manifest,
-                    parameters=params,
-                    scope=ScopeContext.from_execution_context(context),
-                    task_id=None,
-                    source_device_id=source_device_id,
-                    agent_id=context.agent_id,
-                    session_id=context.session_id,
-                    origin=context.origin or Origin.AGENT_AUTONOMOUS,
-                    trace_id=context.request_id
-                )
-                if authorization.effect == DecisionEffect.DENY:
-                    raise PermissionError(f"Authorization denied: {authorization.reason}")
+                if target.requires_device:
+                    authorization = await self.security_manager.authorize(
+                        user_id=user_id,
+                        plugin_id=plugin_resolution.plugin_id,
+                        capability=capability,
+                        device_id=target.device_id,
+                        plugin_manifest=plugin_resolution.plugin_manifest,
+                        parameters=params,
+                        scope=ScopeContext.from_execution_context(context).with_device(target.device_id),
+                        task_id=None,
+                        source_device_id=source_device_id,
+                        agent_id=context.agent_id,
+                        session_id=context.session_id,
+                        origin=context.origin or Origin.AGENT_AUTONOMOUS,
+                        trace_id=context.request_id
+                    )
+                    if authorization.effect == DecisionEffect.DENY:
+                        raise PermissionError(f"Authorization denied: {authorization.reason}")
 
             # ---- Create + submit task ----
             async with tracer.span(
@@ -1072,6 +1161,8 @@ class TaskOrchestrator(Manager):
                     executor_id=target.executor_id,
                     device_id=target.device_id,
                     idempotency_key=action_key,
+                    controls=self.task_manager.controls_for(
+                        task_spec.capability, plugin_resolution.plugin_manifest),
                     metadata={
                         "plugin_id": plugin_resolution.plugin_id,
                         "request_id": context.request_id,
@@ -1081,7 +1172,8 @@ class TaskOrchestrator(Manager):
                     },
                 )
                 runtime_task.plugin = runtime_task.plugin or plugin_resolution.plugin_id
-                await self.task_manager.apply_authorization(runtime_task, authorization, context)
+                if authorization is not None:             # built-ins have none (see above)
+                    await self.task_manager.apply_authorization(runtime_task, authorization, context)
 
             async with tracer.span(
                 "action.submit_task",
@@ -1273,39 +1365,51 @@ class TaskOrchestrator(Manager):
         # 2. Shut down components in reverse initialization order.
         #    Dependents go before dependencies so nothing is still
         #    reading a closed backend.
+        # task_manager BEFORE executor_manager: stopping the executors first would cancel the
+        # in-flight device calls while the TaskManager is not yet "shutting down", and those
+        # tasks would be recorded as user-cancelled instead of staying recoverable.
         ordered = [
             "dag_scheduler",
+            "task_manager",
             "capability_resolver",
             "capability_router",
             "memory_manager",
             "agent_manager",
             "executor_manager",
-            "task_manager",
             "security_manager",
             "plugin_manager",
             "device_manager",
-            "event_bus", 
+            "context_manager",
+            "llm",              # closes provider HTTP / SDK clients (see _shutdown_managers)
+            "event_bus",
         ]
         await self._shutdown_managers(ordered)
 
         logger.info("TaskOrchestrator shutdown complete")
 
+    _SHUTDOWN_STEP_TIMEOUT = 8.0
+
     async def _shutdown_managers(self, names: list[str]) -> None:
         """Best-effort shutdown of named components. Never raises."""
         for name in names:
-            mgr = getattr(self, name, None)
+            mgr = self.planner.llm if name == "llm" else getattr(self, name, None)
             if mgr is None:
                 continue
             try:
                 if name == "executor_manager":
-                    await mgr.shutdown_all()
+                    call = mgr.shutdown_all()
+                elif name == "llm":
+                    call = mgr.aclose()
                 else:
                     shutdown = getattr(mgr, "shutdown", None)
                     if shutdown is None:
                         continue
-                    result = shutdown()
-                    if asyncio.iscoroutine(result):
-                        await result
+                    call = shutdown()
+                if asyncio.iscoroutine(call):
+                    # Bounded: one stuck component must not hold the whole shutdown hostage.
+                    await asyncio.wait_for(call, timeout=self._SHUTDOWN_STEP_TIMEOUT)
+            except asyncio.TimeoutError:
+                logger.error("shutdown of {} timed out after {}s", name, self._SHUTDOWN_STEP_TIMEOUT)
             except Exception as exc:
                 logger.warning(
                     "Failed to shut down {}: {}: {}",

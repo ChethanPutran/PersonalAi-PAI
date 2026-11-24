@@ -43,7 +43,7 @@
     {
       "id": "shell.exec",
       "description": "Execute a whitelisted shell command on the host. Shell metacharacters (; & | > < $ `) are rejected. Configure PAI_SHELL_WHITELIST env to add prefixes.",
-      "permissions": ["process"],
+      "permissions": ["shell"],
       "requireConfirmation": true,
       "confirmationReason": "Executing shell commands can be dangerous. Please confirm that you want to run this command.",
       "precondition": {

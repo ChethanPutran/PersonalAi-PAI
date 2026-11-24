@@ -22,7 +22,9 @@ from pydantic import (
     model_validator,
 )
 
-from pai.common.enums.permission import RiskLevel
+from pai.common.enums.permission import ConsentScope, RiskLevel
+from pai.common.enums.task import TaskType
+from pai.common.task_controls import TaskControls
 
 from .manifest_enums import (
     PreconditionType,
@@ -65,7 +67,17 @@ class PluginRuntime(BaseModel):
 
     kind: RuntimeKind
     nativeModule: str = Field(min_length=1)
-    minPaiVersion: Optional[str] = None
+    minPaiVersion: Optional[str] = None   # oldest backend/runtime that can host this plugin
+    minAppVersion: Optional[str] = None   # oldest client app that can run it (device plugins)
+
+    @model_validator(mode="after")
+    def _check_versions(self) -> "PluginRuntime":
+        from pai.version import is_valid_version
+        for f in ("minPaiVersion", "minAppVersion"):
+            v = getattr(self, f)
+            if v is not None and not is_valid_version(v):
+                raise ValueError(f"runtime.{f} {v!r} is not a valid version")
+        return self
 
     @property
     def is_server(self) -> bool:
@@ -74,6 +86,21 @@ class PluginRuntime(BaseModel):
     @property
     def is_device(self) -> bool:
         return self.kind is RuntimeKind.DEVICE
+
+
+class Changelog(BaseModel):
+    """What changed in THIS plugin version, shown to the user next to the Update button.
+
+    Optional and purely informational: the capability add/remove diff shown in the UI is
+    computed from the manifests themselves, so it can never disagree with what the plugin
+    really exposes.
+    """
+    model_config = _STRICT
+
+    summary: str = ""
+    features: List[str] = Field(default_factory=list)
+    fixes: List[str] = Field(default_factory=list)
+    breaking: List[str] = Field(default_factory=list)
 
 
 class Precondition(BaseModel):
@@ -154,6 +181,17 @@ class CapabilitySpec(BaseModel):
     risk: RiskLevel = RiskLevel.LOW
     requireConfirmation: bool = False
     retryable: bool = True   # False: never auto-retry/re-send (non-idempotent actions); manual retry still allowed
+    # What a user may do once it is running: pause (needs the plugin to ack) / how cancel behaves.
+    controls: TaskControls = Field(default_factory=TaskControls)
+    # How the action runs: one_shot (returns a result), long_running (keeps going until done or
+    # stopped: no deadline), stream (emits frames until stopped: no deadline). Declared here, NEVER
+    # taken from the LLM's plan. `timeoutSeconds` (one_shot only) overrides the default deadline.
+    taskType: TaskType = TaskType.ONE_SHOT
+    timeoutSeconds: Optional[float] = Field(default=None, gt=0, le=3600)
+    # Broadest "remember my approval" a user may give for this action (once < session < always).
+    # None = derived from `risk` (low/medium: always, high: session, critical: once). It can only
+    # make the default STRICTER, never broader.
+    maxGrantScope: Optional[ConsentScope] = None
     confirmationReason: Optional[str] = None
     confirmationPreview: Optional[Dict[str, Any]] = None
     precondition: Optional[Precondition] = None

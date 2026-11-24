@@ -19,15 +19,17 @@
       "entrypoint": "com.pai.plugins.camera.CameraPlugin"
     }
   },
-    "architectures": ["x86_64", "arm64-v8a", "arm64"],
+    "architectures": ["x86_64", "arm64"],
 
-  "deviceTypes": ["mobile"],
+  "deviceTypes": ["phone", "tablet"],
 
   "permissions": ["camera", "microphone", "filesystem"],
 
   "capabilities": [
     {
       "id": "camera.capture",
+      "taskType": "one_shot",
+      "timeoutSeconds": 30,
       "description": "Take a still photo.",
       "permissions": ["camera", "filesystem"],
       "requireConfirmation": true,
@@ -35,7 +37,7 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "lens":       { "type": "string", "enum": ["front", "back"], "default": "back" },
+          "lens":       { "type": "string", "enum": ["front", "back"], "default": "back", "askIfUnspecified": true },
           "outputPath": { "type": "string" },
           "format":     { "type": "string", "enum": ["jpeg"], "default": "jpeg" }
         }
@@ -43,6 +45,7 @@
     },
     {
       "id": "camera.record",
+      "taskType": "long_running",
       "description": "Record a video.",
       "permissions": ["camera", "microphone", "filesystem"],
       "requireConfirmation": true,
@@ -58,6 +61,7 @@
     },
     {
       "id": "camera.stream",
+      "taskType": "stream",
       "description": "Open a live preview stream.",
       "confirmationReason": "Streaming camera feed can be sensitive. Please confirm that you want to open a live preview.",
       "permissions": ["camera"],

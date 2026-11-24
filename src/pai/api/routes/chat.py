@@ -4,12 +4,14 @@ Chat endpoint — receives a user goal as text and drives the orchestrator.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 import uuid
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
+from fastapi.responses import StreamingResponse
 from loguru import logger
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,6 +30,7 @@ from pai.orchestration.orchestrator import (
     TaskOrchestrator,
 )
 from pai.orchestration.idempotency import IdempotencyKey, IdempotentRunAborted
+from pai.orchestration.streaming import ReplySink
 from pai.storage.repositories.chat import ChatRepository
 
 
@@ -190,6 +193,7 @@ async def _run_chat(
     db_session: AsyncSession,
     *,
     request_id: Optional[str],
+    reply_sink: Optional[ReplySink] = None,
 ) -> ChatResponse:
     logger.info(
         "chat: user={} device={} goal={!r}",
@@ -220,6 +224,7 @@ async def _run_chat(
                 session_id=session_id,
                 source_device_id=request.device_id,
                 request_id=request_id,
+                reply_sink=reply_sink,
                 context={
                     "mode": request.mode,
                     "device_id": request.device_id,
@@ -302,6 +307,132 @@ async def _run_chat(
     )
 
 
+# ============================================================
+# Streaming chat (SSE) — the reply arrives token-by-token
+# ============================================================
+
+class _SseHub:
+    """Collects everything one streamed chat request produces, in order.
+
+    Implements ReplySink (lossless deltas from the orchestrator) and also receives the
+    request's ``chat.status`` bus events. The SSE body just drains ``queue``.
+    """
+
+    def __init__(self) -> None:
+        self.queue: "asyncio.Queue[Optional[tuple[str, Dict[str, Any]]]]" = asyncio.Queue()
+
+    async def on_delta(self, text: str) -> None:
+        if text:
+            self.queue.put_nowait(("delta", {"delta": text}))
+
+    async def on_done(self, text: str) -> None:       # the final text rides in the `done` event
+        return None
+
+    def put(self, event: str, data: Dict[str, Any]) -> None:
+        self.queue.put_nowait((event, data))
+
+    def close(self) -> None:
+        self.queue.put_nowait(None)
+
+
+def _sse(event: str, data: Dict[str, Any]) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
+
+
+@router.post("/stream")
+async def chat_stream(
+    body: ChatRequest,
+    http_request: Request,
+    user_id: str = Depends(get_current_user),
+    context: PAIAppContext = Depends(get_app_context),
+    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
+) -> StreamingResponse:
+    """Submit a goal and receive the reply as Server-Sent Events.
+
+    Events: ``status`` {stage, message} while planning/running tools; ``delta`` {delta}
+    for each piece of the reply (already sanitized); ``done`` — the same JSON as
+    ``POST /chat``'s ChatResponse; ``error`` {message}. Closing the connection stops the
+    request (the user pressed stop).
+    """
+    orchestrator = context.orchestrator
+    try:
+        key = IdempotencyKey.from_header(idempotency_key, user_id=user_id, session_id=body.session_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    request_id = key.key if key else uuid.uuid4().hex
+    hub = _SseHub()
+
+    async def _on_status(event: Event) -> None:
+        if event.data.get("request_id") == request_id:
+            hub.put("status", {"stage": event.data.get("stage"), "message": event.data.get("message", "")})
+
+    async def _run() -> None:
+        try:
+            # Own DB session: a Depends(get_db_session) session would be closed before the
+            # streaming body finishes.
+            # Same Idempotency-Key => never run twice. A duplicate waits for the first run and
+            # then gets just the final `done` event (the deltas were already delivered once).
+            async with orchestrator.idempotency.guard(key) as guard:
+                if guard.is_replay:
+                    result = guard.replay
+                else:
+                    async with context.database.session() as db:
+                        result = await _run_chat(body, user_id, orchestrator, db,
+                                                 request_id=request_id, reply_sink=hub)
+                    guard.set_result(result, success=result.status == "completed")
+            hub.put("done", result.model_dump(mode="json"))
+        except HTTPException as exc:
+            hub.put("error", {"message": str(exc.detail), "status": exc.status_code})
+        except IdempotentRunAborted:
+            hub.put("error", {"message": "The original request with this Idempotency-Key was interrupted; retry.",
+                              "status": 409})
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception("chat stream failed: {}", exc)
+            hub.put("error", {"message": f"Orchestrator failed: {exc}"})
+        finally:
+            hub.close()
+
+    sub_id = await orchestrator.event_bus.subscribe("chat.status", _on_status)
+    runner = asyncio.create_task(_run(), name=f"chat_stream:{request_id}")
+
+    async def _body():
+        try:
+            yield "retry: 3000\n\n"
+            idle = 0.0
+            while True:
+                if getattr(getattr(context, "shutting_down", None), "is_set", lambda: False)():
+                    return                       # server stopping: finally-block cancels the run
+                try:
+                    item = await asyncio.wait_for(hub.queue.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    if await http_request.is_disconnected():
+                        return
+                    idle += 1.0
+                    if idle >= 15.0:
+                        idle = 0.0
+                        yield ": keep-alive\n\n"
+                    continue
+                idle = 0.0
+                if item is None:
+                    return
+                yield _sse(*item)
+        finally:
+            # Client gone or finished: stop the run (cancels the LLM stream and tasks).
+            if not runner.done():
+                runner.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await runner
+            with contextlib.suppress(Exception):
+                await orchestrator.event_bus.unsubscribe(sub_id)
+
+    return StreamingResponse(
+        _body(), media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "X-Request-Id": request_id},
+    )
+
+
 @router.websocket("/{session_id}/stream")
 async def chat_status_stream(websocket: WebSocket, session_id: str) -> None:
     """Live status updates for an in-flight chat request.
@@ -373,8 +504,13 @@ async def chat_status_stream(websocket: WebSocket, session_id: str) -> None:
     async def _on_status(event: Event) -> None:
         if event.data.get("session_id") != session_id:
             return
+        # Additive tag so clients can tell status updates from reply deltas
+        # (`chat.delta` {seq, delta}, `chat.reply_done` {text}). Best-effort: the bus may
+        # drop under load — use POST /chat/stream for a lossless reply stream.
+        name = getattr(event.event_type, "value", event.event_type)
+        payload = {**event.data, "event": name}
         try:
-            local_queue.put_nowait(event.data)
+            local_queue.put_nowait(payload)
         except asyncio.QueueFull:
             # Drop oldest, retry once — same policy as the bus itself.
             try:
@@ -382,11 +518,14 @@ async def chat_status_stream(websocket: WebSocket, session_id: str) -> None:
             except asyncio.QueueEmpty:
                 pass
             try:
-                local_queue.put_nowait(event.data)
+                local_queue.put_nowait(payload)
             except asyncio.QueueFull:
                 pass
 
-    subscription_id = await event_bus.subscribe("chat.status", _on_status)
+    subscription_ids = [
+        await event_bus.subscribe(pattern, _on_status)
+        for pattern in ("chat.status", "chat.delta", "chat.reply_done")
+    ]
 
     await websocket.accept()
     await websocket.send_json({"type": "connected", "session_id": session_id})
@@ -407,11 +546,12 @@ async def chat_status_stream(websocket: WebSocket, session_id: str) -> None:
     try:
         forward_task = asyncio.create_task(_forward())
         disconnect_task = asyncio.create_task(_wait_disconnect())
-        await asyncio.wait(
-            {forward_task, disconnect_task},
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        for t in (forward_task, disconnect_task):
+        waiters = {forward_task, disconnect_task}
+        flag = getattr(context, "shutting_down", None)
+        if flag is not None:                     # server stopping: end the stream, don't wait for the client
+            waiters.add(asyncio.create_task(flag.wait()))
+        await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+        for t in waiters:
             t.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await t
@@ -420,10 +560,11 @@ async def chat_status_stream(websocket: WebSocket, session_id: str) -> None:
     finally:
         # Best-effort unsubscribe. If the bus has been shut down under
         # us, the call is a no-op.
-        try:
-            await event_bus.unsubscribe(subscription_id)
-        except Exception:
-            pass
+        for sub_id in subscription_ids:
+            try:
+                await event_bus.unsubscribe(sub_id)
+            except Exception:
+                pass
         with contextlib.suppress(Exception):
             await websocket.close()
 

@@ -54,6 +54,10 @@ dependencies:
   firebase_messaging: ^15.1.3
   path: ^1.9.1
   archive: ^4.0.7
+  record: ^6.2.1
+  flutter_pcm_sound: ^3.3.3
+  flutter_markdown_plus: ^1.0.12   # chat markdown (flutter_markdown is discontinued)
+  url_launcher: ^6.3.1            # open links after the user confirms the URL
 
 dev_dependencies:
   flutter_test:
@@ -81,6 +85,30 @@ flutter:
   assets:
     - .env
     - assets/images/
+    - assets/fonts/OFL-orbitron.txt
+    - assets/fonts/OFL-rajdhani.txt
+    - assets/fonts/OFL-inter.txt
+    - assets/fonts/OFL-jetbrainsmono.txt
+
+  # Bundled fonts (all SIL Open Font License) — no runtime downloads.
+  fonts:
+    - family: Orbitron            # display / brand
+      fonts:
+        - asset: assets/fonts/Orbitron-Variable.ttf
+    - family: Rajdhani            # HUD labels, headings, buttons
+      fonts:
+        - asset: assets/fonts/Rajdhani-Medium.ttf
+          weight: 500
+        - asset: assets/fonts/Rajdhani-SemiBold.ttf
+          weight: 600
+        - asset: assets/fonts/Rajdhani-Bold.ttf
+          weight: 700
+    - family: Inter               # body
+      fonts:
+        - asset: assets/fonts/Inter-Variable.ttf
+    - family: JetBrainsMono       # ids / logs
+      fonts:
+        - asset: assets/fonts/JetBrainsMono-Variable.ttf
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images

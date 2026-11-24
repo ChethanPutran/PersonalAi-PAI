@@ -25,6 +25,7 @@ from pai.planning.dag_scheduler import DAGScheduler
 from pai.planning.models import TaskSpec
 from pai.security.authorization.decision import AuthorizationDecision, DecisionEffect
 from pai.tasks.manager import TaskManager
+from pai.common.task_controls import CancelMode, TaskControls
 from pai.tasks.models import TaskRetryPolicy
 from pai.tasks.store import TaskStore
 
@@ -54,15 +55,28 @@ class FakeSecurity:
     def audit_execution_failed(self, **kw): ...
 
 
+# What the simulated device plugins declare in their manifests (`controls`). Anything not
+# listed gets the safe default: cannot pause once dispatched, best-effort cancel.
+DEFAULT_CONTROLS = {
+    "monitor.watch": TaskControls(pause=True, cancel=CancelMode.COOPERATIVE),
+    "camera.stream": TaskControls(pause=True, cancel=CancelMode.COOPERATIVE),
+}
+
+
 class FakeResolver:
-    """`retryable_by_capability` simulates the plugin manifest: {capability: retryable}."""
-    def __init__(self, retryable_by_capability=None): self.manifest_flags = retryable_by_capability
+    """Simulates the plugin manifest: `retryable_by_capability` {capability: retryable} and
+    `controls_by_capability` {capability: TaskControls}."""
+    def __init__(self, retryable_by_capability=None, controls_by_capability=None):
+        self.manifest_flags = retryable_by_capability
+        self.controls = DEFAULT_CONTROLS if controls_by_capability is None else controls_by_capability
     def is_initialized(self): return True
     async def resolve(self, spec, user_id):
-        manifest = None
-        if self.manifest_flags is not None:
-            flags = self.manifest_flags
-            manifest = SimpleNamespace(get_capability=lambda c: SimpleNamespace(retryable=flags[c]) if c in flags else None)
+        flags, controls = self.manifest_flags or {}, self.controls
+        def get_capability(c):
+            if c in flags or c in controls:
+                return SimpleNamespace(retryable=flags.get(c, True), controls=controls.get(c, TaskControls()))
+            return None
+        manifest = SimpleNamespace(get_capability=get_capability)
         return SimpleNamespace(capability=spec.capability, plugin_id="p1", plugin_manifest=manifest, targets=[])
 
 
@@ -161,9 +175,11 @@ from pai.planning.models import TaskSpec
 from pai.tasks.models import TaskType
 
 
-def spec(i, deps=(), timeout=5, kind=TaskType.ONE_SHOT, capability="notification.send"):
+def spec(i, deps=(), timeout=5, kind=TaskType.ONE_SHOT, capability="notification.send", retry_count=0):
+    # retry_count is explicit: TaskSpec's own default is a product choice (currently 3) and these
+    # tests care about the TaskManager's retry POLICY, which applies when the spec says 0.
     return TaskSpec(id=i, name=i, input=i, type=kind, capability=capability,
-                    depends_on=list(deps), timeout=timeout)
+                    depends_on=list(deps), timeout=timeout, retry_count=retry_count)
 
 
 def frame_dict(f):

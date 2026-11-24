@@ -1,9 +1,9 @@
-from enum import Enum
+from enum import Enum, StrEnum
 
 from pydantic import BaseModel, Field
 
 
-class ShortTermBackend(Enum):
+class ShortTermBackend(StrEnum):
     MEMORY = "memory"
     REDIS = "redis"
     SQLITE = "sqlite"
@@ -15,7 +15,7 @@ class ShortTermMemoryConfig(BaseModel):
     size: int = Field(default=100)
     backend: ShortTermBackend = Field(default=ShortTermBackend.MEMORY)
 
-class LongTermBackend(Enum):
+class LongTermBackend(StrEnum):
     SQLITE = "sqlite"
     POSTGRESQL = "postgresql"
     MONGODB = "mongodb"
@@ -32,13 +32,13 @@ class EpisodicMemoryConfig(BaseModel):
     backend: LongTermBackend = Field(default=LongTermBackend.SQLITE)
     db_url: str = Field(default="./data/episodic.db")   
 
-class VectorStoreProvider(Enum):
+class VectorStoreProvider(StrEnum):
     """Enum-like class for vector store providers."""
     CHROMA = "chroma"
     FAISS = "faiss"
     MILVUS = "milvus"
 
-class EmbeddingModelProvider(Enum):
+class EmbeddingModelProvider(StrEnum):
     """Enum-like class for embedding model providers."""
     OPENAI = "openai"
     COHERE = "cohere"
@@ -69,7 +69,7 @@ class ProceduralMemoryConfig(BaseModel):
     path: str = Field(default="./data/procedural.json")
 
 
-class KnowledgeGraphBackend(Enum):
+class KnowledgeGraphBackend(StrEnum):
     """Enum-like class for knowledge graph backends."""
     NEO4J = "neo4j"
     ARANGO = "arango"
@@ -86,7 +86,7 @@ class KnowledgeGraphConfig(BaseModel):
     username: str | None = Field(default=None)
     password: str | None = Field(default=None)
 
-class MemorySafetyMode(Enum):
+class MemorySafetyMode(StrEnum):
     """What to do with a write that looks like a poisoning attempt."""
     OFF = "off"                   # no checks (tests / debugging only)
     WARN = "warn"                 # log + event, store as-is

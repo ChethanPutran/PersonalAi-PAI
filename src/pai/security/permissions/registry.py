@@ -83,6 +83,10 @@ class PermissionRegistry:
             PermissionDeclaration("system.execute", "Execute system commands", ("execute",), "critical", ("generic",)),
             PermissionDeclaration("shell.execute", "Run shell commands", ("execute",), "critical", ("generic",)),
             PermissionDeclaration("camera.control", "Control the camera", ("control",), "medium", ("device",)),
+            PermissionDeclaration("microphone.control", "Record from the microphone", ("control",), "high", ("device",)),
+            PermissionDeclaration("screen.read", "Capture the screen", ("read",), "high", ("device",)),
+            PermissionDeclaration("input.control", "Type and click on the user's behalf", ("control",), "high", ("device",)),
+            PermissionDeclaration("clipboard.read", "Access the clipboard", ("read",), "medium", ("generic",)),
             PermissionDeclaration("notifications.send", "Send notifications", ("send",), "medium", ("generic",)),
         ]
         for item in defaults:

@@ -33,6 +33,7 @@ class PluginConfig(BaseModel):
             "desktop",
             "files",
             "screen",
+            "input",
             "camera",
             "shell",
         ]

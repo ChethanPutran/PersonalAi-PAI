@@ -15,9 +15,13 @@ class PolicyRepository:
     def all(self):
         return sorted((p for p in self._policies if p.enabled), key=lambda p: p.priority)
     @classmethod
-    def with_builtins(cls, *, role_permissions=None, default_role="user", rules=None, origin_policy=True):
-        """Builtins + optional RBAC (``role_permissions``) + declarative ``rules`` (dicts)."""
-        policies = [SystemRestrictionsPolicy(), RiskPolicy(), ApprovalPolicy(), DefaultDenyPolicy()]
+    def with_builtins(cls, *, role_permissions=None, default_role="user", rules=None, origin_policy=True,
+                      always_approve=None):
+        """Builtins + optional RBAC (``role_permissions``) + declarative ``rules`` (dicts).
+
+        ``always_approve``: the (resource, action) pairs that can never be remembered (None = the strict
+        default); see ``ApprovalPolicy.always_approve_for``."""
+        policies = [SystemRestrictionsPolicy(), RiskPolicy(), ApprovalPolicy(always_approve), DefaultDenyPolicy()]
         if origin_policy:
             policies.append(OriginPolicy())
         if role_permissions is not None:

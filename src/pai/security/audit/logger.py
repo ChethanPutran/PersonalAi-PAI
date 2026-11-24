@@ -59,6 +59,9 @@ class AuditLogger:
             task_id=task_id,
             metadata=metadata or {},
         )
+        # record() used to only log: execution/authorization events never reached the repository.
+        if self.repository is not None:
+            self.repository.append(event)
 
         self._logger.info(
             "AUDIT event=%s user=%s plugin=%s capability=%s "
@@ -103,6 +106,25 @@ class AuditLogger:
             event.request_id, event.subject, event.permission, event.effect, event.reason,
         )
         return event
+
+    def consent_event(
+        self,
+        event_type: AuditEventType,
+        *,
+        user_id: str,
+        plugin_id: str,
+        capability: str,
+        reason: str,
+        device_id: str | None = None,
+        task_id: str | None = None,
+        allowed: bool | None = True,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> AuditEvent:
+        """Record a consent decision (grant / revoke / auto-approval / once). ``metadata`` carries
+        scope, binding and grant id — never raw parameter values."""
+        return self.record(
+            event_type, user_id=user_id, plugin_id=plugin_id, capability=capability,
+            allowed=allowed, reason=reason, device_id=device_id, task_id=task_id, metadata=metadata)
 
     def authorization(
         self,

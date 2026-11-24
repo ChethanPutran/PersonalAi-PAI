@@ -189,6 +189,7 @@ class ExecutorScheduler:
             success=ok,
             output=data.get("output", data.get("result")),
             error=None if ok else str(data.get("error") or "Execution failed"),
+            retryable=bool(data.get("retryable", True)),
             executor_id=executor_id,
             device_id=task.device_id,
         )

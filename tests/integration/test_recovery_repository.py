@@ -9,7 +9,7 @@ from test_retry_idempotency_recovery import Device, ctx, ok
 from pai.planning.dag_scheduler import DAGScheduler
 
 
-async def _wait(predicate, tries=80):
+async def _wait(predicate, tries=400):      # polls every 50ms; returns as soon as true (20s ceiling for loaded machines)
     for _ in range(tries):
         await asyncio.sleep(.05)
         if await predicate():

@@ -1,5 +1,10 @@
-# Build the Linux version of the plugin:
-cd src/pai/plugin_registry/camera/1.0.0/linux/
+#!/usr/bin/env bash
+# Build the Linux camera plugin. Prefer plugin_registry/shared/build_linux.sh (builds in a temp
+# dir and refuses to change a released file); this is the manual equivalent.
+# Build output belongs in artifact/ - the only folder the server packages.
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")"
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
-cp build/libpai_camera.so ./libpai_camera.so
+mkdir -p artifact
+cp build/libpai_camera.so artifact/libpai_camera.so

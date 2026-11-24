@@ -5,11 +5,16 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pai.api.middleware.auth import AuthMiddleware
 from pai.api.middleware.logging import LoggingMiddleware
+from pai.api.routes import agents as agents_routes
 from pai.api.routes import auth, chat, devices, plugins, system, tasks
+from pai.api.routes import consents as consents_routes
 from pai.api.routes.schedules import router as schedules_router
 from pai.api.routes.push_tokens import router as push_tokens_router
 
 from pai.api.routes import observability as observability_routes
+from pai.api.routes import voice as voice_routes
+from pai.api.routes import admin as admin_routes
+from pai.api.admin.static_app import AdminStaticFiles, ADMIN_STATIC_DIR
 from pai.app_context import PAIAppContext
 from pai.config.app import Config
 
@@ -44,12 +49,25 @@ def create_app(config: Config, context: PAIAppContext) -> FastAPI:
     # response status, including any CORS headers.
     app.add_middleware(LoggingMiddleware)
 
+    # Malformed /schedules bodies get the same 422 shape as our own schedule validation.
+    from fastapi.exceptions import RequestValidationError
+    from pai.api.routes.schedules import request_validation_handler
+    app.add_exception_handler(RequestValidationError, request_validation_handler)
+
     # Routers
     app.include_router(auth.router, prefix=config.api.prefix)
     app.include_router(devices.router, prefix=config.api.prefix)
     app.include_router(plugins.router, prefix=config.api.prefix)
     app.include_router(tasks.router, prefix=config.api.prefix)
+    app.include_router(consents_routes.router, prefix=config.api.prefix)
     app.include_router(chat.router, prefix=config.api.prefix)
+    app.include_router(voice_routes.router, prefix=config.api.prefix)
+    app.include_router(agents_routes.router, prefix=config.api.prefix)
+    if config.admin.enabled:
+        app.include_router(admin_routes.router, prefix=config.api.prefix)
+        # JS/CSS modules for the new tabs of the EXISTING admin page (GET {prefix}/system/admin).
+        # The files are public (no data); every API call they make needs an admin bearer token.
+        app.mount("/admin/static", AdminStaticFiles(directory=str(ADMIN_STATIC_DIR)), name="admin-static")
     app.include_router(system.router, prefix=config.api.prefix)
     app.include_router(observability_routes.router, prefix=config.api.prefix)
     app.include_router(schedules_router, prefix=config.api.prefix)

@@ -34,6 +34,8 @@
   "capabilities": [
     {
       "id": "files.list",
+      "taskType": "one_shot",
+      "timeoutSeconds": 60,
       "requireConfirmation": true,
       "description": "List directory contents. Returns one entry per line: path\ttype\tsize.",
       "permissions": ["filesystem"],
@@ -110,6 +112,8 @@
     },
     {
       "id": "files.copy",
+      "taskType": "one_shot",
+      "timeoutSeconds": 120,
       "description": "Copy a file or directory. Creates destination dirs.",
       "requireConfirmation": true,
       "confirmationReason": "Copying files can be sensitive. Please confirm that you want to copy this file or directory.",
@@ -124,6 +128,8 @@
     },
     {
       "id": "files.move",
+      "taskType": "one_shot",
+      "timeoutSeconds": 120,
       "description": "Move/rename a file or directory.",
       "requireConfirmation": true,
       "confirmationReason": "Moving or renaming files can be sensitive. Please confirm that you want to move or rename this file or directory.",

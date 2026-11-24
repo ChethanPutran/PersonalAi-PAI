@@ -6,14 +6,24 @@
   "additionalProperties": false,
   "required": [
     "schemaVersion", "id", "name", "version",
-    "author", "license", "type", "runtime"
+    "author", "license", "type", "runtime", "capabilities"
   ],
   "properties": {
-    "schemaVersion": { "type": "integer", "minimum": 1 },
+    "schemaVersion": { "type": "integer", "minimum": 1, "maximum": 2 },
     "id":            { "type": "string", "minLength": 1, "pattern": "^[a-z][a-z0-9._-]*$" },
     "name":          { "type": "string", "minLength": 1 },
-    "version":       { "type": "string", "minLength": 1 },
+    "version":       { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
     "description":   { "type": "string" },
+    "changelog": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "summary":  { "type": "string" },
+        "features": { "type": "array", "items": { "type": "string" } },
+        "fixes":    { "type": "array", "items": { "type": "string" } },
+        "breaking": { "type": "array", "items": { "type": "string" } }
+      }
+    },
     "author":        { "type": "string", "minLength": 1 },
     "license":       { "type": "string", "minLength": 1 },
     "type": {
@@ -23,11 +33,12 @@
     "runtime": { "$ref": "#/$defs/runtime" },
     "platforms": {
       "type": "object",
+      "propertyNames": { "enum": ["android", "ios", "linux", "macos", "windows"] },
       "additionalProperties": { "$ref": "#/$defs/platformSpec" }
     },
-    "architectures": { "type": "array", "items": { "type": "string" } },
-    "deviceTypes":   { "type": "array", "items": { "type": "string" } },
-    "permissions":   { "type": "array", "items": { "type": "string" } },
+    "architectures": { "type": "array", "items": { "enum": ["arm64", "x86_64", "x86"] } },
+    "deviceTypes":   { "type": "array", "items": { "enum": ["phone", "tablet", "laptop", "desktop", "server", "unknown"] } },
+    "permissions":   { "type": "array", "items": { "$ref": "#/$defs/permissionResource" } },
     "dependencies":  { "type": "array", "items": { "type": "string" } },
     "postInstall": {
       "type": "array",
@@ -37,6 +48,7 @@
     "configSchema": { "type": "object" },
     "capabilities": {
       "type": "array",
+      "minItems": 1,
       "items": { "$ref": "#/$defs/capability" }
     }
   },
@@ -51,19 +63,25 @@
     }
   ],
   "$defs": {
+    "permissionResource": {
+      "enum": ["camera", "microphone", "speaker", "filesystem", "network", "shell", "notifications", "location", "contacts",
+               "calendar", "screen", "clipboard", "input", "device", "process", "system", "storage", "memory", "personal_data"]
+    },
     "runtime": {
       "type": "object",
       "additionalProperties": false,
       "required": ["kind", "nativeModule"],
       "properties": {
         "kind":          { "type": "string", "enum": ["server", "device"] },
-        "nativeModule":  { "type": "string", "minLength": 5 },
-        "minPaiVersion": { "type": "string" }
+        "nativeModule":  { "type": "string", "minLength": 1 },
+        "minPaiVersion": { "type": "string" },
+        "minAppVersion": { "type": "string" }
       }
     },
     "platformSpec": {
       "type": "object",
       "additionalProperties": false,
+      "required": ["artifact", "entrypoint"],
       "properties": {
         "artifact":   { "type": "string" },
         "entrypoint": { "type": "string" }
@@ -87,9 +105,13 @@
       "properties": {
         "id":                  { "type": "string", "minLength": 1 },
         "description":         { "type": "string" },
-        "risk":                { "type": "string", "enum": ["low", "medium", "high"] },
+        "risk":                { "type": "string", "enum": ["low", "medium", "high", "critical"] },
         "requireConfirmation": { "type": "boolean" },
         "retryable":           { "type": "boolean" },
+        "controls":            { "$ref": "#/$defs/controls" },
+        "taskType":            { "type": "string", "enum": ["one_shot", "long_running", "stream"] },
+        "timeoutSeconds":      { "type": "number", "exclusiveMinimum": 0, "maximum": 3600 },
+        "maxGrantScope":       { "type": "string", "enum": ["once", "session", "always"] },
         "confirmationReason":  { "type": "string" },
         "confirmationPreview": { "type": "object" },
         "precondition":        { "$ref": "#/$defs/precondition" },
@@ -97,9 +119,17 @@
         "parameters":          { "$ref": "#/$defs/parametersSchema" }
       }
     },
-    "parametersSchema": {
+    "controls": {
       "type": "object",
       "additionalProperties": false,
+      "properties": {
+        "pause":  { "type": "boolean" },
+        "cancel": { "type": "string", "enum": ["cooperative", "best_effort", "none"] }
+      }
+    },
+    "parametersSchema": {
+      "type": "object",
+      "additionalProperties": true,
       "required": ["type"],
       "properties": {
         "type":       { "const": "object" },
@@ -130,7 +160,13 @@
         },
         "required": { "type": "array", "items": { "type": "string" } },
         "items":    { "$ref": "#/$defs/parameter" }
-      }
+      },
+      "allOf": [
+        { "if": { "properties": { "type": { "const": "array" } }, "required": ["type"] },
+          "then": { "required": ["items"] } },
+        { "if": { "properties": { "type": { "not": { "const": "object" } } }, "required": ["type"] },
+          "then": { "properties": { "required": { "maxItems": 0 } } } }
+      ]
     }
   }
 }

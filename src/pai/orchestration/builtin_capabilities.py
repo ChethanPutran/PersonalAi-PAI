@@ -1,8 +1,11 @@
 """Registry for capabilities implemented natively by the backend."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Optional
+
+from pai.common.enums.task import TaskType
+from pai.common.task_controls import CancelMode, TaskControls
 
 
 @dataclass(frozen=True)
@@ -11,6 +14,14 @@ class BuiltinCapability:
     description: str
     parameters: Dict[str, Any]
     handler: Callable[..., Awaitable[Any]]
+    # What the user may do while it runs. Built-ins run in-process and are cooperative about
+    # cancellation (the await they sit in is interrupted); none can pause unless it opts in AND
+    # its handler checks the pause gate (see PauseGate).
+    controls: TaskControls = field(
+        default_factory=lambda: TaskControls(pause=False, cancel=CancelMode.COOPERATIVE))
+    # How it runs (same meaning as the manifest `taskType`). Declared by the capability, never by the LLM.
+    task_type: TaskType = TaskType.ONE_SHOT
+    timeout_seconds: Optional[float] = None
 
 
 class BuiltinCapabilityRegistry:
@@ -39,6 +50,8 @@ class BuiltinCapabilityRegistry:
                 "id": c.id,
                 "description": c.description,
                 "parameters": c.parameters,
+                "task_type": c.task_type.value,
+                "timeout_seconds": c.timeout_seconds,
                 "targets": [
                     {
                         "plugin_id": "builtin",

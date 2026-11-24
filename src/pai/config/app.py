@@ -1,7 +1,7 @@
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict
 
-from pydantic import Field
+from pydantic import model_validator, Field
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -15,7 +15,7 @@ from pai.config.models.database import DatabaseConfig
 from pai.config.models.features import FeatureFlagsConfig
 from pai.config.models.prompts import PromptsConfig
 from pai.config.models.redis import RedisConfig
-from pai.config.models.llm import LLMProviderConfig
+from pai.config.models.llm import LLMCostConfig, LLMProviderConfig, ModelPrice
 from pai.config.models.memory import MemoryConfig
 from pai.config.models.plugin import PluginConfig
 from pai.config.models.executor import ExecutorConfig
@@ -27,7 +27,11 @@ from pai.config.models.scheduler import SchedulerConfig
 from pai.config.models.security import SecurityConfig
 from pai.config.models.storage import StorageConfig
 from pai.config.models.tasks import TaskConfig
+from pai.config.models.task_events import TaskEventsConfig
 from pai.config.models.tracing import TracingConfig
+from pai.config.models.voice import VoiceConfig
+from pai.config.models.resources import ResourceMonitorConfig
+from pai.config.models.admin import AdminConfig
 
 class SecretSettings(BaseSettings):
     """Sensitive application credentials loaded only from .env."""
@@ -117,7 +121,8 @@ class Config(BaseSettings):
     """Non-sensitive PAI configuration loaded only from YAML."""
 
     model_config = SettingsConfigDict(
-        yaml_file="config/config.yaml",
+        # config.yaml, then the settings saved from the admin panel (they win; the file may not exist)
+        yaml_file=["config/config.yaml", "config/overrides.yaml"],
         yaml_file_encoding="utf-8",
         extra="forbid",
         validate_default=True,
@@ -138,6 +143,14 @@ class Config(BaseSettings):
     context: ContextConfig = Field(default_factory=ContextConfig)
     memory: MemoryConfig
     llm_provider: LLMProviderConfig
+    # Per-role model overrides on the same provider, e.g. {planner: <model>, chat: <model>, agent: <model>}.
+    # A role left out uses llm_provider.model.
+    llm_routes: Dict[str, str] = Field(default_factory=dict)
+    # USD per million tokens, per model id: {<model>: {input_per_million: .., output_per_million: ..}}.
+    llm_pricing: Dict[str, ModelPrice] = Field(default_factory=dict)      # overrides of the prices in models_file
+    # The model registry: which models exist, their capabilities and prices (config/models.yaml).
+    models_file: str = "config/models.yaml"
+    llm_cost: LLMCostConfig = Field(default_factory=LLMCostConfig)
     executor: ExecutorConfig
     plugins: PluginConfig
     devices: DeviceConfig = Field(default_factory=DeviceConfig)
@@ -148,6 +161,10 @@ class Config(BaseSettings):
     tracing: TracingConfig
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
     tasks: TaskConfig = Field(default_factory=TaskConfig)
+    task_events: TaskEventsConfig = Field(default_factory=TaskEventsConfig)
+    voice: VoiceConfig = Field(default_factory=VoiceConfig)
+    resource_monitor: ResourceMonitorConfig = Field(default_factory=ResourceMonitorConfig)
+    admin: AdminConfig = Field(default_factory=AdminConfig)
     features: FeatureFlagsConfig = Field(default_factory=FeatureFlagsConfig)
     prompts: PromptsConfig
 
@@ -156,6 +173,17 @@ class Config(BaseSettings):
         default_factory=lambda: SecretSettings(),
         repr=False,
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_unknown_settings(cls, data: Any) -> Any:
+        """A key no model has (typo, renamed or removed setting) is an error, not a silent no-op."""
+        if isinstance(data, dict):
+            from pai.config.strict import format_unknown, unknown_keys
+            bad = unknown_keys(data, cls)
+            if bad:
+                raise ValueError(f"unknown setting(s) in the configuration: {format_unknown(bad)}")
+        return data
 
     @classmethod
     def settings_customise_sources(
@@ -171,7 +199,8 @@ class Config(BaseSettings):
         # All non-secret configuration comes exclusively from YAML.
         return (
             init_settings,
-            YamlConfigSettingsSource(settings_cls),
+            # deep_merge: a key saved in overrides.yaml replaces only that key, not its whole section
+            YamlConfigSettingsSource(settings_cls, deep_merge=True),
         )
 
     def model_post_init(self, context: Any) -> None:
@@ -182,3 +211,7 @@ class Config(BaseSettings):
         self.memory.knowledge_graph.password = self.secrets.neo4j_password
         
         self.llm_provider.api_key = self.secrets.llm_api_key
+        # AIRouter speech uses the same gateway: reuse the LLM key unless a voice-specific one is set.
+        if (self.voice.airouter.api_key is None and self.llm_provider.provider.value == "airouter"
+                and self.secrets.llm_api_key):
+            self.voice.airouter.api_key = self.secrets.llm_api_key

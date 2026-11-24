@@ -85,6 +85,6 @@
 <string>Need speech recognition access</string>
 
 <key>NSMicrophoneUsageDescription</key>
-<string>Need microphone access</string>
+<string>PAI uses the microphone for hands-free voice conversations with your assistant.</string>
 </dict>
 </plist>

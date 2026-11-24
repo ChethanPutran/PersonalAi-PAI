@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from enum import Enum
+from enum import Enum, StrEnum
 from typing import Any, Dict, Optional
 
 import httpx
 from loguru import logger
 
 
-class ConnectionState(str, Enum):
+class ConnectionState(StrEnum):
     """Connection lifecycle states."""
 
     DISCONNECTED = "disconnected"

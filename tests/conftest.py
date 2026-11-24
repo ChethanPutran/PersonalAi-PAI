@@ -62,7 +62,7 @@ class StubPluginManager:
     def get_catalog(self) -> list:
         return []
 
-    def get_manifest(self, plugin_id: str) -> None:
+    def get_manifest(self, plugin_id: str, version: str | None = None) -> None:
         return None
 
     def get_status(self, *, user_id: str | None = None) -> dict[str, Any]:

@@ -19,6 +19,7 @@ class PluginManifest(BaseModel):
     id: str = Field(min_length=1, pattern=r"^[a-z][a-z0-9._-]*$")
     name: str = Field(min_length=1)
     version: str = Field(min_length=1)
+    changelog: Optional[Changelog] = None
     description: str = ""
     author: str = Field(min_length=1)
     license: str = Field(min_length=1)
@@ -45,6 +46,16 @@ class PluginManifest(BaseModel):
     # ── validators ──────────────────────────────────────────────
     @model_validator(mode="after")
     def _finalize(self) -> "PluginManifest":
+        from pai.version import MANIFEST_SCHEMA_MAX, is_valid_version
+        if not is_valid_version(self.version):
+            raise ValueError(f"version {self.version!r} is not a valid version (use e.g. 1.2.0)")
+        if self.schemaVersion > MANIFEST_SCHEMA_MAX:
+            # Parsed leniently elsewhere (so the catalog can show "needs a newer server"), but a
+            # manifest from the future is never loaded as if we understood it.
+            raise ValueError(
+                f"schemaVersion {self.schemaVersion} is newer than this server supports "
+                f"(max {MANIFEST_SCHEMA_MAX})"
+            )
         # kind ↔ deviceTypes
         if self.runtime.kind is RuntimeKind.SERVER:
             if "server" not in self.deviceTypes:

@@ -1,0 +1,104 @@
+# Version control for the runtime, the manifest schema, the app and every plugin.
+#
+# pyproject.toml ([tool.pai.versions] / [tool.pai.plugins]) is the single source of truth. This workflow fails when
+#   1. a copy of a version drifted from pyproject (pai/version.py, [project].version, manifest.schema.json,
+#      frontend/pubspec.yaml, frontend/lib/core/app_version.dart)         -> run `pai-sync-versions --write`
+#   2. a manifest is not valid for those versions (folder/version/id, schemaVersion range, minPaiVersion/minAppVersion)
+#   3. a RELEASED plugin version was changed (it must be published as a new version), a new version is not higher
+#      than the existing ones, or an update has no changelog.summary
+# Everything runs locally too:  pai-sync-versions && pai-check-plugin-versions
+
+name: versions
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "pyproject.toml"
+      - "src/pai/version.py"
+      - "src/pai/plugins/**"
+      - "plugin_registry/plugins/**"
+      - "frontend/pubspec.yaml"
+      - "frontend/lib/core/app_version.dart"
+      - "config/**"
+      - "src/pai/config/**"
+      - ".github/requirements-tools.txt"
+      - ".github/workflows/versions.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "pyproject.toml"
+      - "src/pai/version.py"
+      - "src/pai/plugins/**"
+      - "plugin_registry/plugins/**"
+      - "frontend/pubspec.yaml"
+      - "frontend/lib/core/app_version.dart"
+      - "config/**"
+      - "src/pai/config/**"
+      - ".github/requirements-tools.txt"
+      - ".github/workflows/versions.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: versions-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  versions:
+    name: versions in sync + plugin version rules
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0              # the released state (base branch / previous commit) is needed
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: .github/requirements-tools.txt
+
+      - name: Install the tools (no heavy runtime dependencies)
+        run: |
+          python -m pip install --upgrade pip
+          pip install --no-deps -e .
+          pip install -r .github/requirements-tools.txt
+
+      - name: Versions in code and app match pyproject.toml
+        run: pai-sync-versions --github
+
+      - name: config/*.yaml match the models (no typo'd or removed settings)
+        run: pai-validate-config
+
+      - name: Plugin manifests and released versions
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          # "released" = the base branch of a pull request, or the commit before a push.
+          if [ "$EVENT" = "pull_request" ]; then
+            pai-check-plugin-versions --base "origin/$BASE_REF" --github
+          elif [ "$EVENT" = "push" ] && [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ]; then
+            pai-check-plugin-versions --base "$BEFORE" --github
+          else
+            echo "::notice::no base to compare with (manual run or a new branch): checking manifests only"
+            pai-check-plugin-versions --no-git --github
+          fi
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "## Versions"
+            echo
+            echo "Source of truth: \`[tool.pai.versions]\` and \`[tool.pai.plugins]\` in pyproject.toml."
+            echo
+            echo '- drift: `pai-sync-versions` (fix with `pai-sync-versions --write`)'
+            echo '- plugin rules: `pai-check-plugin-versions` (a released version never changes: bump it with `python scripts/bump_plugin.py <id> patch`)'
+          } >> "$GITHUB_STEP_SUMMARY"

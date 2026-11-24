@@ -1,5 +1,4 @@
 .env
-example.env
 example2.env
 .idea/*
 docs/*
@@ -8,7 +7,13 @@ data/*
 .venv/*
 src/ai_personal_agent.egg-info/*
 .vscode/*
+config/overrides.yaml
+config/overrides.yaml.bak
 .github/*
+# ...but the CI configuration must be tracked, or GitHub Actions never sees it
+!.github/workflows/
+!.github/dependabot.yml
+!.github/requirements-tools.txt
 .gradle
 .gradle/*
 __pycache__

@@ -4,6 +4,8 @@ import json
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+from pai.utils.sqlite_path import sqlite_path
 from typing import Any, Dict, List, Optional, Tuple
 
 import aiosqlite
@@ -26,7 +28,7 @@ class LongTermMemory:
     """
 
     def __init__(self, config: LongTermMemoryConfig):
-        self.db_path = Path(config.db_url)
+        self.db_path = sqlite_path(config.db_url)
         self._conn: Optional[aiosqlite.Connection] = None
 
     async def _check_connection(self) -> aiosqlite.Connection:

@@ -286,6 +286,12 @@ class TraceStore:
             s.has_llm = True
         if event.kind == "tool.call":
             s.has_tool = True
+        if event.kind == "llm.response":
+            tokens, cost = event.attributes.get("total_tokens"), event.attributes.get("cost_usd")
+            if isinstance(tokens, (int, float)):
+                s.total_tokens += int(tokens)
+            if isinstance(cost, (int, float)):
+                s.cost_usd = round(s.cost_usd + float(cost), 8)
         if event.kind == "trace.end":
             s.ended_at = event.timestamp
             s.duration_ms = event.duration_ms

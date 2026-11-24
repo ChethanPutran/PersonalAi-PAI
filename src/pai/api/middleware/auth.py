@@ -27,12 +27,18 @@ _PUBLIC_PATHS: set[str] = {
     f"{API_PREFIX}/auth/refresh",
     f"{API_PREFIX}/auth/forgot-password",
     f"{API_PREFIX}/auth/reset-password",
-    f"{API_PREFIX}/system/admin"
+    f"{API_PREFIX}/system/admin",
+    f"{API_PREFIX}/system/admin/legacy",
 }
 
 
 # GET {API_PREFIX}/tasks/{session_id}/events (SSE). Nothing else accepts a query-string token.
 _SSE_PATH = re.compile(rf"^{re.escape(API_PREFIX)}/tasks/[^/]+/events$")
+
+
+# Static JS/CSS modules of the admin page's extra tabs. Its API calls (/api/v1/admin/*) still need an
+# admin bearer token; only the files themselves are public.
+_PUBLIC_PREFIXES: tuple[str, ...] = ("/admin/static/",)
 
 
 def _normalize_path(path: str) -> str:
@@ -49,7 +55,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if method == "OPTIONS":
             return await call_next(request)
 
-        if path in _PUBLIC_PATHS:
+        if path in _PUBLIC_PATHS or path.startswith(_PUBLIC_PREFIXES):
             logger.debug("authz: public {} {}", method, path)
             return await call_next(request)
 

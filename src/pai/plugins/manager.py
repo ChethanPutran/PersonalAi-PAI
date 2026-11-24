@@ -16,7 +16,7 @@ from pai.plugins.registry import PluginRegistry
 from pai.plugins.store import PluginArtifactStore
 from pai.storage.models import UserPluginModel
 from pai.storage.repositories.plugin import UserPluginRepository
-from pai.storage.repositories.device_plugin import DevicePluginRepository
+from pai.storage.repositories.device_plugin import PERMISSION_STATES, DevicePluginRepository
 from pai.common.manager import Manager
 
 T = TypeVar("T")
@@ -53,7 +53,8 @@ class PluginManager(Manager):
             self._emit(EventType.PLUGIN_MANAGER_INITIALIZED,{})
 
     async def get_plugin_index_for_device(
-        self, device_platform: str, device_architecture: str, device_type: Optional[str] = None
+        self, device_platform: str, device_architecture: str, device_type: Optional[str] = None,
+        app_version: Optional[str] = None,
     ) -> List[PluginInfo]:
         """
         Return a list of plugins compatible with the given device platform and architecture.
@@ -61,7 +62,8 @@ class PluginManager(Manager):
         if not self._initialized:
             await self.initialize()
 
-        compatible_plugins = await self.registry.get_compatible_plugins(device_platform, device_architecture)
+        compatible_plugins = await self.registry.get_compatible_plugins(
+            device_platform, device_architecture, app_version)
         plugin_index = []
 
         for plugin in compatible_plugins:
@@ -93,13 +95,24 @@ class PluginManager(Manager):
     def get_catalog(self) -> List[PluginInfo]:
         return self.registry.get_catalog()
 
-    def get_manifest(self, plugin_id: str) -> Optional[PluginManifest]:
-        return self.registry.get_manifest(plugin_id)
+    def get_manifest(self, plugin_id: str, version: Optional[str] = None) -> Optional[PluginManifest]:
+        """Manifest of ``version`` (default: newest the runtime can host).
+
+        Anything deciding what a *device* may do must pass the version that device has
+        installed, not rely on the default.
+        """
+        return self.registry.get_manifest(plugin_id, version)
+
+    def get_plugin_version(self, plugin_id: str, version: Optional[str]) -> Optional[PluginInfo]:
+        return self.registry.get_info(plugin_id, version)
+
+    def list_plugin_versions(self, plugin_id: str) -> List[PluginInfo]:
+        return self.registry.list_versions(plugin_id)
     
     async def get_plugin_by_name(self, plugin_name: str, platform: str, architecture: str, version: Optional[str] = None) -> Optional[PluginInfo]:
         if not version:
             return await self.registry.get_latest_plugin(plugin_name, platform, architecture)
-        return await self.registry.get_plugin_at_version(plugin_name, platform, architecture, version)
+        return await self.registry.get_plugin_at_version(plugin_name, version, platform, architecture)
 
     def get_plugin(self, plugin_id: str) -> Optional[PluginInfo]:
         return self.registry.get_plugin(plugin_id)
@@ -440,6 +453,44 @@ class PluginManager(Manager):
 
         return result or {}
 
+    async def report_device_permissions(
+        self, *, device_id: str, plugins: Dict[str, Dict[str, str]],
+    ) -> Dict[str, List[str]]:
+        """Record what the user has allowed ON THE DEVICE, as the device reports it.
+
+        Advisory: the device re-checks before every invoke; this only lets the server stop offering a
+        capability the device would refuse and explain why. A report is trusted for nothing else, so it is
+        deliberately narrow: only plugins INSTALLED on that device, only permissions that plugin's manifest
+        declares, only the three known states. Anything else is ignored (never an error: a device must not
+        be able to make the server reject its whole report because of one odd entry).
+        """
+        updated: List[str] = []
+        ignored: List[str] = []
+
+        async def _do(session: AsyncSession):
+            repo = DevicePluginRepository(session)
+            for plugin_id, perms in plugins.items():
+                record = await repo.get(device_id, plugin_id)
+                if record is None or not record.is_installed:
+                    ignored.append(plugin_id)
+                    continue
+                manifest = (self.registry.get_manifest(plugin_id, record.version)
+                            or self.registry.get_manifest(plugin_id))
+                declared = {str(getattr(p, "value", p)) for p in (manifest.permissions if manifest else [])}
+                clean = {k: v for k, v in perms.items() if k in declared and v in PERMISSION_STATES}
+                if not clean:
+                    ignored.append(plugin_id)
+                    continue
+                await repo.set_permissions(device_id, plugin_id, clean)
+                updated.append(plugin_id)
+
+        await self._with_session(_do)
+        if updated:
+            self._invalidate()          # the router's capability index depends on this
+            self._emit("plugin.permissions_reported", {"device_id": device_id, "plugins": updated},
+                       distributed=False)
+        return {"updated": updated, "ignored": ignored}
+
     async def list_device_plugins(self, device_id: str) -> list[dict]:
         if self._session_factory is None:
             return []
@@ -468,6 +519,10 @@ class PluginManager(Manager):
                     r.installed_at.isoformat() if r.installed_at else None
                 ),
                 "last_error": r.last_error,
+                "permissions": dict(r.permissions or {}),
+                "permissions_reported_at": (
+                    r.permissions_reported_at.isoformat() if r.permissions_reported_at else None
+                ),
             }
             for r in records
         ]

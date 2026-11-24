@@ -1,8 +1,8 @@
-SHELL=shell/1.0.0/linux/libpai_shell.so
-FILES=files/1.0.0/linux/libpai_files.so
-SCREEN=screen/1.0.0/linux/libpai_screen.so
-DESKTOP=desktop/1.0.0/linux/libpai_desktop.so
-CAMERA=camera/1.0.0/linux/libpai_camera.so
+SHELL=plugins/shell/1.0.0/linux/artifact/libpai_shell.so
+FILES=plugins/files/1.0.0/linux/artifact/libpai_files.so
+SCREEN=plugins/screen/1.0.0/linux/artifact/libpai_screen.so
+DESKTOP=plugins/desktop/1.0.0/linux/artifact/libpai_desktop.so
+CAMERA=plugins/camera/1.0.0/linux/artifact/libpai_camera.so
 
 
 # Setup: create test files inside an allowed root

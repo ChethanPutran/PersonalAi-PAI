@@ -18,6 +18,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Awaitable, Callable, Dict, Optional, TypeVar
 
+import contextlib
+
 from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -107,6 +109,8 @@ class Manager(Lifecycle):
         try:
             await self._on_shutdown()
         finally:
+            with contextlib.suppress(Exception):
+                await self.drain_emits(timeout=0.5)
             self._initialized = False
             logger.info("{}: shutdown", self.name)
 

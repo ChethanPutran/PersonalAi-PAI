@@ -18,6 +18,7 @@ SENSITIVE_PERMISSIONS: frozenset[PermissionResource] = frozenset(
         PermissionResource.PROCESS,
         PermissionResource.CLIPBOARD,
         PermissionResource.SCREEN,
+        PermissionResource.INPUT,
     }
 )
 
@@ -33,7 +34,8 @@ MANIFEST_PERMISSION_MAP: dict[str, PermissionResource] = {
     "shell": PermissionResource.SHELL,
     "process": PermissionResource.PROCESS,
     "clipboard": PermissionResource.CLIPBOARD,
-    "screen": PermissionResource.SCREEN
+    "screen": PermissionResource.SCREEN,
+    "input": PermissionResource.INPUT,
 }
 
 def permissions_from_manifest_strings(strings: list[str]) -> frozenset[PermissionResource]:

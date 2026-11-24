@@ -14,6 +14,12 @@ from pai.observability.store import TraceStore
 _current: ContextVar[Optional["_Ctx"]] = ContextVar("pai_trace", default=None)
 
 
+def current_trace_id() -> Optional[str]:
+    """The id of the trace (one goal/request) the running code belongs to, if any."""
+    ctx = _current.get()
+    return ctx.trace_id if ctx is not None else None
+
+
 class _Ctx:
     __slots__ = ("trace_id", "span_id")
     def __init__(self, trace_id: str, span_id: str):
@@ -53,6 +59,11 @@ class NoOpSpan:
 
     async def __aexit__(self, *_args: Any) -> None:
         pass
+
+
+def _plain(value: Any) -> str:
+    """An enum member (or anything else) as the plain str it stands for."""
+    return str(getattr(value, "value", value))
 
 
 class Span:
@@ -216,6 +227,13 @@ class Tracer:
         error: Optional[str] = None,
         duration_ms: Optional[float] = None,
         extra: Optional[Dict[str, Any]] = None,
+        prompt_tokens: Optional[int] = None,
+        completion_tokens: Optional[int] = None,
+        total_tokens: Optional[int] = None,
+        cost_usd: Optional[float] = None,
+        cost_source: Optional[str] = None,
+        route: Optional[str] = None,
+        prompt_breakdown: Optional[Dict[str, int]] = None,
     ) -> None:
         if self.store is None:
             return
@@ -223,11 +241,21 @@ class Tracer:
         if ctx is None:
             return
 
+        # Enums are written as their plain string values (never "LLMProviderName.AIROUTER").
+        provider, model = _plain(provider), _plain(model)
         attrs: Dict[str, Any] = {
             "provider": provider,
             "model": model,
             "prompt": truncate(redact(prompt), max_len=6000),
         }
+        # Tokens and cost are first-class, flat attributes (queryable/summable per event) rather than
+        # buried in `extra`. Absent = not known for this event; cost_usd=None means "no price known".
+        for key, value in (("route", route), ("prompt_tokens", prompt_tokens),
+                           ("completion_tokens", completion_tokens), ("total_tokens", total_tokens),
+                           ("cost_usd", cost_usd), ("cost_source", cost_source),
+                           ("prompt_breakdown", prompt_breakdown)):
+            if value is not None:
+                attrs[key] = value
         if extra:
             attrs.update(truncate(redact(extra), max_len=2000))
         if response is not None:

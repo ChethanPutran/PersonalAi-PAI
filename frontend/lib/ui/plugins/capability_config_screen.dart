@@ -7,6 +7,8 @@ import 'package:flutter/services.dart';
 import '../../plugins/models/plugin_capability.dart';
 import '../../plugins/models/plugin_info.dart';
 import '../../plugins/plugin_manager.dart';
+import '../theme/theme.dart';
+import '../widgets/hud/hud.dart';
 
 class CapabilityConfigScreen extends StatefulWidget {
   final PluginManager manager;
@@ -294,11 +296,11 @@ class _CapabilityConfigScreenState extends State<CapabilityConfigScreen> {
         ),
         children: [
           if (capability.properties.isEmpty)
-            const Padding(
+            Padding(
               padding: EdgeInsets.all(16),
               child: Text(
                 'No parameters',
-                style: TextStyle(color: Colors.grey),
+                style: TextStyle(color: context.pai.muted),
               ),
             )
           else
@@ -482,7 +484,7 @@ class _CapabilityConfigScreenState extends State<CapabilityConfigScreen> {
                   'Default: $defaultValue',
                   style: TextStyle(
                     fontSize: 12,
-                    color: Colors.grey.shade600,
+                    color: context.pai.muted,
                     fontStyle: FontStyle.italic,
                   ),
                 ),
@@ -495,7 +497,7 @@ class _CapabilityConfigScreenState extends State<CapabilityConfigScreen> {
                 description,
                 style: TextStyle(
                   fontSize: 12,
-                  color: Colors.grey.shade600,
+                  color: context.pai.muted,
                 ),
               ),
             ),
@@ -511,9 +513,9 @@ class _CapabilityConfigScreenState extends State<CapabilityConfigScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: Text('Configure: ${widget.plugin.name}'),
+    return HudScaffold(
+      appBar: HudAppBar(
+        titleWidget: Text('Configure: ${widget.plugin.name}'),
         actions: [
           if (!_loading && _error == null)
             IconButton(
@@ -543,7 +545,7 @@ class _CapabilityConfigScreenState extends State<CapabilityConfigScreen> {
                       _error!,
                       textAlign: TextAlign.center,
                       style: const TextStyle(
-                        color: Colors.redAccent,
+                        color: PaiColors.red,
                       ),
                     ),
                   ),

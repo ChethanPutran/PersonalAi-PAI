@@ -15,14 +15,28 @@ from pai.plugins.packager import PackageArtifact, PluginPackager
 from pai.plugins.store import PluginArtifactStore
 from packaging.version import InvalidVersion, Version
 
+from pai.version import RUNTIME_VERSION, Compatibility, check_compatibility, version_key
+from dataclasses import dataclass
+
 
 MANIFEST_FILENAME = "manifest.json"
+
+@dataclass(frozen=True)
+class _Entry:
+    info: PluginInfo
+    manifest: PluginManifest
+    path: Path
+
 
 class PluginRegistry(Lifecycle):
     name = "plugin_registry"
     """
         Discovers plugin manifests and stores in the plugin store.
-        Only latest version of each plugin is kept in the registry. The registry is responsible for:
+        EVERY version found on disk is kept (`_versions`); the flat `_info`/`_manifests`/`_paths`
+        maps and the capability registry point at the newest version this runtime can host.
+        Older versions stay addressable because a device may still have them installed, and
+        what that device can do is decided by the version it actually has. The registry is
+        responsible for:
         - Discovering plugins in the plugins directory
         - Loading and validating plugin manifests
         - Registering plugin metadata in the registry
@@ -45,6 +59,8 @@ class PluginRegistry(Lifecycle):
         self._info: Dict[str, PluginInfo] = {}
         self._manifests: Dict[str, PluginManifest] = {} 
         self._paths: Dict[str, Path] = {}       # id -> plugin dir
+        # plugin id -> version -> entry (all versions on disk)
+        self._versions: Dict[str, Dict[str, _Entry]] = {}
         # capability -> plugin ID -> PluginInfo
         self._capability_registry: Dict[str, Dict[str, PluginInfo]] = {}
         self._initialized = False
@@ -67,6 +83,7 @@ class PluginRegistry(Lifecycle):
         self._capability_registry.clear()
         self._info.clear()
         self._paths.clear()
+        self._versions.clear()
         self._initialized = False
         logger.info("PluginRegistry: shutdown complete")
 
@@ -79,6 +96,7 @@ class PluginRegistry(Lifecycle):
             self._info.clear()
             self._manifests.clear()
             self._paths.clear()
+            self._versions.clear()
             self._capability_registry.clear()
 
             if not self.plugins_dir.exists():
@@ -101,6 +119,7 @@ class PluginRegistry(Lifecycle):
                     logger.warning("failed to ingest {}: {}", plugin_dir.name, exc)
                     failures.append({"plugin": plugin_dir.name, "error": str(exc)})
 
+            self._rebuild_latest()
             span.set_attribute("registered", len(self._info))
             span.set_attribute("failures", failures)
             span.set_attribute("capability_registry_size",
@@ -128,42 +147,51 @@ class PluginRegistry(Lifecycle):
                 if not manifest_path.is_file():
                     continue
 
-                manifest = load_manifest_file(manifest_path)
-
-                platform = DevicePlatform(platform_dir.name)
-
-                artifact = self.packager.package(
-                    manifest=manifest,
-                    version_dir=version_dir,
-                    platform=platform,
-                )
-
-                self._register(manifest, version_dir, artifact)
+                try:
+                    manifest = load_manifest_file(manifest_path)
+                    platform = DevicePlatform(platform_dir.name)
+                    artifact = self.packager.package(
+                        manifest=manifest,
+                        version_dir=version_dir,
+                        platform=platform,
+                    )
+                    self._register(manifest, version_dir, artifact)
+                except Exception as exc:
+                    # One bad version must not hide the plugin's other versions.
+                    logger.warning(
+                        "skipping {}/{}/{}: {}",
+                        plugin_dir.name, version_dir.name, platform_dir.name, exc,
+                    )
 
 
     async def get_compatible_plugins(
-        self, platform: str, architecture: str) -> List[PluginInfo]:
+        self, platform: str, architecture: str, app_version: Optional[str] = None,
+    ) -> List[PluginInfo]:
+        """One entry per plugin for this platform: the newest version this runtime AND the
+        given app can run. A plugin with no runnable version is still listed, flagged
+        ``compatible=False`` with the reason, so the UI can explain instead of hiding it."""
         if not self._initialized:
             await self.initialize()
-        plugins = [
-            p for p in self._info.values()
-            if platform in p.platforms and architecture in p.architectures
-        ]
-        if not plugins:
+        out: List[PluginInfo] = []
+        for plugin_id, versions in self._versions.items():
+            ordered = sorted(versions.values(), key=lambda e: version_key(e.info.version), reverse=True)
+            ordered = [e for e in ordered if platform in e.info.platforms and architecture in e.info.architectures]
+            if not ordered:
+                continue
+            for e in ordered:
+                if self.entry_compatibility(e.manifest, app_version).compatible:
+                    out.append(e.info)
+                    break
+            else:
+                reason = self.entry_compatibility(ordered[0].manifest, app_version).reason
+                out.append(ordered[0].info.model_copy(
+                    update={"compatible": False, "incompatibleReason": reason}))
+        if not out:
             logger.warning(
                 "No compatible plugins found for platform={} architecture={}",
                 platform, architecture,
             )
-            return []
-
-        latest_plugins = {}
-        for p in plugins:
-            if p.id not in latest_plugins or self._version_key(p) > self._version_key(latest_plugins[p.id]):
-                latest_plugins[p.id] = p
-
-        plugins = list(latest_plugins.values())
-
-        return plugins
+        return out
 
     def _check_initialized(self) -> None:
         if not self._initialized:
@@ -182,8 +210,10 @@ class PluginRegistry(Lifecycle):
     ) -> Optional[PluginInfo]:
         if not self._initialized:
             await self.initialize()
-        for p in self._info.values():
-            if p.name == plugin_name and p.version == version and platform in p.platforms and architecture in p.architectures:
+        for versions in self._versions.values():
+            e = versions.get(version)
+            p = e.info if e else None
+            if p and p.name == plugin_name and platform in p.platforms and architecture in p.architectures:
                 return p
         return None
 
@@ -213,47 +243,85 @@ class PluginRegistry(Lifecycle):
         plugin_dir: Path,
         artifact: PackageArtifact,
     ) -> None:
-        if manifest.id in self._manifests:
-            raise ValueError(f"Duplicate plugin ID: {manifest.id}")
+        versions = self._versions.setdefault(manifest.id, {})
+        if manifest.version in versions:
+            raise ValueError(f"Duplicate plugin {manifest.id}@{manifest.version}")
 
-        # build info — packageUrl and checksum 
         package_url = self.artifact_store.url_for(artifact)
         info = manifest.to_info(
             packageUrl=package_url,
             checksum=artifact.checksum,
             size=artifact.size,
         )
-        print(f"Registering plugin {manifest.id} version {manifest.version} with package URL {package_url}")
-        print(info)
-
-        self._info[manifest.id] = info
-        self._manifests[manifest.id] = manifest
-        self._paths[manifest.id] = plugin_dir
-
-        for capability in manifest.capability_names:
-            providers = self._capability_registry.setdefault(capability, {})
-            existing = providers.get(capability)
-            if existing is not None:
-                raise ValueError(
-                    f"Capability '{capability}' is already provided by "
-                    f"plugin '{existing}'"
-                )
-            providers[manifest.id] = info
+        logger.debug("Registering plugin {} version {} with package URL {}", manifest.id, manifest.version, package_url)
+        versions[manifest.version] = _Entry(info=info, manifest=manifest, path=plugin_dir)
 
         logger.info(
-                    "registered {id}@{ver} ({kind}, {n} caps, {size} bytes)",
-                    id=manifest.id,
-                    ver=manifest.version,
-                    kind=manifest.runtime.kind,
-                    n=len(manifest.capabilities),
-                    size=artifact.size,
-                )
-        
+            "registered {id}@{ver} ({kind}, {n} caps, {size} bytes)",
+            id=manifest.id, ver=manifest.version, kind=manifest.runtime.kind,
+            n=len(manifest.capabilities), size=artifact.size,
+        )
+
+    # ── latest / compatibility ──────────────────────────────────
+
+    @staticmethod
+    def entry_compatibility(
+        manifest: PluginManifest, app_version: Optional[str] = None,
+    ) -> Compatibility:
+        return check_compatibility(
+            schema_version=manifest.schemaVersion,
+            min_runtime=manifest.runtime.minPaiVersion,
+            min_app=manifest.runtime.minAppVersion,
+            runtime_version=RUNTIME_VERSION,
+            app_version=app_version,
+        )
+
+    def _rebuild_latest(self) -> None:
+        """Point the flat maps + capability registry at the newest runtime-compatible version."""
+        self._info.clear()
+        self._manifests.clear()
+        self._paths.clear()
+        self._capability_registry.clear()
+        for plugin_id, versions in self._versions.items():
+            ordered = sorted(versions.values(), key=lambda e: version_key(e.info.version), reverse=True)
+            usable = [e for e in ordered if self.entry_compatibility(e.manifest).compatible]
+            # None usable: still expose the newest so the catalog can say WHY it can't be installed,
+            # but never advertise its capabilities to the planner.
+            chosen = (usable or ordered)[0]
+            self._info[plugin_id] = chosen.info
+            self._manifests[plugin_id] = chosen.manifest
+            self._paths[plugin_id] = chosen.path
+            if not usable:
+                logger.warning("{}: no version is compatible with runtime {}", plugin_id, RUNTIME_VERSION)
+                continue
+            for capability in chosen.manifest.capability_names:
+                self._capability_registry.setdefault(capability, {})[plugin_id] = chosen.info
+
+    # ── multi-version access ────────────────────────────────────
+
+    def list_versions(self, plugin_id: str) -> List[PluginInfo]:
+        """Every known version of a plugin, newest first."""
+        entries = self._versions.get(plugin_id, {}).values()
+        return [e.info for e in sorted(entries, key=lambda e: version_key(e.info.version), reverse=True)]
+
+    def get_version_info(self, plugin_id: str, version: Optional[str]) -> Optional[PluginInfo]:
+        if not version:
+            return self._info.get(plugin_id)
+        e = self._versions.get(plugin_id, {}).get(version)
+        return e.info if e else None
+
+    def get_version_manifest(self, plugin_id: str, version: Optional[str]) -> Optional[PluginManifest]:
+        """Manifest of a specific version (``None`` version = newest usable)."""
+        if not version:
+            return self._manifests.get(plugin_id)
+        e = self._versions.get(plugin_id, {}).get(version)
+        return e.manifest if e else None
+
     def get_catalog(self) -> List[PluginInfo]:
         return list(self._info.values())
 
-    def get_info(self, plugin_id: str) -> Optional[PluginInfo]:
-        return self._info.get(plugin_id)
+    def get_info(self, plugin_id: str, version: Optional[str] = None) -> Optional[PluginInfo]:
+        return self.get_version_info(plugin_id, version)
 
     def require_info(self, plugin_id: str) -> PluginInfo:
         info = self._info.get(plugin_id)
@@ -261,8 +329,8 @@ class PluginRegistry(Lifecycle):
             raise ValueError(f"plugin {plugin_id!r} not found")
         return info
     
-    def get_manifest(self, plugin_id: str) -> Optional[PluginManifest]:
-        return self._manifests.get(plugin_id)
+    def get_manifest(self, plugin_id: str, version: Optional[str] = None) -> Optional[PluginManifest]:
+        return self.get_version_manifest(plugin_id, version)
 
     def get_plugins_for_capability(
         self,
@@ -300,9 +368,8 @@ class PluginRegistry(Lifecycle):
 
     def has_plugin(self, plugin_id: str, version: str) -> bool:
         if version is not None:
-            manifest = self._manifests.get(plugin_id)
-            return manifest is not None and manifest.version == version
-        return plugin_id in self._manifests
+            return version in self._versions.get(plugin_id, {})
+        return plugin_id in self._versions
 
     def has_capability(self, capability: str) -> bool:
         return capability in self._capability_registry

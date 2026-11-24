@@ -291,18 +291,30 @@ pai::plugin::ResultMap NotificationsDismiss(
 pai::plugin::ResultMap AppLaunch(
     const pai::plugin::ResultMap& params, std::string& error) {
     if (params.count("url") && !params.at("url").empty()) {
-        auto r = pai::sys::RunCommand({"xdg-open", params.at("url")}, 10);
-        return {
-            {"ok", r.exit_code == 0 ? "true" : "false"},
-            {"url", params.at("url")},
-            {"exit_code", std::to_string(r.exit_code)},
-        };
+        const std::string url = params.at("url");
+        // A local file that does not exist would "succeed" (xdg-open exits 0) yet show nothing.
+        const std::string prefix = "file://";
+        if (url.compare(0, prefix.size(), prefix) == 0) {
+            std::string path = url.substr(prefix.size());
+            if (access(path.c_str(), R_OK) != 0) {
+                error = "file_not_found";
+                return {{"ok", "false"}, {"url", url}, {"error", "file_not_found"}};
+            }
+        }
+        // Fully detached with stdio on /dev/null. The old pipe-capturing RunCommand left the
+        // launched viewer/browser holding pipes we closed on return, so it died on its first
+        // write (SIGPIPE) and "opened" nothing while still reporting exit_code 0.
+        if (!pai::sys::SpawnDetached({"xdg-open", url})) {
+            error = "spawn_failed";
+            return {{"ok", "false"}, {"url", url}, {"error", "spawn_failed"}};
+        }
+        return {{"ok", "true"}, {"url", url}, {"tool", "xdg-open"}};
     }
     if (params.count("app") && !params.at("app").empty()) {
         const std::string app = params.at("app");
 
         // Prefer gtk-launch (resolves .desktop basenames).
-        auto r = pai::sys::RunCommand({"gtk-launch", app}, 10);
+        auto r = pai::sys::RunCommandSilent({"gtk-launch", app}, "", 10);   // no pipes: the app must outlive us
         if (r.exit_code == 0) {
             return {{"ok", "true"}, {"app", app}, {"tool", "gtk-launch"}};
         }

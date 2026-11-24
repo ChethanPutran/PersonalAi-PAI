@@ -4,6 +4,8 @@ import 'package:pai_mobile/models/device.dart';
 import '../../models/user.dart';
 import '../../profile/profile_service.dart';
 import '../../profile/settings_service.dart';
+import '../theme/theme.dart';
+import '../widgets/hud/hud.dart';
 
 class ProfileScreen extends StatefulWidget {
   final ProfileService service;
@@ -127,15 +129,17 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Profile'),
+    return HudScaffold(
+      appBar: HudAppBar(
+        title: 'Profile',
+        automaticallyImplyLeading: false,
         actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh),
+          HudIconButton(
+            icon: Icons.refresh,
             tooltip: 'Refresh',
             onPressed: _loading ? null : _load,
           ),
+          const SizedBox(width: 8),
         ],
       ),
       body: RefreshIndicator(onRefresh: _load, child: _buildBody()),
@@ -144,36 +148,40 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
   Widget _buildBody() {
     if (_loading) {
-      return const Center(child: CircularProgressIndicator());
+      return const HudSkeletonList(count: 3);
     }
     if (_error != null) {
-      return ListView(
-        padding: const EdgeInsets.all(24),
-        children: [
-          const Icon(Icons.error_outline, size: 48, color: Colors.red),
-          const SizedBox(height: 16),
-          Text('Failed to load profile\n\n$_error',
-              textAlign: TextAlign.center),
-          const SizedBox(height: 24),
-          Center(
-            child: ElevatedButton(onPressed: _load, child: const Text('Retry')),
-          ),
-        ],
+      return LayoutBuilder(
+        builder: (context, box) => ListView(
+          children: [
+            SizedBox(
+              height: box.maxHeight,
+              child: HudErrorState(
+                title: 'Failed to load profile',
+                details: _error,
+                onRetry: _load,
+              ),
+            ),
+          ],
+        ),
       );
     }
 
-    return ListView(
+    return Align(
+      alignment: Alignment.topCenter,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 860),
+        child: ListView(
       children: [
         if (_profile != null) _ProfileHeader(profile: _profile!),
-        const Divider(height: 1),
 
         _SectionHeader('My Devices (${_devices.length})'),
         if (_devices.isEmpty)
-          const Padding(
+          Padding(
             padding: EdgeInsets.fromLTRB(16, 0, 16, 16),
             child: Text(
               'No devices registered to this account.',
-              style: TextStyle(color: Colors.grey),
+              style: TextStyle(color: context.pai.muted),
             ),
           )
         else
@@ -209,36 +217,50 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     : null,
               )),
 
-        const Divider(height: 1),
-
         _SectionHeader('Settings'),
-        SwitchListTile(
-          secondary: const Icon(Icons.notifications_outlined),
-          title: const Text('Notifications'),
-          subtitle: const Text('Push alerts for task events'),
-          value: widget.settings.notificationsEnabled,
-          onChanged: widget.settings.setNotificationsEnabled,
-        ),
-        SwitchListTile(
-          secondary: const Icon(Icons.sync),
-          title: const Text('Auto-sync'),
-          subtitle: const Text('Keep plugins and sessions in sync'),
-          value: widget.settings.autoSyncEnabled,
-          onChanged: widget.settings.setAutoSyncEnabled,
-        ),
-        SwitchListTile(
-          secondary: const Icon(Icons.location_on_outlined),
-          title: const Text('Background location'),
-          subtitle: const Text('Allow location-aware capabilities'),
-          value: widget.settings.backgroundLocationEnabled,
-          onChanged: widget.settings.setBackgroundLocationEnabled,
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: PaiSpacing.lg),
+          child: HudPanel(
+            brackets: false,
+            padding: const EdgeInsets.symmetric(vertical: PaiSpacing.xs),
+            child: Column(
+              children: [
+                SwitchListTile(
+                  secondary: const Icon(Icons.notifications_outlined),
+                  title: const Text('Notifications'),
+                  subtitle: const Text('Push alerts for task events'),
+                  value: widget.settings.notificationsEnabled,
+                  onChanged: widget.settings.setNotificationsEnabled,
+                ),
+                const Divider(),
+                SwitchListTile(
+                  secondary: const Icon(Icons.sync),
+                  title: const Text('Auto-sync'),
+                  subtitle: const Text('Keep plugins and sessions in sync'),
+                  value: widget.settings.autoSyncEnabled,
+                  onChanged: widget.settings.setAutoSyncEnabled,
+                ),
+                const Divider(),
+                SwitchListTile(
+                  secondary: const Icon(Icons.location_on_outlined),
+                  title: const Text('Background location'),
+                  subtitle: const Text('Allow location-aware capabilities'),
+                  value: widget.settings.backgroundLocationEnabled,
+                  onChanged: widget.settings.setBackgroundLocationEnabled,
+                ),
+              ],
+            ),
+          ),
         ),
 
-        const Divider(height: 1),
-        const SizedBox(height: 16),
+        const SizedBox(height: PaiSpacing.xl),
         Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16),
-          child: FilledButton.tonalIcon(
+          padding: const EdgeInsets.symmetric(horizontal: PaiSpacing.lg),
+          child: GlowButton(
+            label: 'Sign out',
+            icon: Icons.logout,
+            variant: GlowVariant.danger,
+            expanded: true,
             onPressed: () => _confirm(
               title: 'Sign out?',
               message: 'You will need to sign in again to use PAI.',
@@ -246,15 +268,12 @@ class _ProfileScreenState extends State<ProfileScreen> {
               destructive: true,
               action: widget.onLogout,
             ),
-            icon: const Icon(Icons.logout),
-            label: const Text('Sign out'),
-            style: FilledButton.styleFrom(
-              minimumSize: const Size.fromHeight(48),
-            ),
           ),
         ),
         const SizedBox(height: 32),
       ],
+        ),
+      ),
     );
   }
 }
@@ -268,20 +287,7 @@ class _SectionHeader extends StatelessWidget {
   const _SectionHeader(this.title);
 
   @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 20, 16, 8),
-      child: Text(
-        title.toUpperCase(),
-        style: TextStyle(
-          fontSize: 12,
-          fontWeight: FontWeight.w600,
-          letterSpacing: 0.8,
-          color: Theme.of(context).colorScheme.primary,
-        ),
-      ),
-    );
-  }
+  Widget build(BuildContext context) => HudSectionHeader(title);
 }
 
 class _ProfileHeader extends StatelessWidget {
@@ -292,67 +298,73 @@ class _ProfileHeader extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 24, 16, 24),
-      child: Row(
-        children: [
-          CircleAvatar(
-            radius: 32,
-            backgroundColor: theme.colorScheme.primaryContainer,
-            child: Text(
-              profile.initials,
-              style: TextStyle(
-                fontSize: 26,
-                fontWeight: FontWeight.w600,
-                color: theme.colorScheme.onPrimaryContainer,
+      padding: const EdgeInsets.fromLTRB(PaiSpacing.lg, PaiSpacing.lg, PaiSpacing.lg, 0),
+      child: HudPanel(
+        blur: true,
+        padding: const EdgeInsets.all(PaiSpacing.lg),
+        child: Row(
+          children: [
+            Container(
+              width: 68,
+              height: 68,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: theme.colorScheme.primaryContainer,
+                border: Border.all(color: theme.colorScheme.primary.withValues(alpha: 0.8), width: 1.5),
+                boxShadow: [BoxShadow(color: theme.colorScheme.primary.withValues(alpha: 0.3), blurRadius: 18, spreadRadius: -2)],
+              ),
+              child: Text(
+                profile.initials,
+                style: TextStyle(
+                  fontFamily: PaiFonts.display,
+                  fontSize: 24,
+                  fontWeight: FontWeight.w700,
+                  color: theme.colorScheme.primary,
+                ),
               ),
             ),
-          ),
-          const SizedBox(width: 16),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  profile.email,
-                  style: theme.textTheme.titleMedium
-                      ?.copyWith(fontWeight: FontWeight.w600),
-                  overflow: TextOverflow.ellipsis,
-                ),
-                const SizedBox(height: 4),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 4,
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  children: [
-                    if (profile.isAdmin)
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 8, vertical: 2),
-                        decoration: BoxDecoration(
-                          color: theme.colorScheme.tertiaryContainer,
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                        child: Text(
-                          'Admin',
-                          style: TextStyle(
-                            fontSize: 11,
-                            fontWeight: FontWeight.w600,
-                            color: theme.colorScheme.onTertiaryContainer,
+            const SizedBox(width: PaiSpacing.lg),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    profile.email,
+                    style: theme.textTheme.titleMedium,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  const SizedBox(height: 6),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 4,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      if (profile.isAdmin)
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: PaiColors.amber.withValues(alpha: 0.12),
+                            borderRadius: BorderRadius.circular(4),
+                            border: Border.all(color: PaiColors.amber.withValues(alpha: 0.6)),
+                          ),
+                          child: Text(
+                            'ADMIN',
+                            style: theme.textTheme.labelSmall?.copyWith(color: PaiColors.amber, letterSpacing: 1.6),
                           ),
                         ),
-                      ),
-                    if (profile.createdAt != null)
-                      Text(
-                        'Member since ${_fmtDate(profile.createdAt!)}',
-                        style: theme.textTheme.bodySmall
-                            ?.copyWith(color: theme.colorScheme.outline),
-                      ),
-                  ],
-                ),
-              ],
+                      if (profile.createdAt != null)
+                        Text(
+                          'Member since ${_fmtDate(profile.createdAt!)}',
+                          style: theme.textTheme.bodySmall,
+                        ),
+                    ],
+                  ),
+                ],
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -398,7 +410,14 @@ class _DeviceTileState extends State<_DeviceTile> {
     final hasActions =
         widget.onDisconnect != null || widget.onRemove != null;
 
-    return Column(
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: PaiSpacing.lg, vertical: PaiSpacing.xs + 2),
+      child: HudPanel(
+      brackets: false,
+      padding: EdgeInsets.zero,
+      accent: d.isCurrent ? theme.colorScheme.primary : null,
+      selected: d.isCurrent,
+      child: Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         InkWell(
@@ -418,10 +437,14 @@ class _DeviceTileState extends State<_DeviceTile> {
                           Flexible(
                             child: Text(
                               d.name,
-                              style: theme.textTheme.titleSmall
-                                  ?.copyWith(fontWeight: FontWeight.w600),
+                              style: theme.textTheme.titleMedium,
                               overflow: TextOverflow.ellipsis,
                             ),
+                          ),
+                          const SizedBox(width: 8),
+                          StatusChip(
+                            status: d.connected ? HudStatus.online : HudStatus.offline,
+                            compact: true,
                           ),
                           if (d.isCurrent) ...[
                             const SizedBox(width: 8),
@@ -433,11 +456,11 @@ class _DeviceTileState extends State<_DeviceTile> {
                                 borderRadius: BorderRadius.circular(4),
                               ),
                               child: Text(
-                                'This device',
-                                style: TextStyle(
-                                  fontSize: 10,
-                                  fontWeight: FontWeight.w600,
-                                  color: theme.colorScheme.onPrimaryContainer,
+                                'THIS DEVICE',
+                                style: theme.textTheme.labelSmall?.copyWith(
+                                  fontSize: 10.5,
+                                  letterSpacing: 1.2,
+                                  color: theme.colorScheme.primary,
                                 ),
                               ),
                             ),
@@ -450,8 +473,7 @@ class _DeviceTileState extends State<_DeviceTile> {
                           if (d.subtitleParts.isNotEmpty) d.subtitleParts,
                           d.lastSeenLabel,
                         ].join(' · '),
-                        style: theme.textTheme.bodySmall
-                            ?.copyWith(color: theme.colorScheme.outline),
+                        style: theme.textTheme.bodySmall,
                       ),
                     ],
                   ),
@@ -466,7 +488,7 @@ class _DeviceTileState extends State<_DeviceTile> {
         ),
         if (_expanded)
           Container(
-            color: theme.colorScheme.surfaceContainerHighest.withOpacity(0.3),
+            color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.3),
             padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
             child: Column(
               children: [
@@ -514,6 +536,8 @@ class _DeviceTileState extends State<_DeviceTile> {
             ),
           ),
       ],
+    ),
+      ),
     );
   }
 

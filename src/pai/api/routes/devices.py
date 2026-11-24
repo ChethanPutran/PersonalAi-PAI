@@ -19,7 +19,15 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from pai.api.dependencies import get_current_user, get_db
+from uuid import uuid4
+
+from pai.api.dependencies import get_current_user, get_db, user_is_admin
+from pai.common.enums.permission import Origin
+from pai.orchestration.capability_router import CapabilityNotAvailable
+from pai.orchestration.execution_context import ExecutionContext
+from pai.planning.models import TaskSpec
+from pai.security.consent.models import ConfirmationInfo
+from pai.tasks.models import TaskStatus
 from pai.app_context import get_app_context, PAIAppContext
 from pai.common.enums.device import DeviceArchitecture, DeviceMessageType
 from pai.devices.manager import DeviceManager
@@ -175,70 +183,115 @@ class InvokeRequest(BaseModel):
     capability: str
     parameters: Dict[str, Any] = {}
     timeout_seconds: float = 60.0
+    session_id: Optional[str] = None      # default "tester:<user_id>"
+    wait_seconds: float = 15.0            # how long to wait for the result
 
 
-@router.post("/{device_id}/invoke")
+class InvokeResponse(BaseModel):
+    """Result of the plugin tester's run. It is a REAL task (visible in Tasks, audited)."""
+    task_id: str
+    status: str
+    ok: bool = False
+    device_id: str
+    capability: str
+    result: Optional[Any] = None
+    error: Optional[str] = None
+    awaiting_confirmation: bool = False
+    confirmation: Optional[ConfirmationInfo] = None
+
+
+def _jsonable(value: Any) -> Any:
+    """Make an executor result JSON-safe (it may hold pydantic models / frames / bytes)."""
+    from fastapi.encoders import jsonable_encoder
+    try:
+        return jsonable_encoder(value, custom_encoder={bytes: lambda b: base64.b64encode(b).decode()})
+    except Exception:  # noqa: BLE001 — never 500 on an odd result shape
+        return str(value)
+
+
+def _invoke_response(task: Any, device_id: str, capability: str) -> InvokeResponse:
+    awaiting = task.status == TaskStatus.PAUSED and task.confirmation is not None
+    res = task.result
+    out = None
+    if res is not None:
+        out = _jsonable(res.output if res.output is not None else res.model_dump(mode="json"))
+    return InvokeResponse(
+        task_id=task.id, status=task.status.value, device_id=device_id, capability=capability,
+        ok=task.status == TaskStatus.COMPLETED and (res is None or bool(res.success)),
+        result=out, error=task.error or (res.error if res is not None else None),
+        awaiting_confirmation=awaiting, confirmation=task.confirmation if awaiting else None)
+
+
+@router.post("/{device_id}/invoke", response_model=InvokeResponse)
 async def invoke_on_device(
     device_id: str,
     payload: InvokeRequest,
+    response: Response,
     context: PAIAppContext = Depends(get_app_context),
     user_id: str = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db),
 ):
-    """
-    Run a capability on a device and wait for its result.
-    Synchronous: blocks until the device replies or `timeout_seconds` elapses.
+    """Run a capability on a device THROUGH THE REAL PIPELINE (the plugin tester).
+
+    Same path as every other task: resolve -> authorize (policies, risk, audit) -> task record
+    -> confirmation gate -> execute. The only special case: an ADMIN (decided here from the DB)
+    skips the confirmation prompt; policy DENY still blocks them. A non-admin whose action needs
+    confirmation gets HTTP 202 with ``awaiting_confirmation`` and the ``confirmation`` details;
+    they approve via ``POST /tasks/{task_id}/confirm`` and poll/stream the task.
     """
     dm = context.orchestrator.device_manager
-
     device = await dm.get(device_id)
     if device is None:
         raise HTTPException(404, f"Device '{device_id}' not found")
-    
     if getattr(device, "user_id", None) and device.user_id != user_id:
         raise HTTPException(403, "Device belongs to a different user")
-
     if not await dm.is_connected(device_id):
         raise HTTPException(409, f"Device '{device_id}' is not connected")
 
-    executor_manager = context.orchestrator.executor_manager
-    device_executor = executor_manager.get("device_executor")
-    if device_executor is None or not hasattr(device_executor, "invoke"):
-        raise HTTPException(
-            500, "device_executor with invoke() not available"
-        )
-
-    import asyncio
-    try:
-        result = await device_executor.invoke(
-            device_id=device_id,
-            capability=payload.capability,
-            parameters=payload.parameters,
-            timeout=payload.timeout_seconds,
-        )
-        logger.info(
-            "Invoke result from %s: capability=%s result=%s",
-            device_id, payload.capability, result,
-        )
-    except asyncio.TimeoutError:
-        raise HTTPException(
-            504,
-            f"Device did not reply within {payload.timeout_seconds}s",
-        ) from None
-    except RuntimeError as exc:
-        # DM's send() raises RuntimeError when the socket disappears
-        # between the is_connected check and the actual send.
-        raise HTTPException(409, str(exc)) from exc
-
-    return JSONResponse(
-        content={
-            "ok": True,
-            "device_id": device_id,
-            "capability": payload.capability,
-            "result": result,
-        },
-        # charset=utf-8 tells Dart http to decode as UTF-8, not Latin-1.
-        media_type="application/json; charset=utf-8",
+    is_admin = await user_is_admin(session, user_id)
+    exec_ctx = ExecutionContext(
+        user_id=user_id,
+        session_id=payload.session_id or f"tester:{user_id}",
+        origin=Origin.USER_DIRECT,
+        pre_approved=is_admin,            # set by the server only; never from the request
+        device_id=device_id,
+        # Trusted scope: the device was just checked to be this user's own and online.
+        metadata={"allowed_devices": [device_id]},
     )
+    spec = TaskSpec(
+        id=f"tester_{uuid4().hex[:12]}", name=payload.capability, capability=payload.capability,
+        parameters=dict(payload.parameters), preferred_device=device_id,
+        timeout=payload.timeout_seconds, retry_count=0,
+        metadata={"source": "plugin_tester"},
+    )
+    tm = context.orchestrator.task_manager
+    try:
+        await tm.run(spec, exec_ctx, wait=False)
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except CapabilityNotAvailable as exc:
+        raise HTTPException(409, detail={"code": "capability_unavailable",
+                                         "message": str(exc.error.reason)}) from exc
+    task = await tm.find_by_idempotency_key(
+        f"{exec_ctx.request_id}:{spec.id}", user_id=user_id, session_id=exec_ctx.session_id)
+    if task is None:
+        raise HTTPException(500, "Task was not created")
+
+    # Wait for the result — but not for a human: a pending confirmation returns at once.
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(0.0, min(payload.wait_seconds, payload.timeout_seconds, 120.0))
+    while True:
+        task = await tm.get(task.id)
+        if task.terminal or (task.status == TaskStatus.PAUSED and task.confirmation is not None):
+            break
+        if loop.time() >= deadline:
+            break
+        await asyncio.sleep(0.1)
+
+    out = _invoke_response(task, device_id, payload.capability)
+    if out.awaiting_confirmation:
+        response.status_code = 202
+    return out
 
 
 @router.post("/{device_id}/trust")

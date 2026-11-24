@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from enum import Enum
+from enum import Enum, StrEnum
 from typing import Any, Dict, Optional
 from uuid import uuid4
 
 
-class EventType(str, Enum):
+class EventType(StrEnum):
     """Built-in PAI event types."""
 
     # Tasks
@@ -87,6 +87,8 @@ class EventType(str, Enum):
     PLUGIN_RECONCILED = "plugin.reconciled"
 
     # Chat
+    CHAT_DELTA = "chat.delta"
+    CHAT_REPLY_DONE = "chat.reply_done"
     CHAT_STATUS = "chat.status"
 
 

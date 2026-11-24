@@ -349,6 +349,18 @@ namespace pai::agent
         return;
       }
 
+      if (std::strcmp(method, "permissionStatus") == 0)
+      {
+        // Read-only (no prompt): {"permissions": [...]} -> {perm: "granted"|"denied"|"pending"}.
+        std::vector<std::string> perms;
+        if (args && fl_value_get_type(args) == FL_VALUE_TYPE_MAP)
+        {
+          perms = GetStrList(fl_value_lookup_string(args, "permissions"));
+        }
+        ReplyMap(call, self->permissions.PermissionStatus(perms));
+        return;
+      }
+
       if (std::strcmp(method, "grantPermissions") == 0)
       {
         std::vector<std::string> perms;
@@ -370,6 +382,7 @@ namespace pai::agent
           perms = GetStrList(fl_value_lookup_string(args, "permissions"));
         }
         self->permissions.SetDecisions(perms, /*allow=*/false);
+        self->permissions.ApplyEnvBridges(); // a revoke clears PAI_*_CONSENT immediately
         ReplyMap(call, {{"ok", "true"}, {"denied", JoinList(perms)}});
         return;
       }

@@ -19,7 +19,7 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from enum import Enum
+from enum import Enum, StrEnum
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import select
@@ -31,7 +31,7 @@ from pai.storage.models import PluginAuditModel, TrustedDeviceModel
 logger = logging.getLogger(__name__)
 
 
-class Decision(str, Enum):
+class Decision(StrEnum):
     ALLOW = "allow"
     CONFIRM = "confirm"
     DENY = "deny"

@@ -78,6 +78,11 @@ class BaseExecutor(ABC):
         self._running = False
         logger.info("Executor stopped: {}", self.name)
 
+    #: True if pause/cancel are acknowledged by a remote peer (device control_ack). In-process
+    #: executors have no ack protocol: for them the task manager treats "the awaiting coroutine
+    #: really unwound" as the acknowledgement.
+    supports_control_ack: bool = False
+
     async def pause_task(self, task_id: str) -> bool:
         """
         Pause a running task. Returns True if paused, False if the

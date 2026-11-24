@@ -1,10 +1,10 @@
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import Enum, StrEnum
 from typing import Any
 
 from pai.common.enums.permission import RiskLevel
 
-class DecisionEffect(str, Enum):
+class DecisionEffect(StrEnum):
     ALLOW = "allow"
     DENY = "deny"
     APPROVAL_REQUIRED = "approval_required"
@@ -20,6 +20,9 @@ class AuthorizationDecision:
     token: str | None = None
     tokens: list[str] = field(default_factory=list)       # one signed token per permission
     confirmation_reason: str | None = None
+    # Set when a standing ConsentGrant (session / always) is what allowed this call; the task
+    # manager counts one use per run from this.
+    consent_grant_id: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @property

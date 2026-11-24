@@ -1,6 +1,8 @@
 """Executor that runs built-in capabilities in-process (no device)."""
 from __future__ import annotations
 
+import asyncio
+import inspect
 import uuid
 from typing import Any, Dict
 
@@ -10,6 +12,40 @@ from pai.executors.base import BaseExecutor
 from pai.orchestration.builtin_capabilities import BuiltinCapabilityRegistry
 
 
+def _accepts_pause(handler: Any) -> bool:
+    try:
+        params = inspect.signature(handler).parameters
+    except (TypeError, ValueError):
+        return False
+    return "pause" in params or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
+class PauseGate:
+    """Cooperative pause for in-process capabilities.
+
+    The handler calls ``await pause.checkpoint()`` between units of work; while the user has the
+    task paused the call blocks there, and continues on resume. A capability that never calls it
+    must not declare ``controls.pause`` (the API would then refuse the pause honestly).
+    """
+
+    def __init__(self) -> None:
+        self._running = asyncio.Event()
+        self._running.set()
+
+    @property
+    def paused(self) -> bool:
+        return not self._running.is_set()
+
+    def pause(self) -> None:
+        self._running.clear()
+
+    def resume(self) -> None:
+        self._running.set()
+
+    async def checkpoint(self) -> None:
+        await self._running.wait()
+
+
 class BuiltinExecutor(BaseExecutor):
     def __init__(self, registry: BuiltinCapabilityRegistry) -> None:
         super().__init__(
@@ -17,6 +53,7 @@ class BuiltinExecutor(BaseExecutor):
             executor_id=str(uuid.uuid4()),
         )
         self.registry = registry
+        self._gates: Dict[str, PauseGate] = {}      # task_id -> gate of the call in flight
 
     # ------------------------------------------------------------------
     # BaseExecutor contract
@@ -44,6 +81,7 @@ class BuiltinExecutor(BaseExecutor):
                     f"No built-in capability '{cap_id}'. Known: "
                     f"{sorted(c.id for c in self.registry.list_all())}"
                 ),
+                "retryable": False,       # a missing capability will still be missing next time
             }
 
         # TaskManager always hands us a Task model, but be defensive
@@ -69,17 +107,27 @@ class BuiltinExecutor(BaseExecutor):
             cap_id, task_id, user_id, params,
         )
 
+        gate = PauseGate()
+        if task_id:
+            self._gates[task_id] = gate
         try:
-            result = await cap.handler(
-                params, user_id=user_id, task=task,
-            )
+            kwargs: Dict[str, Any] = {"user_id": user_id, "task": task}
+            if _accepts_pause(cap.handler):      # handlers written before pause support don't take it
+                kwargs["pause"] = gate
+            result = await cap.handler(params, **kwargs)
         except Exception as exc:
             logger.exception("BuiltinExecutor: {} failed", cap_id)
             return {
                 "status": "failed",
                 "capability": cap_id,
                 "error": f"{type(exc).__name__}: {exc}",
+                # Bad input fails identically every time: do not back off and retry it.
+                "retryable": not isinstance(exc, (ValueError, TypeError, KeyError)),
             }
+
+        finally:
+            if task_id:
+                self._gates.pop(task_id, None)
 
         return {
             "status": "success",
@@ -108,14 +156,25 @@ class BuiltinExecutor(BaseExecutor):
         )
 
     # ------------------------------------------------------------------
-    # Task control — no-ops (built-ins are atomic)
+    # Task control
     # ------------------------------------------------------------------
+    # Cancel needs nothing here: the task manager cancels the awaiting coroutine, which
+    # interrupts the handler at its next await. Pause is cooperative through the gate
+    # (only meaningful for capabilities that declare controls.pause and call checkpoint()).
 
     async def cancel_task(self, task_id: str) -> bool:
         return False
 
     async def pause_task(self, task_id: str) -> bool:
-        return False
+        gate = self._gates.get(task_id)
+        if gate is None:
+            return False
+        gate.pause()
+        return True
 
     async def resume_task(self, task_id: str) -> bool:
-        return False
+        gate = self._gates.get(task_id)
+        if gate is None:
+            return False
+        gate.resume()
+        return True

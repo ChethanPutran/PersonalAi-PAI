@@ -26,6 +26,17 @@ class ScopeContext(BaseModel):
         meta = getattr(ctx, "metadata", None) or {}
         return cls(**{k: list(meta[k]) for k in cls.model_fields if k in meta})
 
+    def with_device(self, device_id: Optional[str]) -> "ScopeContext":
+        """This scope plus the device the SERVER selected for the run.
+
+        The DeviceSelector only chooses among the user's own connected devices, so the chosen
+        target is trusted; without it every device-scoped permission (camera, device control)
+        is denied with "Device is not allowlisted" on the chat/plan/voice paths.
+        """
+        if not device_id or device_id in self.allowed_devices:
+            return self
+        return self.model_copy(update={"allowed_devices": [*self.allowed_devices, device_id]})
+
 
 class ManifestFacts(BaseModel):
     """Trusted facts taken from the plugin manifest / the approving user.

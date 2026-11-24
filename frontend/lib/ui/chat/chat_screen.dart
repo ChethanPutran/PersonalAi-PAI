@@ -1,12 +1,21 @@
-import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:pai_mobile/auth/auth_service.dart';
 import 'package:pai_mobile/chat/chat_status_service.dart';
+import 'package:pai_mobile/core/api/api_client.dart';
 import 'package:pai_mobile/models/chat.dart';
 import 'package:pai_mobile/tasks/confirmation_service.dart';
+import 'package:pai_mobile/ui/plugins/permissions/confirmation_dialog.dart';
+
+import 'package:uuid/uuid.dart';
 
 import '../../chat/chat_service.dart';
+import '../../chat/chat_stream.dart';
+import '../shell/pai_shell.dart' show PaiBrandMark;
+import '../theme/theme.dart';
+import '../voice/voice_screen.dart';
+import '../widgets/hud/hud.dart';
+import '../widgets/markdown/markdown.dart';
 
 
 class ChatScreen extends StatefulWidget {
@@ -17,7 +26,11 @@ class ChatScreen extends StatefulWidget {
     super.key,
     required this.service,
     required this.deviceId,
+    this.statusServiceFactory,
   });
+
+  /// Builds the live-status service for a session. Defaults to the real WebSocket-backed one; tests inject a fake.
+  final ChatStatusService Function(ApiClient api, String sessionId)? statusServiceFactory;
 
   @override
   State<ChatScreen> createState() => _ChatScreenState();
@@ -62,39 +75,16 @@ void _onConfirmationChanged() {
 }
 
 Future<void> _showConfirmationDialog(PendingConfirmation p) async {
-  final params = const JsonEncoder.withIndent('  ').convert(p.parameters);
-  final allow = await showDialog<bool>(
-    context: context,
-    barrierDismissible: false,
-    builder: (_) => AlertDialog(
-      title: Text('Approve ${p.capability}?'),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          if (p.reason.isNotEmpty) Text(p.reason),
-          const SizedBox(height: 8),
-          const Text('Parameters:', style: TextStyle(fontWeight: FontWeight.w600)),
-          SelectableText(params, style: const TextStyle(fontFamily: 'monospace', fontSize: 12)),
-        ],
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(false),
-          child: const Text('Deny'),
-        ),
-        FilledButton(
-          onPressed: () => Navigator.of(context).pop(true),
-          child: const Text('Approve'),
-        ),
-      ],
-    ),
+  final svc = _confirmationService;
+  if (svc == null || !mounted) return;
+  // The same approval dialog the plugin tester uses: what will run, how risky it is, and
+  // (when the server allows) "once / this session / always" with parameter binding.
+  await showConfirmationDialog(
+    context,
+    request: p.request,
+    onConfirm: svc.confirmWith,
+    onDeny: svc.deny,
   );
-  if (allow == true) {
-    await _confirmationService?.confirm();
-  } else {
-    await _confirmationService?.deny();
-  }
 }
 
  @override
@@ -132,6 +122,12 @@ Future<void> _initStatusService() async {
     return;
   }
 
+  await _attachLiveServices(sid);
+}
+
+/// (Re)creates the live-status and confirmation services for [sid] and connects them. Does NOT check that the
+/// session exists on the server: a brand-new chat attaches them BEFORE its first message creates the session.
+Future<void> _attachLiveServices(String sid) async {
   // Clean up old instances
   _statusService?.dispose();
   _confirmationService?.removeListener(_onConfirmationChanged);
@@ -139,10 +135,11 @@ Future<void> _initStatusService() async {
 
 
   // Initialize fresh services with the active session ID
-  _statusService = ChatStatusService(
-    api: widget.service.api,
-    sessionId: sid,
-  );
+  _statusService = widget.statusServiceFactory?.call(widget.service.api, sid) ??
+      ChatStatusService(
+        api: widget.service.api,
+        sessionId: sid,
+      );
 
   _confirmationService = ConfirmationService(
     api: widget.service.api,
@@ -264,17 +261,25 @@ Future<void> _loadSessionsAndCurrent() async {
         id: 'local-${DateTime.now().microsecondsSinceEpoch}',
         role: 'user',
         content: text,
-        createdAt: DateTime.now(),
+        createdAt: PaiClock.now(),
       ));
       loading = true;
     });
     _scrollToBottom();
 
     try {
-      final res = await widget.service.sendMessage(
-        deviceId: widget.deviceId,
-        message: text,
-      );
+      // A new chat has no session yet. Pick its id now and open the live-status (and confirmation) sockets
+      // BEFORE the first POST, so the first message gets the same stage-by-stage status as every later one.
+      // The server only forwards events to sockets that are already subscribed, hence the (bounded) wait.
+      if (widget.service.sessionId == null) {
+        final sid = widget.service.beginClientSession();
+        await _attachLiveServices(sid);
+        await _statusService?.waitUntilConnected();
+      }
+
+      // The reply streams in token-by-token; `_runTurn` falls back to the
+      // plain POST /chat if streaming is unavailable.
+      await _runTurn(text);
 
       // Clear the status bubble now that the reply has arrived. The
       // service also auto-clears after ~800ms if "done" arrives before
@@ -282,14 +287,6 @@ Future<void> _loadSessionsAndCurrent() async {
       _statusService?.clear();
 
       if (!mounted) return;
-      setState(() {
-        messages.add(ChatMessage(
-          id: 'local-${DateTime.now().microsecondsSinceEpoch}',
-          role: 'assistant',
-          content: res.message,
-          createdAt: DateTime.now(),
-        ));
-      });
       _scrollToBottom();
 
       // Refresh the session list so a new title/count shows up.
@@ -318,13 +315,93 @@ Future<void> _loadSessionsAndCurrent() async {
           id: 'err-${DateTime.now().microsecondsSinceEpoch}',
           role: 'assistant',
           content: 'Error: $e',
-          createdAt: DateTime.now(),
+          createdAt: PaiClock.now(),
         ));
       });
       _scrollToBottom();
     } finally {
       if (mounted) setState(() => loading = false);
     }
+  }
+
+  /// Sends [text] and renders the assistant reply as it streams in.
+  ///
+  /// Falls back to the non-streaming POST only when the stream failed before
+  /// producing anything; both calls carry the same Idempotency-Key, so the goal
+  /// can never run twice. If the stream breaks mid-reply, the partial text stays
+  /// and an error note is appended (re-sending would duplicate the turn).
+  Future<void> _runTurn(String text) async {
+    final key = const Uuid().v4();
+    final msgId = 'local-${DateTime.now().microsecondsSinceEpoch}';
+    final buf = StringBuffer();
+    var index = -1;
+    var gotAny = false;
+
+    void showAssistant(String content, {String? id}) {
+      if (!mounted) return;
+      final msg = ChatMessage(
+        id: id ?? msgId,
+        role: 'assistant',
+        content: content,
+        createdAt: PaiClock.now(),
+      );
+      setState(() {
+        if (index < 0) {
+          messages.add(msg);
+          index = messages.length - 1;
+        } else {
+          messages[index] = msg;
+        }
+      });
+      _scrollToBottom();
+    }
+
+    try {
+      await for (final ev in widget.service.sendMessageStream(
+        deviceId: widget.deviceId,
+        message: text,
+        idempotencyKey: key,
+      )) {
+        switch (ev) {
+          case ChatStreamStatus():
+            break; // the status WS already renders progress
+          case ChatStreamDelta():
+            gotAny = true;
+            buf.write(ev.delta);
+            showAssistant(buf.toString());
+          case ChatStreamDone():
+            gotAny = true;
+            showAssistant(ev.response.message); // authoritative final text
+          case ChatStreamError():
+            throw StateError(ev.message);
+        }
+      }
+      if (!gotAny) throw StateError('Empty stream');
+    } catch (e) {
+      if (gotAny) {
+        showAssistant('${buf.toString()}\n\n[Connection interrupted: $e]');
+        return;
+      }
+      debugPrint('[ChatScreen] streaming unavailable ($e); falling back to POST');
+      final res = await widget.service.sendMessage(
+        deviceId: widget.deviceId,
+        message: text,
+        idempotencyKey: key,
+      );
+      showAssistant(res.message);
+    }
+  }
+
+  Future<void> _openVoice() async {
+    await VoiceScreen.open(
+      context,
+      chat: widget.service,
+      deviceId: widget.deviceId,
+    );
+    // Voice turns were stored in this chat session: pull them in.
+    if (!mounted) return;
+    await _loadSessionsAndCurrent();
+    await _reconnectStatusService();
   }
 
   // -------------------------------------------------------------------
@@ -348,14 +425,31 @@ Future<void> _loadSessionsAndCurrent() async {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('PAI')),
-      drawer: _buildDrawer(context),
-      body: Column(
-        children: [
-          Expanded(child: _buildMessageList(context)),
-          _buildInputRow(context),
+    return HudScaffold(
+      appBar: HudAppBar(
+        title: 'Assistant',
+        actions: [
+          HudIconButton(
+            tooltip: 'Voice conversation',
+            icon: Icons.graphic_eq,
+            active: true,
+            onPressed: _openVoice,
+          ),
+          const SizedBox(width: 8),
         ],
+      ),
+      drawer: _buildDrawer(context),
+      body: Align(
+        alignment: Alignment.topCenter,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 860),
+          child: Column(
+            children: [
+              Expanded(child: _buildMessageList(context)),
+              _buildInputRow(context),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -365,26 +459,31 @@ Future<void> _loadSessionsAndCurrent() async {
     // `sessions[i]` — a mismatch that threw on first open. This shows
     // sessions, which is what a chat drawer should list.
     return Drawer(
+      backgroundColor: PaiColors.bg1,
+      shape: const RoundedRectangleBorder(),
       child: SafeArea(
         child: Column(
           children: [
-            ListTile(
-              leading: const Icon(Icons.add),
-              title: const Text('New chat'),
-              onTap: _newChat,
+            const SizedBox(height: PaiSpacing.lg),
+            const PaiBrandMark(),
+            const SizedBox(height: PaiSpacing.lg),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: PaiSpacing.lg),
+              child: GlowButton(
+                label: 'New chat',
+                icon: Icons.add,
+                expanded: true,
+                variant: GlowVariant.outline,
+                onPressed: _newChat,
+              ),
             ),
-            const Divider(height: 1),
+            const HudSectionHeader('Conversations'),
             Expanded(
               child: sessions.isEmpty
-                  ? const Center(
-                      child: Padding(
-                        padding: EdgeInsets.all(24),
-                        child: Text(
-                          'No chats yet.\nStart a conversation.',
-                          textAlign: TextAlign.center,
-                          style: TextStyle(color: Colors.grey),
-                        ),
-                      ),
+                  ? const HudEmptyState(
+                      icon: Icons.forum_outlined,
+                      title: 'No chats yet',
+                      message: 'Start a conversation.',
                     )
                   : ListView.builder(
                       itemCount: sessions.length,
@@ -428,158 +527,265 @@ Future<void> _loadSessionsAndCurrent() async {
     );
   }
 
+  static const _suggestions = [
+    'What can you do?',
+    'Take a photo',
+    'Remind me to call Mom at 6pm',
+    'Show my recent tasks',
+  ];
+
   Widget _buildMessageList(BuildContext context) {
+    if (messages.isEmpty && !loading) {
+      return _buildEmpty(context);
+    }
     // Always reserve one slot at the bottom for the status bubble.
     // When there's no live status, the builder returns a zero-height
     // SizedBox — the slot is invisible but avoids rebuilding the
     // ListView's itemCount on every status change.
     return ListView.builder(
       controller: scrollController,
+      padding: const EdgeInsets.symmetric(horizontal: PaiSpacing.lg, vertical: PaiSpacing.md),
       itemCount: messages.length + 1,
       itemBuilder: (_, i) {
         if (i == messages.length) {
           return _buildStatusBubble();
         }
-        return _buildMessageBubble(context, messages[i]);
+        final m = messages[i];
+        final isLast = i == messages.length - 1;
+        return ChatMessageBubble(
+          message: m,
+          // The assistant message at the end of the list is still arriving while a turn is running.
+          streaming: loading && isLast && m.role != 'user',
+        );
       },
     );
   }
 
-  Widget _buildMessageBubble(BuildContext context, ChatMessage m) {
-    final isUser = m.role == 'user';
-    return Align(
-      alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
-      child: Container(
-        margin: const EdgeInsets.all(8),
-        padding: const EdgeInsets.all(12),
-        constraints: BoxConstraints(
-          maxWidth: MediaQuery.of(context).size.width * 0.75,
+  Widget _buildEmpty(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Center(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(PaiSpacing.xl),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const ArcReactorOrb(state: OrbState.idle, size: 132),
+            const SizedBox(height: PaiSpacing.lg),
+            Text('HOW CAN I HELP?',
+                style: Theme.of(context).textTheme.titleLarge?.copyWith(color: scheme.primary, letterSpacing: 4)),
+            const SizedBox(height: PaiSpacing.xs),
+            Text('Type a request, or tap the waveform to talk.',
+                style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: scheme.onSurfaceVariant)),
+            const SizedBox(height: PaiSpacing.xl),
+            Wrap(
+              alignment: WrapAlignment.center,
+              spacing: PaiSpacing.sm,
+              runSpacing: PaiSpacing.sm,
+              children: [
+                for (final text in _suggestions)
+                  ActionChip(
+                    label: Text(text),
+                    avatar: Icon(Icons.north_east, size: 14, color: scheme.primary),
+                    onPressed: () => setState(() => controller.text = text),
+                  ),
+              ],
+            ),
+          ],
         ),
-        decoration: BoxDecoration(
-          color: isUser
-              ? Theme.of(context).colorScheme.primaryContainer
-              : Theme.of(context).colorScheme.surfaceContainerHighest,
-          borderRadius: BorderRadius.circular(12),
-        ),
-        child: Text(m.content),
       ),
     );
   }
 
-Widget _buildStatusBubble() {
-  final svc = _statusService;
+  Widget _buildStatusBubble() {
+    final svc = _statusService;
 
-  // No WS yet (first message in a new chat) — use the POST loading
-  // flag as a coarse "Working…" indicator. Coarser than the WS's
-  // stage-by-stage updates, but better than nothing.
-  if (svc == null) {
-    if (!loading) return const SizedBox.shrink();
-    final color = Theme.of(context).colorScheme.primary;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          SizedBox(
-            width: 14,
-            height: 14,
-            child: CircularProgressIndicator(
-              strokeWidth: 2,
-              valueColor: AlwaysStoppedAnimation(color),
-            ),
-          ),
-          const SizedBox(width: 8),
-          Flexible(
-            child: Text(
-              'Working…',
-              style: TextStyle(
-                fontSize: 13,
-                color: color,
-                fontStyle: FontStyle.italic,
-              ),
-            ),
-          ),
-        ],
-      ),
+    // No WS yet (first message in a new chat) — use the POST loading
+    // flag as a coarse "Working…" indicator. Coarser than the WS's
+    // stage-by-stage updates, but better than nothing.
+    if (svc == null) {
+      if (!loading) return const SizedBox.shrink();
+      // Once the assistant's text is arriving, its blinking cursor says "working".
+      if (messages.isNotEmpty && messages.last.role != 'user') return const SizedBox.shrink();
+      return const _StatusLine(message: 'Working…');
+    }
+
+    // WS is live — show real status events.
+    return ListenableBuilder(
+      listenable: svc,
+      builder: (_, _) {
+        final status = svc.current;
+        if (status == null || status.isTerminal) {
+          // The request is out but the first stage has not arrived yet: say so instead of showing nothing.
+          final waitingForFirstStage = status == null &&
+              loading &&
+              (messages.isEmpty || messages.last.role == 'user');
+          return waitingForFirstStage ? const _StatusLine(message: 'Working…') : const SizedBox.shrink();
+        }
+        return _StatusLine(message: status.message, failure: status.isFailure);
+      },
     );
   }
-
-  // WS is live — show real status events.
-  return ListenableBuilder(
-    listenable: svc,
-    builder: (_, _) {
-      final status = svc.current;
-      if (status == null || status.isTerminal) {
-        return const SizedBox.shrink();
-      }
-      return _StatusBubble(status: status);
-    },
-  );
-}
 
   Widget _buildInputRow(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
     // `loading` is the only gate — the status service is informational.
     // Blocking send on `statusService.isWorking` would race: the first
     // "planning" event arrives *after* the POST starts.
     return SafeArea(
       top: false,
-      child: Row(
-        children: [
-          Expanded(
-            child: TextField(
-              controller: controller,
-              decoration: const InputDecoration(hintText: 'Ask PAI...'),
-              onSubmitted: (_) => _send(),
-              enabled: !loading,
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(PaiSpacing.lg, PaiSpacing.sm, PaiSpacing.sm, PaiSpacing.md),
+        decoration: BoxDecoration(
+          border: Border(top: BorderSide(color: PaiColors.border.withValues(alpha: 0.5))),
+        ),
+        child: Row(
+          children: [
+            Expanded(
+              child: TextField(
+                controller: controller,
+                style: Theme.of(context).textTheme.bodyLarge,
+                decoration: InputDecoration(
+                  hintText: loading ? 'PAI is responding…' : 'Ask PAI…',
+                  prefixIcon: Icon(Icons.chevron_right, color: scheme.primary),
+                ),
+                onSubmitted: (_) => _send(),
+                enabled: !loading,
+              ),
             ),
-          ),
-          IconButton(
-            onPressed: loading ? null : _send,
-            icon: const Icon(Icons.send),
-          ),
-        ],
+            const SizedBox(width: PaiSpacing.sm),
+            HudIconButton(
+              tooltip: 'Send',
+              icon: Icons.arrow_upward_rounded,
+              filled: true,
+              active: true,
+              onPressed: loading ? null : _send,
+            ),
+          ],
+        ),
       ),
     );
   }
 }
 
-
 // =====================================================================
-// Status bubble
+// Message bubble
 // =====================================================================
 
-class _StatusBubble extends StatelessWidget {
-  final ChatStatus status;
-  const _StatusBubble({required this.status});
+/// One chat message. Public so widget tests can render it without the whole screen.
+@visibleForTesting
+class ChatMessageBubble extends StatelessWidget {
+  final ChatMessage message;
+  final bool streaming;
+  const ChatMessageBubble({super.key, required this.message, required this.streaming});
+
+  static String _time(DateTime t) {
+    final l = t.toLocal();
+    return '${l.hour.toString().padLeft(2, '0')}:${l.minute.toString().padLeft(2, '0')}';
+  }
 
   @override
   Widget build(BuildContext context) {
-    final color = status.isFailure
-        ? Colors.red.shade400
-        : Theme.of(context).colorScheme.primary;
+    final scheme = Theme.of(context).colorScheme;
+    final text = Theme.of(context).textTheme;
+    final isUser = message.role == 'user';
+    final accent = isUser ? PaiColors.teal : scheme.primary;
+    final maxW = (MediaQuery.sizeOf(context).width * 0.82).clamp(0.0, 640.0);
 
+    return Align(
+      alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: PaiSpacing.sm),
+        child: ConstrainedBox(
+          constraints: BoxConstraints(maxWidth: maxW),
+          child: Semantics(
+            container: true,
+            label: '${isUser ? 'You' : 'Assistant'} said',
+            child: Column(
+              crossAxisAlignment: isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 4, left: 2, right: 2),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(isUser ? 'YOU' : 'PAI',
+                          style: text.labelSmall?.copyWith(color: accent, letterSpacing: 2.5)),
+                      const SizedBox(width: 8),
+                      Text(_time(message.createdAt), style: context.pai.mono(size: 11, faint: true)),
+                    ],
+                  ),
+                ),
+                DecoratedBox(
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.only(
+                      topLeft: const Radius.circular(PaiRadii.md),
+                      topRight: const Radius.circular(PaiRadii.md),
+                      bottomLeft: Radius.circular(isUser ? PaiRadii.md : 2),
+                      bottomRight: Radius.circular(isUser ? 2 : PaiRadii.md),
+                    ),
+                    color: isUser
+                        ? scheme.secondaryContainer.withValues(alpha: 0.55)
+                        // Theme-aware: markdown text/code colours come from the palette and must
+                        // sit on a matching surface (a fixed dark bubble made light mode unreadable).
+                        : (context.pai.dark ? PaiColors.bg2.withValues(alpha: 0.85) : PaiColors.lightSurface),
+                    border: Border.all(color: accent.withValues(alpha: isUser ? 0.35 : 0.28)),
+                    boxShadow: streaming
+                        ? [BoxShadow(color: accent.withValues(alpha: 0.18), blurRadius: 16, spreadRadius: -4)]
+                        : null,
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+                    child: isUser
+                        // What the user typed is shown verbatim (never interpreted as markdown).
+                        ? SelectableText(message.content, style: text.bodyLarge)
+                        : Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              MarkdownMessage(data: message.content, streaming: streaming),
+                              if (streaming) const Padding(
+                                padding: EdgeInsets.only(top: 4),
+                                child: BlinkingCursor(),
+                              ),
+                            ],
+                          ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// =====================================================================
+// Status line ("assistant is working")
+// =====================================================================
+
+class _StatusLine extends StatelessWidget {
+  final String message;
+  final bool failure;
+  const _StatusLine({required this.message, this.failure = false});
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final color = failure ? scheme.error : scheme.primary;
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
+      padding: const EdgeInsets.fromLTRB(2, PaiSpacing.xs, 2, PaiSpacing.md),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          SizedBox(
-            width: 14,
-            height: 14,
-            child: CircularProgressIndicator(
-              strokeWidth: 2,
-              valueColor: AlwaysStoppedAnimation(color),
-            ),
-          ),
-          const SizedBox(width: 8),
+          failure ? Icon(Icons.error_outline, size: 16, color: color) : ThinkingDots(color: color),
+          const SizedBox(width: 10),
           Flexible(
             child: Text(
-              status.message,
-              style: TextStyle(
-                fontSize: 13,
-                color: color,
-                fontStyle: FontStyle.italic,
-              ),
+              message.toUpperCase(),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(context).textTheme.labelSmall?.copyWith(color: color, letterSpacing: 1.8),
             ),
           ),
         ],

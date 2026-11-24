@@ -105,13 +105,27 @@ class PluginPackager:
         return PackageArtifact(tarball, checksum, size)
 
 
+    #: Per-platform folder that holds the build output (.so, dex, .py, assets, ...).
+    ARTIFACT_DIR = "artifact"
+
     @staticmethod
     def _collect_artifacts(
         manifest: PluginManifest,
         version_dir: Path,
         platform: DevicePlatform,
     ) -> list[tuple[Path, str]]:
-        """Collect only the artifact declared for the requested platform."""
+        """Collect what ships for one platform: every file in ``<version>/<platform>/artifact/``.
+
+        Nothing outside that folder is ever packaged (no source, tests, build scripts, or a
+        library left next to the manifest). A plugin can ship several files there.
+
+        Inside the archive each file lands at ``<platform>/<path inside artifact/>``, e.g.
+        ``linux/artifact/libx.so`` -> ``linux/libx.so``. The manifest's ``artifact`` is that
+        packaged path (``linux/libx.so``), the same string the device resolves in the
+        extracted package, and it must be one of the packaged files.
+
+        Symlinks, paths that escape the folder and dotfiles (.gitkeep, .DS_Store) never ship.
+        """
 
         spec = manifest.platforms[platform]
         artifact = spec.artifact
@@ -125,33 +139,49 @@ class PluginPackager:
             or "\x00" in artifact
         ):
             raise ValueError(f"Invalid artifact path: {artifact}")
-
-        root = version_dir.resolve()
-        source = root.joinpath(*relative.parts)
-
-        if source.is_symlink():
-            raise ValueError(f"Symlink artifact not allowed: {source}")
-
-        resolved = source.resolve(strict=True)
-
-        if not resolved.is_relative_to(root):
+        if relative.parts[0] != platform.value or len(relative.parts) < 2:
             raise ValueError(
-                f"Artifact escapes plugin directory: {artifact}"
+                f"Artifact {artifact!r} must live under '{platform.value}/' "
+                f"(e.g. '{platform.value}/libplugin.so')"
             )
 
-        if not resolved.is_file():
+        root = version_dir.resolve()
+        artifact_dir = root / platform.value / PluginPackager.ARTIFACT_DIR
+        if artifact_dir.is_symlink():
+            raise ValueError(f"Symlinked artifact folder not allowed: {artifact_dir}")
+        if not artifact_dir.is_dir():
             raise FileNotFoundError(
-                f"Declared artifact not found: {resolved}"
+                f"Artifact folder not found: {artifact_dir} - put the build output for "
+                f"{manifest.id}@{manifest.version} ({platform.value}) there"
+            )
+        artifact_root = artifact_dir.resolve()
+
+        files: list[tuple[Path, str]] = []
+        for path in sorted(artifact_root.rglob("*")):
+            inside = path.relative_to(artifact_root)
+            if any(part.startswith(".") for part in inside.parts):
+                continue                      # .gitkeep, .DS_Store, ...
+            if path.is_symlink():
+                raise ValueError(f"Symlink not allowed in artifact folder: {path}")
+            if not path.is_file():
+                continue                      # directories are implied by file paths
+            if not path.resolve().is_relative_to(artifact_root):
+                raise ValueError(f"Artifact file escapes artifact folder: {path}")
+            files.append((path, (PurePosixPath(platform.value) / inside.as_posix()).as_posix()))
+
+        packaged = {archive for _, archive in files}
+        if relative.as_posix() not in packaged:
+            raise FileNotFoundError(
+                f"Declared artifact {artifact!r} not found: expected the file "
+                f"{platform.value}/{PluginPackager.ARTIFACT_DIR}/"
+                f"{PurePosixPath(*relative.parts[1:]).as_posix()} in {version_dir}"
             )
 
         logger.debug(
-            "Collected {} artifact: {} -> {}",
-            platform,
-            resolved,
-            artifact,
+            "Collected {} artifact folder: {} file(s): {}",
+            platform, len(files), ", ".join(sorted(packaged)),
         )
-
-        return [(resolved, relative.as_posix())]
+        return files
 
     # ---------------------------------------------------------
     # Deterministic package generation

@@ -47,6 +47,8 @@ bool FilesystemAccessible() {
 // Permissions that require explicit user consent (dialog on first use).
 const std::set<std::string> kConsentRequired = {
     "screen", "camera", "microphone", "clipboard", "notifications",
+    // Typing and clicking on the user's behalf: can do anything the user can do on screen.
+    "input",
     // Privileged operations — must always prompt. Never auto-grant,
     // never silently deny.
     "shell", "exec", "subprocess", "command", "process.spawn",
@@ -63,7 +65,7 @@ std::string Probe(const std::string& logical) {
   if (logical == "microphone") return AnyAudioDevice()       ? "available" : "unavailable";
   if (logical == "filesystem") return FilesystemAccessible() ? "available" : "unavailable";
   if (logical == "location" || logical == "contacts") return "unavailable";
-  if (logical == "screen") {
+  if (logical == "screen" || logical == "input") {
     return (std::getenv("DISPLAY") || std::getenv("WAYLAND_DISPLAY"))
         ? "available" : "unavailable";
   }
@@ -161,52 +163,40 @@ void PermissionManager::SetDecisions(
   Save();
 }
 
+std::string PermissionManager::Classify(const std::string& p) const {
+  auto it = decisions_.find(p);
+  const std::string decision = (it == decisions_.end()) ? "prompt" : it->second;
+  // An explicit deny is always respected — never re-prompt.
+  if (decision == "deny") return "denied";
+  // An explicit allow is always honored. We deliberately skip the OS probe here so hot-plugged
+  // hardware keeps working without a re-prompt.
+  if (decision == "allow") return "granted";
+  // Consent-required permissions ALWAYS go to the user the first time, regardless of what the OS
+  // probe says (the probe can false-negative: no DISPLAY in a container, camera hot-plugged later).
+  if (kConsentRequired.count(p) > 0) return "pending";
+  // Non-consent permissions: auto-grant once the probe passes.
+  return Probe(p) == "available" ? "granted" : "denied";
+}
+
+std::map<std::string, std::string> PermissionManager::PermissionStatus(
+    const std::vector<std::string>& permissions) const {
+  std::map<std::string, std::string> out;
+  for (const auto& p : permissions) out[p] = Classify(p);
+  return out;
+}
+
 std::map<std::string, std::string> PermissionManager::Request(
     const std::vector<std::string>& permissions) {
   std::vector<std::string> granted, denied, pending;
 
   for (const auto& p : permissions) {
-
-
+    const std::string state = Classify(p);
     auto it = decisions_.find(p);
-    const std::string decision =
-        (it == decisions_.end()) ? "prompt" : it->second;
-
-    // An explicit deny is always respected — never re-prompt.
-    if (decision == "deny") {
-      denied.push_back(p);
-      continue;
-    }
-        fprintf(stderr, "[perm] %-12s probe=%-11s decision=%s\n",
-        p.c_str(), Probe(p).c_str(), decision.c_str());
-
-    // An explicit allow is always honored. We deliberately skip the OS
-    // probe here so hot-plugged hardware keeps working without a
-    // re-prompt.
-    if (decision == "allow") {
-      granted.push_back(p);
-      continue;
-    }
-
-    // decision == "prompt"
-    const bool consent_required = kConsentRequired.count(p) > 0;
-
-    if (consent_required) {
-      // Consent-required permissions ALWAYS go to the user the first
-      // time, regardless of what the OS probe says. The probe can
-      // false-negative (no DISPLAY in a container, camera hot-plugged
-      // later) — and even a "no hardware" answer shouldn't force a
-      // silent deny when we haven't asked.
-      pending.push_back(p);
-      continue;
-    }
-
-    // Non-consent permissions: auto-grant once the probe passes.
-    if (Probe(p) == "available") {
-      granted.push_back(p);
-    } else {
-      denied.push_back(p);
-    }
+    fprintf(stderr, "[perm] %-12s probe=%-11s decision=%s\n", p.c_str(), Probe(p).c_str(),
+            it == decisions_.end() ? "prompt" : it->second.c_str());
+    if (state == "granted") granted.push_back(p);
+    else if (state == "denied") denied.push_back(p);
+    else pending.push_back(p);
   }
 
   std::map<std::string, std::string> out = {
@@ -219,19 +209,25 @@ std::map<std::string, std::string> PermissionManager::Request(
 }
 
 void PermissionManager::ApplyEnvBridges() {
-  // Plugins check their own env vars (PAI_SCREEN_CONSENT=1). Reflect
-  // the user's "allow" decision into those env vars so the plugin's
-  // gate passes without the user manually setting anything.
+  // Plugins check their own env vars (PAI_SCREEN_CONSENT=1, PAI_INPUT_CONSENT=1). Reflect the user's
+  // decision into those env vars: "allow" sets it so the plugin's gate passes without the user
+  // setting anything by hand; "deny" clears it.
   struct Bridge { const char* perm; const char* env; };
   static const Bridge kBridges[] = {
       {"screen", "PAI_SCREEN_CONSENT"},
+      {"input", "PAI_INPUT_CONSENT"},
       // Add when other plugins adopt their own consent gates:
       // {"camera", "PAI_CAMERA_CONSENT"},
   };
   for (const auto& b : kBridges) {
     auto it = decisions_.find(b.perm);
-    if (it != decisions_.end() && it->second == "allow") {
+    if (it == decisions_.end()) continue;
+    if (it->second == "allow") {
       ::setenv(b.env, "1", 1);
+    } else if (it->second == "deny") {
+      // A revoke must take effect NOW. Only ever setting the variable left it "1" until the app was
+      // restarted, so a plugin kept passing its own consent gate after the user said no.
+      ::unsetenv(b.env);
     }
   }
 }

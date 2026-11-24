@@ -1,11 +1,11 @@
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from enum import Enum
+from enum import Enum, StrEnum
 from typing import Any, Mapping
 
 from pai.memory.models import utc_now
 
-class AuditEventType(str, Enum):
+class AuditEventType(StrEnum):
     """Security-relevant audit event types."""
 
     AUTHORIZATION = "authorization"
@@ -32,7 +32,21 @@ class AuditEventType(str, Enum):
     PLUGIN_EXECUTION_BLOCKED = "plugin_execution_blocked"
 
 
+    SCHEDULE_RUN = "schedule_run"
+    SCHEDULE_SKIPPED = "schedule_skipped"
+    SCHEDULE_DENIED = "schedule_denied"
+    SCHEDULE_FAILED = "schedule_failed"
+    SCHEDULE_CONSENT_GRANTED = "schedule_consent_granted"
+    SCHEDULE_CONSENT_REVOKED = "schedule_consent_revoked"
+
+    CONSENT_GRANTED = "consent_granted"            # a session/always grant was created
+    CONSENT_REVOKED = "consent_revoked"
+    CONSENT_AUTO_APPROVED = "consent_auto_approved"  # a run proceeded without a prompt (grant / admin)
+    CONSENT_APPROVED_ONCE = "consent_approved_once"
+    PREFLIGHT_DECISION = "preflight_decision"
+
     SECURITY_CONFIGURATION_CHANGED = "security_configuration_changed"
+    ADMIN_ACTION = "admin_action"
 
 @dataclass(frozen=True)
 class AuditEvent:

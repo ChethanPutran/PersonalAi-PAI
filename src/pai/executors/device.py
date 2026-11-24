@@ -30,6 +30,8 @@ class DeviceExecutor(BaseExecutor):
       - A response registry keyed by request_id to correlate
     """
 
+    supports_control_ack = True
+
     def __init__(self, device_manager: DeviceManager) -> None:
         super().__init__(
             name="device_executor",
@@ -46,6 +48,7 @@ class DeviceExecutor(BaseExecutor):
         # (request_id, operation) → Future[DeviceFrame] for control acks
         self._pending_acks: Dict[tuple[str, str], asyncio.Future] = {}
         self.control_ack_timeout: float = 5.0
+        self.cancel_ack_timeout: float = 3.0
 
     async def initialize(self) -> None:
         self._initialized = True
@@ -68,13 +71,26 @@ class DeviceExecutor(BaseExecutor):
         return await self._send_control(task_id, DeviceControlOp.RESUME, DeviceOpStatus.RUNNING)
 
     async def cancel_task(self, task_id: str) -> bool:
+        """Stop waiting NOW and ask the device to stop.
+
+        Returns True iff the device ACKNOWLEDGED the cancel (``control_ack``) in time. The
+        local wait is cancelled either way — the ack only tells us whether the device
+        confirms it stopped (False = "abandoned": it may still have completed the action).
+        """
         entry = self._in_flight.pop(task_id, None)
         if entry is None:
             return False
         request_id, device_id = entry
 
-        # Tell the device (best-effort — the ack proves receipt but the
-        # plugin may not be cancellable mid-call).
+        # Authoritative and immediate: even if the device ignores the frame, the backend
+        # stops waiting.
+        fut = self._pending.pop(request_id, None)
+        if fut is not None and not fut.done():
+            fut.cancel()
+
+        key = (request_id, DeviceControlOp.CANCEL.value)
+        ack: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._pending_acks[key] = ack
         try:
             await self.device_manager.send(device_id, DeviceMessage(
                 type=DeviceMessageType.CONTROL,
@@ -83,19 +99,16 @@ class DeviceExecutor(BaseExecutor):
                 task_id=task_id,
                 status=DeviceOpStatus.RUNNING,
             ))
+            frame: DeviceFrame = await asyncio.wait_for(ack, self.cancel_ack_timeout)
+            return frame.status not in (DeviceOpStatus.FAILURE.value, DeviceOpStatus.NONE.value)
+        except asyncio.TimeoutError:
+            logger.warning("DeviceExecutor: no cancel ack for task={} (abandoned)", task_id)
+            return False
         except Exception as exc:
-            logger.warning(
-                "DeviceExecutor: cancel frame failed for task={}: {}",
-                task_id, exc,
-            )
-
-        # Cancel the local future immediately. This is the authoritative
-        # signal — even if the device ignores the frame, the backend
-        # stops waiting.
-        fut = self._pending.pop(request_id, None)
-        if fut is not None and not fut.done():
-            fut.cancel()
-        return True
+            logger.warning("DeviceExecutor: cancel frame failed for task={}: {}", task_id, exc)
+            return False
+        finally:
+            self._pending_acks.pop(key, None)
 
     async def _send_control(
         self,

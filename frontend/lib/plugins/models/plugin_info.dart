@@ -1,5 +1,7 @@
 import 'package:flutter/foundation.dart';
 
+import 'plugin_update.dart';
+
 enum PluginLanguage { native, kotlin, swift, python, javascript, unknown }
 
 enum RuntimeKind { server, device, unknown }
@@ -24,11 +26,15 @@ class PluginRuntimeSpec {
   final String nativeModule;
   final String? minPaiVersion;
 
+  /// Oldest client app that can run this plugin (null = no constraint).
+  final String? minAppVersion;
+
   const PluginRuntimeSpec({
     required this.kind,
     required this.language,
     required this.nativeModule,
     this.minPaiVersion,
+    this.minAppVersion,
   });
 
   bool get isServer => kind == RuntimeKind.server;
@@ -44,6 +50,8 @@ class PluginRuntimeSpec {
           '',
       minPaiVersion: (json['min_pai_version'] ?? json['minPaiVersion'])
           ?.toString(),
+      minAppVersion: (json['min_app_version'] ?? json['minAppVersion'])
+          ?.toString(),
     );
   }
 
@@ -51,6 +59,7 @@ Map<String, dynamic> toJson() => {
   'kind': kind.name,
   'nativeModule': nativeModule,
   'minPaiVersion': minPaiVersion,
+  'minAppVersion': minAppVersion,
 };
 }
 
@@ -136,6 +145,17 @@ class PluginInfo {
   final String? checksum;
   final int size;
 
+  // Versioning
+  final int schemaVersion;
+
+  /// This version's release notes (if the plugin author wrote any).
+  final ChangelogEntry? changelog;
+
+  /// False when no version of this plugin can run on the requesting device
+  /// (server or app too old); [incompatibleReason] says why.
+  final bool compatible;
+  final String? incompatibleReason;
+
   const PluginInfo({
     required this.id,
     required this.name,
@@ -153,6 +173,10 @@ class PluginInfo {
     this.packageUrl,
     this.checksum,
     this.size = 0,
+    this.schemaVersion = 1,
+    this.changelog,
+    this.compatible = true,
+    this.incompatibleReason,
   });
 
   bool get isServer => runtimeKind == RuntimeKind.server;
@@ -219,6 +243,15 @@ class PluginInfo {
       packageUrl: (json['packageUrl'] ?? json['package_url'])?.toString(),
       checksum: json['checksum']?.toString(),
       size: (json['size'] as num?)?.toInt() ?? 0,
+      schemaVersion: (json['schemaVersion'] as num?)?.toInt() ?? 1,
+      changelog: json['changelog'] is Map
+          ? ChangelogEntry.fromJson({
+              ...Map<String, dynamic>.from(json['changelog'] as Map),
+              'version': version,
+            })
+          : null,
+      compatible: json['compatible'] != false,
+      incompatibleReason: json['incompatibleReason']?.toString(),
     );
   }
 

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'json_editors.dart';
+import '../../theme/theme.dart';
 
 
 /// Renders the correct input widget for a capability parameter, based
@@ -165,7 +166,7 @@ class _ParamFieldState extends State<ParamField> {
           if (desc.isNotEmpty)
             Text(
               desc,
-              style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+              style: TextStyle(fontSize: 12, color: context.pai.muted),
             ),
           const SizedBox(height: 4),
           input,

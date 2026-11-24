@@ -325,6 +325,30 @@ class ScheduleModel(Base):
         onupdate=lambda: datetime.now(timezone.utc),
     )
 
+    # ---- scheduled plugin calls: validation result, standing consent, last outcome ----
+    # (Added after the first release: see pai.storage.migrations for the SQLite upgrade.)
+    requires_consent: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0",
+    )
+    risk: Mapped[str] = mapped_column(String(16), default="low", server_default="low")
+    executor: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    consent_granted_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    consent_expires_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    consent_granted_by: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # sha256 of (user, capability, canonical parameters, device): the consent is only valid
+    # while the schedule still matches exactly what the user approved.
+    consent_binding_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    last_run_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    last_run_status: Mapped[Optional[str]] = mapped_column(String(24), nullable=True)
+    last_run_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    last_task_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
     __table_args__ = (Index("ix_schedules_due", "enabled", "next_fire_at"),)
 
 # ============================================================
@@ -418,6 +442,15 @@ class DevicePluginModel(Base):
     artifact_sha256: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     last_error: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
 
+    # What the user has allowed ON THE DEVICE for this plugin, as the device last reported it:
+    # {"screen": "granted" | "denied" | "pending"}. ADVISORY: the device re-checks before every invoke, so
+    # this only lets the server say "not allowed on that device" early and stop offering the capability.
+    # None / a missing key = unknown (never reported), which blocks nothing.
+    permissions: Mapped[Optional[dict[str, str]]] = mapped_column(JSON, nullable=True)
+    permissions_reported_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+
     installed_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True,
     )
@@ -430,4 +463,35 @@ class DevicePluginModel(Base):
 
     __table_args__ = (
         UniqueConstraint("device_id", "plugin_id", name="uq_device_plugin"),
+    )
+
+
+# ============================================================
+# Consent grants ("allow for this session" / "always allow")
+# ============================================================
+class ConsentGrantModel(Base):
+    """A standing approval. See pai.security.consent.models.ConsentGrant for the semantics."""
+    __tablename__ = "consent_grants"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(String, index=True)
+    plugin_id: Mapped[str] = mapped_column(String(128))
+    capability: Mapped[str] = mapped_column(String(128))
+    device_id: Mapped[str] = mapped_column(String(128))
+    scope: Mapped[str] = mapped_column(String(16))
+    session_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    binding_mode: Mapped[str] = mapped_column(String(8), default="exact")
+    binding_keys: Mapped[list] = mapped_column(JSON, default=list)
+    params_hash: Mapped[str] = mapped_column(String(64), default="")
+    params_preview: Mapped[list] = mapped_column(JSON, default=list)
+    risk: Mapped[str] = mapped_column(String(16), default="low")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    granted_by: Mapped[str] = mapped_column(String)
+    last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    use_count: Mapped[int] = mapped_column(Integer, default=0)
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index("ix_consent_lookup", "user_id", "plugin_id", "capability", "device_id"),
     )

@@ -26,6 +26,8 @@
   "capabilities": [
     {
       "id": "camera.capture",
+      "taskType": "one_shot",
+      "timeoutSeconds": 30,
       "description": "Take a still photo.",
       "permissions": ["camera", "filesystem"],
       "requireConfirmation": true,
@@ -41,6 +43,7 @@
     },
     {
       "id": "camera.record",
+      "taskType": "long_running",
       "description": "Record a video.",
       "requireConfirmation": true,
       "confirmationReason": "Recording video can be sensitive. Please confirm that you want to record a video.",
@@ -56,6 +59,7 @@
     },
     {
       "id": "camera.stream",
+      "taskType": "stream",
       "description": "Open a live preview stream.",
       "requireConfirmation": false,
       "confirmationReason": "Streaming camera feed can be sensitive. Please confirm that you want to open a live preview.",

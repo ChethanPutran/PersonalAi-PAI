@@ -4,7 +4,7 @@ from ..models import Policy, PolicyResult, PolicyEffect
 # fine-grained PermissionAction onto the verb a role must hold.
 ACTION_CLASS = {
     "discover": "read", "read": "read", "request": "read",
-    "write": "write", "create": "write", "update": "write", "share": "write",
+    "write": "write", "send": "write", "create": "write", "update": "write", "share": "write",
     "delete": "delete",
     "execute": "execute", "control": "execute",
     "manage": "manage",

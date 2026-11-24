@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from pai.common.enums.device import DevicePlatform
 from pai.plugins.manifest_install import load_manifest_file
 from pai.plugins.packager import PluginPackager
 
@@ -57,15 +58,16 @@ def test_package_is_deterministic(
     else:
         source = parent
 
+    platform = DevicePlatform(parent.name)
     packager = PluginPackager(tmp_path)
 
-    a1 = packager.package(m, source)
+    a1 = packager.package(m, source, platform)
     assert a1.checksum.startswith("sha256:")
     assert a1.size > 0
 
     # Repackage into a fresh directory → must be byte-identical.
     tmp2 = tmp_path / "run2"
-    a2 = PluginPackager(tmp2).package(m, source)
+    a2 = PluginPackager(tmp2).package(m, source, platform)
     assert a2.checksum == a1.checksum, (
         f"packaging is not deterministic for {m.id}@{m.version}: "
         f"{a1.checksum} != {a2.checksum}"

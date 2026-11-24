@@ -62,7 +62,8 @@ ExecutorManager
 ```
 src/pai/
   api/              — FastAPI routes, middleware, dependencies
-  agents/           — BaseAgent, ConversationAgent, ProductivityAgent
+  agent/            — Long-running ReAct agents: runtime, loop, tools, events (see its README)
+  agents/           — BaseAgent, ConversationAgent, ProductivityAgent (older stubs)
   common/           — Shared enums, constants, base Manager class
   config/           — Pydantic config models + YAML/env loader
   core/             — Lifecycle protocol, batch init/shutdown helpers
@@ -98,16 +99,19 @@ frontend/
   android/          — Android-specific build + Kotlin native plugin system
   linux/            — Linux desktop entry
 
-tests/
+tests/                 (one folder per area; no test files at the top level)
+  admin/ agent/ chat/ common/ consent/ llm/ memory/ native/ orchestration/ planning/ plugins/
   prompts/          — Prompt rendering tests (always runnable, no external deps)
+  scheduler/ security/ server/ storage/ task_events/ tasks/ utils/ voice/
   security/         — LLM guard / prompt injection tests
   integration/      — Full orchestration flow (require DB)
-  performance/      — Load tests
-  test_*.py         — Unit tests (many have stale imports — see Known Issues)
+  leaks/            — Memory-growth / resource-leak checks
+  conftest.py       — Shared fixtures (in-memory SQLite `session_factory`, ...)
 
 config/
-  config.yaml       — Root configuration
-  development.yaml  — Dev overrides (currently active)
+  config.yaml       — Root configuration (every key must match a field in src/pai/config/: `pai-validate-config`)
+  models.yaml       — Model registry: capabilities + prices (see "Models and prices")
+  overrides.yaml    — Written by the admin panel (Settings); merged OVER config.yaml at startup. Gitignored; delete a key to fall back
 ```
 
 ---
@@ -178,7 +182,7 @@ Wraps every LLM call: inspects request (memory/history blocks) for injection, sa
 
 ## Configuration
 
-Main config: `config/config.yaml`, dev overrides: `config/development.yaml`.
+Main config: `config/config.yaml`; settings saved from the admin panel go to `config/overrides.yaml` (deep-merged over it); secrets stay in `.env`. An unknown key anywhere is an error at startup (`pai-validate-config` checks the files without starting the server).
 
 Key env vars (`.env` or environment):
 ```
@@ -201,6 +205,22 @@ PAI_PASSWORD=...
 ```
 
 ---
+
+### Settings editor and reload (admin panel)
+
+- **Settings** (admin panel) edits every setting from the Config schema: enums are dropdowns, each field shows its default, secrets are locked. Edits are validated with the real `Config` model, then saved to `config/overrides.yaml` (never `config.yaml`); `PUT /system/settings`. Secrets (API keys, passwords, JWT secret) live in `.env` and are never shown or saved here.
+- **Reload system** (`POST /system/reload`, `pai.config.reload`) applies saved settings to the RUNNING server without a restart and without touching the admin session: models/routes/prices (`llm_provider`, `llm_routes`, `llm_pricing`, `models_file`), `voice`, `llm_cost.initial_credits_usd`, `admin.history_retention_days`. Everything else is reported as needing a restart. To make another setting reloadable, add a group to `LIVE_GROUPS` and a reloader in `pai/config/reload.py` (swap the live object; never half-apply).
+- An unknown key anywhere in the YAML is an error (`pai.config.strict`): `pai-validate-config` checks the files, CI runs it. Aliased keys (`llm_provider.model` = `model_name`) are accepted but shown under the field name.
+
+### Models and prices: `config/models.yaml`
+
+The model registry (`src/pai/config/model_registry.py`) is the one place for which models exist, what they can do
+(`tool_use`, `reasoning`, `vision`, context) and what they cost: `llm[]` (USD per million tokens), `speech.stt[]`
+(`per_minute_cost`), `speech.tts[]` (`per_1k_chars_cost`), `embeddings[]`, `decision[]`. It feeds LLM and voice cost
+tracking (`llm_pricing` in config.yaml overrides a price; `voice.airouter.*_cost_*: null` = take it from the registry),
+a startup check that configured models exist and that the planner/agent models support tools, and the admin
+"Models & prices" table (`GET /system/models`). A model missing from the file still works: its cost is whatever the
+provider reports, else unknown.
 
 ## Adding Things
 
@@ -234,23 +254,16 @@ PAI_PASSWORD=...
 
 ## Known Issues / Stale Tests
 
-Several test files import modules that have been renamed or removed. They fail at collection time:
-
-| Test file | Broken import |
-|-----------|--------------|
-| `tests/test_agents.py` | `pai.agents.*` — restructured |
-| `tests/test_event_bus.py` | stale path |
-| `tests/test_executors.py` | `pai.executors.server_executor` removed |
-| `tests/test_integration.py` | `pai.main.app` renamed |
-| `tests/test_integration_e2e.py` | same |
-| `tests/test_kernel.py` | `pai.kernel` removed |
-| `tests/test_planning.py` | `pai.planning.planning_engine` removed |
-| `tests/test_plugins.py` | `pai.plugins.browser_plugin` removed |
-| `tests/llm/test_llm_providers.py` | `LLMProviderConfig` removed from `pai.llm.models` |
+The legacy test files whose imports no longer existed (`test_agents`, `test_event_bus`, `test_executors`,
+`test_integration`, `test_integration_e2e`, `test_kernel`, `test_planning`, `test_plugins`, `llm/test_llm_providers`,
+`performance/test_load`)
+were deleted; every remaining file collects. Two files still fail because they call APIs whose signatures changed:
+`tests/memory/test_memory.py` (old store constructors) and `tests/tasks/test_task_fail_undelivered.py`
+(`TaskManager.create_initialized(input=...)`).
 
 **Always-runnable tests** (no broken imports, no external services):
 ```bash
-.venv/bin/python -m pytest tests/prompts/ tests/security/ tests/test_timezone.py tests/test_task_repository.py -q
+.venv/bin/python -m pytest tests/prompts/ tests/security/ tests/utils/test_timezone.py tests/tasks/test_task_repository.py -q
 ```
 
 ---
@@ -261,6 +274,8 @@ Several test files import modules that have been renamed or removed. They fail a
 - `PromptGuard` sanitizes all memory/history before it enters the planning prompt
 - Shell plugin capabilities enforce a whitelist prefix check at both plan validation time and plugin invoke time
 - All authorization decisions are written to the audit log
+- Device-reported permissions are **advisory**: the app reports, per installed plugin, what the user allowed on that device (`POST /plugins/device/{id}/permissions`, owner only, stored in `device_plugins.permissions`). The router stops offering capabilities whose declared permission is `denied`/`pending` there and explains why (`permission_not_allowed_on_device`). The device still re-checks before every invoke; an unreported permission is unknown and blocks nothing. Only Linux reports so far (Android prompts on request, so it has no read-only query; other platforms have no `permissionStatus` yet).
+- Keyboard/mouse control (`input` plugin) can only be approved **once per action** by default. `security.authorization.input_grant_scope: session` (config.yaml) additionally offers "approve for this session" (never "always" for high-risk actions). It is enforced server-side from one derived set (`ApprovalPolicy.always_approve_for`, via `always_approve_from_config`); camera control stays once-only either way. A capability that declares the `input` permission always asks, so `input.status`/`input.stop` deliberately declare no permission (ending control must never need a prompt).
 
 ---
 
@@ -270,6 +285,29 @@ Several test files import modules that have been renamed or removed. They fail a
 - Reads are per-user: stores raise `ValueError` without a `user_id`; recalled items are re-sanitized and quarantined data is never returned.
 - Use typed models (`RecallResult`, `ToolOutcome`, `Provenance`, `ProcedureStep`) — do not pass raw dicts between memory components.
 - Tests: `.venv/bin/python -m pytest tests/memory -q`.
+
+## Voice & streaming
+
+- Realtime voice lives in `src/pai/voice/` (see its README for the wire protocol and security model); `WS /voice/stream`.
+- Replies stream everywhere: the orchestrator pushes sanitized text into a `ReplySink`; `POST /chat/stream` is SSE. Never bypass `StreamingSanitizer` when streaming model output.
+- Voice requests carry `Origin.VOICE`; never accept spoken confirmation for a risky action.
+- Tests: `.venv/bin/python -m pytest tests/voice tests/chat tests/llm -q`.
+
+## Agents
+
+- Long-running, spawnable, talk-to-able ReAct agents live in `src/pai/agent/` (see its README); the system starts them via the `agent.start` builtin capability or `POST /agents`, and users converse over `WS /agents/{id}/ws` or `POST /agents/{id}/messages`.
+- An agent's tools are the user's own capabilities, run **only** through `orchestrator.execute_action` (authorization, confirmation, audit unchanged). Give every call a unique request id (the orchestrator de-duplicates identical actions per request id). Agents can never be granted `agent.*`/`chat.*`.
+- Tool output is untrusted DATA: sanitised by `PromptGuard`, size-bounded, boundary-wrapped. Never put it in the instruction part of a prompt. Never send empty text to `sanitize_response` (it returns a canned reply).
+- Prompt: `prompts/agent/react` (versioned like any other; see Prompt Versioning).
+- Tests: `.venv/bin/python -m pytest tests/agent tests/prompts/test_agent_react_prompt.py -q`.
+
+## Versioning (runtime, manifest schema, app, plugins)
+
+- Single source of truth: `[tool.pai.versions]` and `[tool.pai.plugins]` in `pyproject.toml`. Edit there, then `pai-sync-versions --write` (updates `pai/version.py`, `[project].version`, the `schemaVersion` range in `manifest.schema.json`, `frontend/pubspec.yaml`, `frontend/lib/core/app_version.dart`). Never edit those copies by hand.
+- A released plugin version (one that exists on `origin/main`) is **immutable**: any change to its folder is a new version (`python scripts/bump_plugin.py <id> patch`), which needs `changelog.summary`. Checked by `pai-check-plugin-versions`.
+- `src/pai/plugins/manifest.schema.json` mirrors the Pydantic models in `manifest_models.py`; change both together (`tests/plugins/test_manifest_schema.py` fails on drift). Validate with `pai-validate-manifests plugin_registry/plugins`.
+- CI: `.github/workflows/{plugin-manifests,versions,release-plugin,tests}.yml`. The tooling modules import without the heavy runtime (`pai/__init__` loads the orchestrator lazily): keep `pai.plugins.{versioning,release,manifest_install}` free of heavy imports.
+- Tests: `.venv/bin/python -m pytest tests/plugins/test_version_policy.py tests/plugins/test_manifest_schema.py -q`.
 
 ## Prompt Versioning
 

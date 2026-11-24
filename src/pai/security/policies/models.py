@@ -1,8 +1,8 @@
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import Enum, StrEnum
 from typing import Any
 
-class PolicyEffect(str, Enum):
+class PolicyEffect(StrEnum):
     ALLOW = "allow"
     DENY = "deny"
     APPROVAL_REQUIRED = "approval_required"

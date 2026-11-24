@@ -33,6 +33,10 @@ static const _maxFailures = 5;
   ChatStatus? _current;
   bool _disposed = false;
 
+  // True between the server's `connected` frame and the next disconnect.
+  bool _isConnected = false;
+  Completer<void> _connectedSignal = Completer<void>();
+
   ChatStatusService({required this.api, required this.sessionId});
 
   // -------------------------------------------------------------------
@@ -51,6 +55,27 @@ static const _maxFailures = 5;
     return s != null && !s.isTerminal;
   }
 
+  /// Resolves true once the server has CONFIRMED the subscription (its `connected` frame), false if that
+  /// takes longer than [timeout] (or the service is disposed / has no token to connect with).
+  ///
+  /// The server only forwards status events to sockets that are already subscribed, so a caller that is
+  /// about to start work waits here first: the very first status ("understanding…") then cannot be lost.
+  /// Bounded on purpose: a slow or unreachable socket must never block sending a message.
+  Future<bool> waitUntilConnected({Duration timeout = const Duration(seconds: 2)}) async {
+    if (_disposed) return false;
+    if (_isConnected) return true;
+    try {
+      await _connectedSignal.future.timeout(timeout);
+    } on TimeoutException {
+      return false;
+    }
+    return _isConnected && !_disposed;
+  }
+
+  /// Feeds a raw frame as if it arrived from the server. Tests only.
+  @visibleForTesting
+  void debugHandleFrame(String raw) => _handleFrame(raw);
+
   // -------------------------------------------------------------------
   // Connect / reconnect
   // -------------------------------------------------------------------
@@ -68,6 +93,8 @@ static const _maxFailures = 5;
     }
 
     debugPrint('[ChatStatus] opening WS for $sessionId');
+    _isConnected = false;                                   // a new attempt: not confirmed yet
+    if (_connectedSignal.isCompleted) _connectedSignal = Completer<void>();
     
     // Cancel any prior subscription first. On reconnect, the old
     // socket is done (that's why we're reconnecting), but the sub
@@ -132,6 +159,8 @@ static const _maxFailures = 5;
       if (type == 'connected') {
   debugPrint('[ChatStatus] stream connected for $sessionId');
   _consecutiveFailures = 0;
+  _isConnected = true;
+  if (!_connectedSignal.isCompleted) _connectedSignal.complete();
   return;
 }
       if (type == 'error') {
@@ -178,6 +207,7 @@ static const _maxFailures = 5;
 
 void _handleDisconnect({Object? error}) {
   if (_disposed) return;
+  _isConnected = false;
 
   final code = _ws?.closeCode;
   if (code == 4401 || code == 4403) {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import time
 from typing import Any, Callable, Dict, List, Literal, Optional
@@ -23,7 +24,8 @@ from pai.common.enums.permission import Origin
 from pai.security.authorization.context import ScopeContext
 from pai.security.authorization.decision import AuthorizationDecision, DecisionEffect
 from pai.security.manager import SecurityManager
-from pai.tasks.lifecycle import InvalidTaskTransition, TaskLifecycle
+from pai.common.task_controls import CancelOutcomeKind, TaskControls
+from pai.tasks.lifecycle import InvalidTaskTransition, TaskControlError, TaskLifecycle
 from pai.tasks.models import (
     Task,
     TaskPriority,
@@ -31,11 +33,12 @@ from pai.tasks.models import (
     TaskSource,
     TaskAuthorization,
     TaskRetryPolicy,
-    TaskRetryingEvent,
+    TaskPhase,
     TaskStatus,
     TaskStreamEvent,
     TaskType,
     get_task_timeout,
+    utc_now,
 )
 from pai.tasks.store import TaskStoreProtocol
 from pai.tasks.store import TaskStore
@@ -60,6 +63,7 @@ class TaskManager(Manager):
         super().__init__(session_factory=session_factory, event_bus=event_bus)
         self.retry_policy = retry_policy or TaskRetryPolicy()
         self._shutting_down = False
+        self.cancel_ack_timeout: float = 3.0   # how long a cancel waits for the device to confirm
         self._recovery_tasks: set[asyncio.Task] = set()
         self.store = store
         self.scheduler = scheduler
@@ -69,6 +73,7 @@ class TaskManager(Manager):
         self.device_selector = device_selector
         self.authorizer = security_manager
         self._running_tasks: Dict[str, asyncio.Task] = {}
+        self._paused: set[str] = set()      # ids of tasks the user has paused (deadlines stop counting)
         self._pause_events:  Dict[str, asyncio.Event] = {}   
 
     async def _on_initialize(self) -> None:
@@ -137,6 +142,7 @@ class TaskManager(Manager):
         metadata: Optional[Dict[str, Any]] = None,
         parent_task_id: Optional[str] = None,
         idempotency_key: Optional[str] = None,
+        controls: Optional[TaskControls] = None,
     ) -> Task:
 
         tracer = get_tracer()
@@ -172,6 +178,8 @@ class TaskManager(Manager):
                 capability=task_spec.capability,
                 spec_id=task_spec.id,
                 retryable=task_spec.retryable,
+                # From the manifest / built-in definition, never from the plan or the LLM.
+                controls=controls or self.controls_for(task_spec.capability),
             )
 
             await self.store.create(task)
@@ -182,6 +190,24 @@ class TaskManager(Manager):
             logger.info("Task created: {} ({})", task.id, task.type)
             return task
 
+
+    def controls_for(self, capability: Optional[str], manifest: Any = None) -> TaskControls:
+        """What the user may do to a running instance of ``capability``.
+
+        Plugin capability -> its manifest's ``controls``; built-in -> the built-in's own
+        declaration; anything unknown -> the safe default (no pause, best-effort cancel).
+        """
+        if capability:
+            if manifest is not None:
+                spec = manifest.get_capability(capability)
+                if spec is not None:
+                    return getattr(spec, "controls", None) or TaskControls()
+            builtin = getattr(self.executor_manager, "get", lambda _n: None)("builtin_executor") \
+                if self.executor_manager is not None else None
+            cap = builtin.registry.get(capability) if builtin is not None and hasattr(builtin, "registry") else None
+            if cap is not None:
+                return getattr(cap, "controls", None) or TaskControls()
+        return TaskControls()
 
     async def create_initialized(
         self,
@@ -220,6 +246,7 @@ class TaskManager(Manager):
                 plugin=task_spec.metadata.get("plugin"),
                 parent_task_id=task_spec.metadata.get("parent_task_id"),
                 idempotency_key=idempotency_key,
+                controls=self.controls_for(resolution.capability, resolution.plugin_manifest),
             )
             span.set_attribute("task_id", task.id)
             return task
@@ -272,8 +299,10 @@ class TaskManager(Manager):
             for task in await self.store.list(status=status):
                 if task.id in self._running_tasks:
                     continue
-                if not task.retryable and status in (TaskStatus.RUNNING, TaskStatus.PAUSED):
-                    # May already have run on the device; never auto re-send a non-retryable action.
+                if (not task.retryable and task.dispatched_at is not None
+                        and status in (TaskStatus.RUNNING, TaskStatus.PAUSED)):
+                    # It reached the device and may already have run; never auto re-send a
+                    # non-retryable action. (One that never got that far is safe to queue again.)
                     await self._fail_interrupted(task, "Interrupted by a restart (not retryable)")
                     continue
                 if status == TaskStatus.PAUSED:
@@ -318,10 +347,9 @@ class TaskManager(Manager):
             )
         task.max_retries = max(task.max_retries, task.retry_count + 1)
         TaskLifecycle.retry(task)
+        task.schedule_retry(0.0)            # a user retry starts right away
         await self.store.save(task)
-        self._emit(EventType.TASK_RETRYING, TaskRetryingEvent(
-            task_id=task.id, attempt=task.retry_count, max_attempts=task.max_retries,
-            user_id=task.user_id, session_id=task.session_id).model_dump(mode="json"))
+        await self._publish("task.retrying", task.retrying_payload())
         await self.submit(task.id, wait=False)
         return task
 
@@ -332,6 +360,23 @@ class TaskManager(Manager):
         manifest = getattr(resolution, "plugin_manifest", None)
         cap = manifest.get_capability(resolution.capability) if manifest is not None else None
         return bool(cap.retryable) if cap is not None else bool(task_spec.retryable)
+
+    @staticmethod
+    def manifest_execution(resolution: Any) -> Dict[str, Any]:
+        """`type` / `timeout` overrides for a TaskSpec from the capability's manifest entry
+        (empty for built-ins, which declare theirs on the spec the decomposer built)."""
+        manifest = getattr(resolution, "plugin_manifest", None)
+        cap = manifest.get_capability(resolution.capability) if manifest is not None else None
+        if cap is None:
+            return {}
+        out: Dict[str, Any] = {}
+        task_type = getattr(cap, "taskType", None)
+        if task_type is not None:
+            out["type"] = task_type
+        timeout = getattr(cap, "timeoutSeconds", None)
+        if timeout:
+            out["timeout"] = float(timeout)
+        return out
 
     @staticmethod
     def _deadline(task: Task) -> Optional[float]:
@@ -368,7 +413,8 @@ class TaskManager(Manager):
             agent_id=context.agent_id,
             origin=context.origin or Origin.AGENT_AUTONOMOUS,
             source_device_id=context.source_device_id,
-            scope=ScopeContext.from_execution_context(context),
+            scope=ScopeContext.from_execution_context(context).with_device(task.device_id),
+            pre_approved=context.pre_approved,
         )
         decision = precheck
         if decision.effect == DecisionEffect.ALLOW:
@@ -383,6 +429,17 @@ class TaskManager(Manager):
                 task.confirmation_reason or decision.confirmation_reason or decision.reason
             )
             return
+        grant_id = getattr(decision, "consent_grant_id", None)
+        if grant_id and hasattr(self.authorizer, "record_grant_use"):
+            task.authorization.grant_id = grant_id           # a standing grant approved this run
+            await self.authorizer.record_grant_use(grant_id, task)
+        elif context.pre_approved and hasattr(self.authorizer, "_cap_spec") and hasattr(
+                self.authorizer, "audit_auto_approved"):
+            # Trusted pre-approval (admin tester, valid schedule consent) resolved the prompt:
+            # leave a trace that the confirmation was skipped, and why.
+            _, cap_spec = self.authorizer._cap_spec(task.plugin, task.capability)
+            if cap_spec is not None and getattr(cap_spec, "requireConfirmation", False):
+                self.authorizer.audit_auto_approved(task, "pre-approved by trusted server code")
         task.authorization.tokens = list(decision.tokens)
         # Capabilities needing no permissions get no token; the decision itself gated them.
         task.authorization.required = bool(decision.tokens)
@@ -437,10 +494,15 @@ class TaskManager(Manager):
             span.set_attribute("plugin", resolution.plugin_id)
 
             # Retry policy comes from the manifest, never from the plan / LLM.
+            # Likewise the task type and timeout: whoever built the spec (planner, scheduler,
+            # tester, API), the capability's manifest has the last word.
             task_spec = dataclasses.replace(
-                task_spec, retryable=self.manifest_retryable(resolution, task_spec))
+                task_spec, retryable=self.manifest_retryable(resolution, task_spec),
+                **self.manifest_execution(resolution))
 
             # ---- 2. Select device ----
+            # TODO: if the plan specified a device, use that instead of selecting one.
+            # Get the preferred device from user preferences that is set in settings page of frontend
             preferred = task_spec.preferred_device
 
             async with tracer.span(
@@ -508,11 +570,13 @@ class TaskManager(Manager):
                         plugin_id=resolution.plugin_id,
                         plugin_manifest=resolution.plugin_manifest,
                         parameters=task_spec.parameters,
-                        scope=ScopeContext.from_execution_context(context),
+                        scope=ScopeContext.from_execution_context(context).with_device(target.device_id),
                         task_id=task_spec.id,
                         agent_id=context.agent_id,
                         origin=context.origin or Origin.AGENT_AUTONOMOUS,
                         source_device_id=context.source_device_id,
+                        session_id=context.session_id,
+                        approved=context.pre_approved,
                     )
                     if authorization.effect == DecisionEffect.DENY:
                         raise PermissionError(f"Authorization denied: {authorization.reason}")
@@ -538,6 +602,9 @@ class TaskManager(Manager):
                     resolution=resolution,
                     authorization=authorization,
                     idempotency_key=idempotency_key,
+                    source=(TaskSource.SCHEDULED if context.origin == Origin.SCHEDULED
+                            else TaskSource.USER),
+                    metadata=dict(task_spec.metadata or {}),   # e.g. schedule_id, for history
                 )
                 create_span.set_attribute(
                     "runtime_task_id", runtime_task.id,
@@ -796,12 +863,43 @@ class TaskManager(Manager):
     async def _confirm_if_needed(self, task: Task, pause_event: asyncio.Event) -> None:
         """Confirmation gate. Called inside _execute between checkpoints.
 
-        If the task's metadata declares requires_confirmation, this pauses
-        the task, emits a notification, and blocks until the user resumes
-        or cancels. If cancelled, raises CancelledError (caught downstream).
+        If the task requires confirmation, in this order:
+          1. server-trusted pre-approval (admin tester, a scheduled action under valid consent)
+             -> proceed, audited;
+          2. a standing grant (this session / always, parameter-bound) covers exactly this call
+             -> proceed, use counted + audited — the SAME ConsentManager.find_grant the
+             authorization pipeline uses, so the two can never disagree;
+          3. otherwise pause, tell the user what they are approving and which scopes the server
+             allows (once / session / always), and block until they resume or cancel.
+        Pre-approval and grants never override a DENY: authorization ran before this point.
         """
         if not task.requires_confirmation:
             return
+
+        sec = self.authorizer
+
+        # 1. Trusted pre-approval.
+        if task.authorization.pre_approved and hasattr(sec, "audit_auto_approved"):
+            sec.audit_auto_approved(task, "pre-approved by trusted server code")
+            return
+
+        # 2. A standing grant.
+        if task.authorization.grant_id is not None:
+            return                              # apply_authorization already counted this run's grant
+        if hasattr(sec, "find_grant_for_task"):
+            grant = await sec.find_grant_for_task(task)
+            if grant is not None:
+                task.authorization.grant_id = grant.id
+                await sec.record_grant_use(grant.id, task)
+                await self.store.save(task)
+                return
+
+        # 3. Ask the user.
+        if hasattr(sec, "confirmation_info"):
+            try:
+                task.confirmation = await sec.confirmation_info(task)
+            except Exception:
+                logger.exception("could not build confirmation info for task {}", task.id)
 
         # Pause the task — uses existing lifecycle
         TaskLifecycle.pause(task)  # RUNNING → PAUSED
@@ -822,6 +920,8 @@ class TaskManager(Manager):
             "capability": task.capability,
             "parameters": task.parameters,
             "reason": reason,
+            "confirmation": (task.confirmation.model_dump(mode="json")
+                             if task.confirmation is not None else None),
         })
 
         logger.info(
@@ -834,9 +934,11 @@ class TaskManager(Manager):
         await pause_event.wait()
 
         # If we got here, user resumed. Task status is RUNNING again.
+        task.confirmation = None
+        await self.store.save(task)
         logger.info("task.confirmation_granted: id=%s", task.id)
 
-    async def _execute(self, task_id: str, wait_for_completion: bool = True) -> TaskResult | None:
+    async def _execute(self, task_id: str) -> TaskResult | None:
         tracer = get_tracer()
         # This runs inside the context captured at create_task time,
         # so spans nest under task.submit in the parent trace.
@@ -859,6 +961,11 @@ class TaskManager(Manager):
             span.set_attribute("capability", task.capability)
 
             try:
+                if task.status == TaskStatus.PAUSED:
+                    # Paused while still queued: nothing has started — really hold here.
+                    pause_event.clear()
+                    await pause_event.wait()
+                    task = await self.store.require(task_id)
                 TaskLifecycle.start(task)
                 await self.store.save(task)
                 await self._publish("task.started", task.to_dict())
@@ -891,6 +998,18 @@ class TaskManager(Manager):
                 if task.authorization.required:
                     self.authorizer.verify_task_tokens(task)
 
+                # Last point before the call reaches the device: a pause taken while we were
+                # authorizing / waiting for confirmation really holds here (nothing has run).
+                await pause_event.wait()
+
+                # Re-read (a pause/resume/cancel may have saved a newer copy) and mark the
+                # call as dispatched. From here on pause/cancel depend on the capability's
+                # declared controls and on the device acknowledging.
+                task = await self.store.require(task_id)
+                task.dispatched_at = utc_now()
+                await self.store.save(task)
+                await self._publish("task.updated", task.to_dict())
+
                 if task.plugin:
                     self.authorizer.audit_execution_started(
                         user_id=task.user_id, plugin_id=task.plugin, capability=task.capability,
@@ -906,12 +1025,13 @@ class TaskManager(Manager):
                         if( task.executor_id is None ):
                             raise ValueError("Task has no executor")
                         
-                        task_result = await asyncio.wait_for(
+                        task_result = await self._run_pausable(
+                            task_id,
                             self.scheduler.schedule_task(
                                 task=task,
                                 executor_id=task.executor_id,
                             ),
-                            timeout=self._deadline(task),
+                            self._deadline(task),
                         )
                         if task.plugin:
                             if task_result.success:
@@ -931,7 +1051,8 @@ class TaskManager(Manager):
                             sched_span.set_attribute("result", task_result.model_dump())
                             # Same path as exceptions/timeouts: retry with backoff if budget remains.
                             return await self._handle_failure(
-                                task, task_result.error or "Execution failed", result=task_result)
+                                task, task_result.error or "Execution failed", result=task_result,
+                                retryable=task_result.retryable)
 
                         sched_span.set_attribute("result", task_result.model_dump())
 
@@ -950,11 +1071,6 @@ class TaskManager(Manager):
                         sched_span.set_error(f"{type(exc).__name__}: {exc}")
                         raise
 
-                # Checkpoint 2 — pause holds the result so the user can
-                # inspect or cancel before the task flips to COMPLETED.
-                await pause_event.wait()
-
-
             except asyncio.TimeoutError:
                 span.set_attribute("status", "timeout")
                 return await self._handle_failure(
@@ -963,9 +1079,11 @@ class TaskManager(Manager):
                 )
 
             except asyncio.CancelledError:
+                # cancel()/pause() may have saved a newer copy than our local one: decide on that.
+                task = await self.store.get(task_id) or task
                 if self._shutting_down and not task.terminal:
                     # Server stopping, not the user cancelling: keep it recoverable...
-                    if task.retryable or task.status != TaskStatus.RUNNING:
+                    if task.retryable or task.dispatched_at is None:
                         task.mark_interrupted()
                         await self.store.save(task)
                     else:
@@ -989,6 +1107,32 @@ class TaskManager(Manager):
             finally:
                 self._running_tasks.pop(task_id, None)
                 self._pause_events.pop(task_id, None)
+
+    async def _run_pausable(self, task_id: str, coro: Any, deadline: Optional[float]) -> Any:
+        """Await ``coro`` with a deadline that does NOT run while the user has the task paused.
+
+        (A paused one-shot task must not "time out" because the user took a coffee break.)
+        Completion is returned immediately; the 0.25 s slices only meter the deadline.
+        """
+        run = asyncio.ensure_future(coro)
+        remaining = deadline
+        last = time.monotonic()
+        try:
+            while True:
+                done, _ = await asyncio.wait({run}, timeout=0.25)
+                if run in done:
+                    return run.result()
+                now = time.monotonic()
+                if remaining is not None and task_id not in self._paused:
+                    remaining -= now - last
+                    if remaining <= 0:
+                        raise asyncio.TimeoutError
+                last = now
+        finally:
+            if not run.done():
+                run.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await run
 
     async def _handle_failure(
         self, task: Task, error: str, *, retryable: bool = True,
@@ -1028,105 +1172,157 @@ class TaskManager(Manager):
             delay = self.retry_policy.delay_for(attempt)
             logger.warning("Retrying task {} ({}/{}) in {:.1f}s: {}",
                            task.id, attempt, task.max_retries, delay, error)
-            self._emit(EventType.TASK_RETRYING, TaskRetryingEvent(
-                task_id=task.id, attempt=attempt, max_attempts=task.max_retries,
-                delay_seconds=delay, error=error, user_id=task.user_id,
-                session_id=task.session_id).model_dump(mode="json"))
             span.set_attribute("action", "retry")
-            await asyncio.sleep(delay)          # backoff; cancellable (user cancel / shutdown)
+            # The task is RETRYING for the whole backoff (not FAILED): that is what it is, and it
+            # is a phase where pause/cancel are real (nothing is in flight). The user sees it
+            # at once: `task.retrying` carries the full task + `retry` (attempt, next_retry_at...).
             TaskLifecycle.retry(task)
+            task.last_error = error
+            task.schedule_retry(delay)
             await self.store.save(task)
+            await self._publish("task.retrying", task.retrying_payload())
+            await asyncio.sleep(delay)          # backoff; cancellable (user cancel / shutdown)
+            event = self._pause_events.get(task.id)
+            if event is not None:
+                await event.wait()              # paused during the backoff: hold until resumed
             return await self.submit(task.id, wait=True)
 
     # ------------------------------------------------------------------
     # Cancellation / pause / resume
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _refuse(decision: Any) -> TaskControlError:
+        return TaskControlError(decision.code or "invalid_state", decision.reason or "Not allowed.")
+
     async def cancel(
         self,
         task_id: str,
         reason: Optional[str] = None,
     ) -> Task:
+        """Cancel a task.
 
+        Before the call reaches the device (queued, starting, waiting to retry, waiting for
+        confirmation) this really stops it: ``cancel_outcome = not_started``. After dispatch:
+        refused (409) if the capability declares ``cancel: none``; otherwise the backend stops
+        waiting at once and asks the executor/device to stop, and ``cancel_outcome`` records
+        whether the device acknowledged (``acked``) or we gave up waiting (``abandoned`` — the
+        device may have completed it).
+        """
         tracer = get_tracer()
-        async with tracer.span(
-            "task.cancel",
-            task_id=task_id,
-            reason=reason,
-        ):
+        async with tracer.span("task.cancel", task_id=task_id, reason=reason):
             task = await self.store.require(task_id)
+            if task.status == TaskStatus.CANCELLED:
+                return task                     # already cancelled: cancelling again is a no-op, not an error
+            decision = task.cancel_decision()
+            if not decision.allowed:
+                raise self._refuse(decision)
 
-            # 1. Tell the device to stop (best-effort).
-            if task.executor_id and self.executor_manager is not None:
-                await self.executor_manager.cancel_task(task.executor_id, task_id)
-
-            # 2. Cancel the wrapper — this unwinds wait_for cleanly.
+            dispatched = task.phase == TaskPhase.DISPATCHED
             running = self._running_tasks.get(task_id)
+
+            # 1. Ask the executor/device to stop (concurrently: cancelling must not wait for it).
+            ack_job: Optional[asyncio.Task] = None
+            if dispatched and task.executor_id and self.executor_manager is not None:
+                ack_job = asyncio.create_task(self._cancel_on_executor(task, running))
+
+            # 2. Stop waiting right now — this unwinds the wrapper coroutine.
             if running and not running.done():
                 running.cancel()
+            self._paused.discard(task_id)
 
-            if not task.terminal:
-                TaskLifecycle.cancel(task, reason or "Cancelled by user")
-                await self.store.save(task)
-
+            TaskLifecycle.cancel(task, reason or "Cancelled by user")
+            task.paused_from = None
+            task.cancel_outcome = None if dispatched else CancelOutcomeKind.NOT_STARTED
+            await self.store.save(task)
             await self._publish("task.cancelled", task.to_dict())
+
+            # 3. Record what the cancel achieved, then tell clients (task.updated).
+            if ack_job is not None:
+                try:
+                    acked = await asyncio.wait_for(ack_job, timeout=self.cancel_ack_timeout + 1.0)
+                except (asyncio.TimeoutError, Exception):
+                    acked = False
+                task = await self.store.get(task_id) or task
+                task.cancel_outcome = CancelOutcomeKind.ACKED if acked else CancelOutcomeKind.ABANDONED
+                await self.store.save(task)
+                await self._publish("task.updated", task.to_dict())
             return task
 
+    async def _cancel_on_executor(self, task: Task, running: Optional[asyncio.Task]) -> bool:
+        """True iff the executor/device confirmed the action stopped."""
+        executor = self.executor_manager.get(task.executor_id) if task.executor_id else None
+        if executor is not None and getattr(executor, "supports_control_ack", False):
+            return bool(await self.executor_manager.cancel_task(task.executor_id, task.id))
+        # In-process executors have no ack protocol: stopping IS cancelling the awaiting
+        # coroutine. It counts as acked if that coroutine actually unwound in time.
+        if executor is not None:
+            await self.executor_manager.cancel_task(task.executor_id, task.id)
+        if running is None:
+            return True
+        await asyncio.wait({running}, timeout=self.cancel_ack_timeout)
+        return running.done()
+
     async def pause(self, task_id: str) -> Task:
+        """Pause a task — honestly.
+
+        Before dispatch it holds the task at a gate (nothing has run). After dispatch it only
+        works if the capability declares ``controls.pause`` AND the device acknowledges; if
+        not, HTTP 409 and the task state is NOT changed (no fake "paused").
+        """
         tracer = get_tracer()
         async with tracer.span("task.pause", task_id=task_id):
             task = await self.store.require(task_id)
+            decision = task.pause_decision()
+            if not decision.allowed:
+                raise self._refuse(decision)
 
-            if not task.can_pause:
-                raise InvalidTaskTransition(
-                    f"Task {task_id} cannot be paused from "
-                    f"state {task.status.value}"
-                )
+            if task.phase == TaskPhase.DISPATCHED:
+                acked = False
+                if task.executor_id and self.executor_manager is not None:
+                    acked = bool(await self.executor_manager.pause_task(task.executor_id, task_id))
+                if not acked:
+                    raise TaskControlError(
+                        "control_not_acknowledged",
+                        "The device did not confirm the pause, so the task was left running.",
+                    )
 
-            # 1. Ask the executor. If it returns True, the device is now paused
-            #    (e.g. camera.record freezes on the device itself).
-            executor_paused = False
-            if task.executor_id and self.executor_manager is not None:
-                executor_paused = await self.executor_manager.pause_task(
-                    task.executor_id, task_id,
-                )
-
-            # 2. Regardless of the executor's answer, gate the wrapper at the
-            #    next checkpoint. Even if the executor said False (atomic op or
-            #    protocol limitation), the *result* is still held.
             event = self._pause_events.get(task_id)
             if event is not None:
-                event.clear()
-
-            # 3. Flip status last so the state reflects reality only after
-            #    both the executor and the wrapper have acknowledged.
-            TaskLifecycle.pause(task)          # status → PAUSED
+                event.clear()                   # the next gate (pre-dispatch / backoff) holds
+            self._paused.add(task_id)
+            TaskLifecycle.pause(task)           # status -> PAUSED, remembers where to resume
             await self.store.save(task)
             await self._publish("task.paused", task.to_dict())
             return task
-
 
     async def resume(self, task_id: str) -> Task:
         tracer = get_tracer()
         async with tracer.span("task.resume", task_id=task_id):
             task = await self.store.require(task_id)
+            decision = task.resume_decision()
+            if not decision.allowed:
+                raise self._refuse(decision)
 
-            if not task.can_resume:
-                raise InvalidTaskTransition(
-                    f"Task {task_id} cannot be resumed from "
-                    f"state {task.status.value}"
-                )
-            # Tell the device first (best-effort; ack not required to continue).
-            if task.executor_id and self.executor_manager is not None:
-                await self.executor_manager.resume_task(task.executor_id, task_id)
+            if task.phase == TaskPhase.DISPATCHED:
+                acked = False
+                if task.executor_id and self.executor_manager is not None:
+                    acked = bool(await self.executor_manager.resume_task(task.executor_id, task_id))
+                if not acked:
+                    raise TaskControlError(
+                        "control_not_acknowledged",
+                        "The device did not confirm the resume; the task is still paused.",
+                    )
 
-            TaskLifecycle.resume(task)  
+            was_backoff = task.paused_from == TaskStatus.RETRYING
+            TaskLifecycle.resume(task)
+            if was_backoff:
+                task.schedule_retry(0.0)
             await self.store.save(task)
-
+            self._paused.discard(task_id)
             event = self._pause_events.get(task_id)
             if event is not None:
-                event.set()                     # wake the blocked coroutine
-
+                event.set()                     # wake the held coroutine
             await self._publish("task.resumed", task.to_dict())
             return task
 

@@ -1,9 +1,9 @@
-from enum import Enum
+from enum import Enum, StrEnum
 from typing import Optional
 
 from pydantic import BaseModel
 
-class ExecutionStatus(Enum):
+class ExecutionStatus(StrEnum):
     PENDING = "pending"
     RUNNING = "running"
     COMPLETED = "completed"
@@ -38,7 +38,7 @@ class ExecutionResult(BaseModel):
     An optional dictionary containing the result of the execution, if applicable.
     """
 
-class ScheduleStatus(Enum):
+class ScheduleStatus(StrEnum):
     SCHEDULED = "scheduled"
     FAILED = "failed"
 

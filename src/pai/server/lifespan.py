@@ -8,7 +8,12 @@ from pai.config.app import Config
 from loguru import logger
 
 import asyncio
+import contextlib
 from contextlib import asynccontextmanager
+
+from pai.observability.logging import shutdown_logging
+from pai.observability.resources import ResourceMonitor
+from pai.server.shutdown import ShutdownReport, leftover_task_names, run_step
 
 
 def create_lifespan(config: Config, context: PAIAppContext):
@@ -19,7 +24,7 @@ def create_lifespan(config: Config, context: PAIAppContext):
         app.state.context = context
 
         # ── 1. Tracing ──
-        store = TraceStore(persist_dir="data/traces")
+        store = TraceStore(persist_dir=config.tracing.persist_dir)
         await store.start()
         set_tracer(Tracer(store=store))
         app.state.tracer = get_tracer()
@@ -57,11 +62,25 @@ def create_lifespan(config: Config, context: PAIAppContext):
         )
         await bridge.start()
         app.state.status_bridge = bridge
+
+        # Per-user task event log + publisher (GET /tasks/events). Before the orchestrator so
+        # no task event is missed; JetStream falls back to memory if the broker is unreachable.
+        from pai.event_bus.task_log import build_task_event_log
+        from pai.orchestration.task_event_publisher import TaskEventPublisher
+        servers = list(config.event_bus.nats.servers or [config.event_bus.nats.url])
+        context.task_events = await build_task_event_log(config.task_events, servers)
+        task_publisher = TaskEventPublisher(event_bus=context.orchestrator._event_bus, log=context.task_events)
+        await task_publisher.start()
+        app.state.task_event_publisher = task_publisher
         logger.info("EventBus started")
 
             
         # ── 6. Orchestrator final flag ──
         await context.orchestrator.initialize()
+        if context.agents is not None:
+            await context.agents.initialize()
+        if getattr(context, "admin", None) is not None:
+            await context.admin.start_history()        # persistent task/DAG event + DAG run history
 
 
         logger.info(
@@ -75,9 +94,14 @@ def create_lifespan(config: Config, context: PAIAppContext):
         logger.info(
             "API server running on {}:{}", config.api.host, config.api.port,
         )
-        logger.info("Tracing enabled → data/traces")
+        logger.info("Tracing enabled → {}", config.tracing.persist_dir)
 
         context.orchestrator.scheduler_service.start()
+
+        # Optional periodic memory/size logging (resource_monitor.enabled; off by default).
+        monitor = ResourceMonitor(context, config.resource_monitor)
+        await monitor.start()
+        app.state.resource_monitor = monitor
 
         # ── 7. Embedded device agent (optional) ──
         # Runs the PAI DeviceAgent as a supervised background task in
@@ -94,59 +118,65 @@ def create_lifespan(config: Config, context: PAIAppContext):
         yield
 
         # ── Shutdown ──
-        # Unsubscribe bridges before tearing down the bus so no dispatch
-        # races the shutdown (a bridge handler firing during bus.shutdown
-        # would try to publish or send through a half-closed context).
-        for sub_id in getattr(app.state, "bridge_subscriptions", []):
-            try:
-                await context.orchestrator.event_bus.unsubscribe(sub_id)
-            except Exception:
-                pass
-
-        # Stop the embedded agent BEFORE the scheduler — the agent is a
-        # client of the backend and should disconnect before the server
-        # side stops firing notifications through its WS / push paths.
-        if getattr(app.state, "embedded_agent", None) is not None:
-            try:
-                await asyncio.wait_for(
-                    app.state.embedded_agent.stop(),
-                    timeout=10.0,
-                )
-            except asyncio.TimeoutError:
-                logger.warning("embedded_agent stop timed out")
-                
-        await context.orchestrator.scheduler_service.stop()
+        # Ordered (dependents before dependencies), every step bounded and non-raising, and a
+        # final report listing anything that did not stop.
         logger.info("Shutting down Personal AI System...")
+        report = ShutdownReport()
+        orch = context.orchestrator
 
-        async def _step(name: str, coro, timeout: float = 5.0):
-            try:
-                await asyncio.wait_for(coro, timeout=timeout)
-            except asyncio.TimeoutError:
-                logger.error(
-                    "⏱ shutdown step '{}' timed out after {}s", name, timeout,
-                )
-            except Exception as exc:
-                logger.warning("shutdown step '{}' failed: {}", name, exc)
+        # 0. Tell long-lived streams (SSE / WS / voice) to wrap up.
+        context.shutting_down.set()
 
-        # 1. Orchestrator owns its managers (executors, memory, plugins,
-        #    device, capability_router, etc.) and drains its own tracker.
-        #    Give it more time — it has the most to do.
-        await _step("orchestrator", context.orchestrator.shutdown(), timeout=10.0)
+        # 1. Voice first: each live conversation ends with `session.ended`. It needs the
+        #    orchestrator (to persist the interrupted turn), so it goes before it.
+        if context.voice is not None:
+            await run_step(report, "voice", context.voice.aclose, timeout=5.0)
+        if getattr(context, "admin", None) is not None:       # background admin runs (demo DAGs, goals)
+            await run_step(report, "admin", context.admin.aclose, timeout=5.0)
 
-        # 2. Trace store last among the app's services — nothing else
-        #    is still logging once the orchestrator is down.
-        await _step("trace_store", store.stop(), timeout=2.0)
+        # Agents act through the orchestrator, so they stop before it does.
+        if getattr(context, "agents", None) is not None:
+            await run_step(report, "agents", context.agents.shutdown, timeout=10.0)
 
-        # 3. Database last — its connections are the session_factory
-        #    that the managers above used.
-        await _step("database", context.database.close(), timeout=3.0)
+        await run_step(report, "resource_monitor", monitor.stop, timeout=2.0)
 
+        # 2. Clients/producers of work: embedded agent, scheduler, status bridge.
+        embedded = getattr(app.state, "embedded_agent", None)
+        if embedded is not None:
+            await run_step(report, "embedded_agent", embedded.stop, timeout=10.0)
+        await run_step(report, "scheduler", orch.scheduler_service.stop, timeout=5.0)
+        bridge = getattr(app.state, "status_bridge", None)
+        if bridge is not None:
+            await run_step(report, "status_bridge", bridge.stop, timeout=2.0)
+        publisher = getattr(app.state, "task_event_publisher", None)
+        if publisher is not None:
+            await run_step(report, "task_event_publisher", publisher.stop, timeout=2.0)
+        if context.task_events is not None:
+            await run_step(report, "task_event_log", context.task_events.close, timeout=5.0)
 
-        # 4. Unsubscribe from task events so the bus can drain and stop.
-        if context._task_event_subscription:
-            context._task_event_subscription = None
+        # 3. The orchestrator owns the managers (tasks are interrupted — not cancelled — so
+        #    they stay recoverable —, executors, memory, plugins, devices, LLM clients, bus).
+        await run_step(report, "orchestrator", orch.shutdown, timeout=30.0)
 
-        logger.info("Shutdown complete")
+        # 4. Things the managers were using.
+        await run_step(report, "app_session", context.session.close, timeout=2.0)
+        await run_step(report, "trace_store", store.stop, timeout=3.0)
+        await run_step(report, "database", context.database.close, timeout=5.0)
+        context._task_event_subscription = None
+
+        # 5. Let background log writers flush, then report anything still alive.
+        await asyncio.sleep(0)
+        report.leftover_tasks = leftover_task_names()
+        with contextlib.suppress(Exception):
+            await logger.complete()
+        if report.clean:
+            logger.info("Shutdown complete ({})", report.summary())
+        else:
+            logger.error("Shutdown finished with problems: {}", report.summary())
+        app.state.shutdown_report = report
+
+        # 6. Last of all: release log files and writer threads.
+        shutdown_logging()
 
     return lifespan
 

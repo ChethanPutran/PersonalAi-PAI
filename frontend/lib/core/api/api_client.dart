@@ -110,32 +110,44 @@ class ApiClient {
     String path, {
     Map<String, String>? query,
   }) async {
-    final response = await http.get(_uri(path, query), headers: _headers);
-    return _handle(response);
+    final uri = _uri(path, query);
+    return _run('GET', uri, () => http.get(uri, headers: _headers));
   }
 
   Future<dynamic> post(
     String path,
-    Map<String, dynamic> body,
-  ) async {
-    final response = await http.post(
-      _uri(path),
-      headers: _headers,
-      body: jsonEncode(body),
+    Map<String, dynamic> body, {
+    Map<String, String>? headers,
+  }) async {
+    final uri = _uri(path);
+    return _run(
+      'POST',
+      uri,
+      () => http.post(
+        uri,
+        headers: {..._headers, ...?headers},
+        body: jsonEncode(body),
+      ),
     );
-    return _handle(response);
   }
+
+  /// Full URL for [path] (after the `/api/v1` prefix) — for callers that stream
+  /// (SSE) and so can't go through [get]/[post].
+  Uri urlFor(String path) => _uri(path);
+
+  /// Auth + content headers, for streaming callers.
+  Map<String, String> get authHeaders => Map.unmodifiable(_headers);
 
   Future<dynamic> put(
     String path,
     Map<String, dynamic> body,
   ) async {
-    final response = await http.put(
-      _uri(path),
-      headers: _headers,
-      body: jsonEncode(body),
+    final uri = _uri(path);
+    return _run(
+      'PUT',
+      uri,
+      () => http.put(uri, headers: _headers, body: jsonEncode(body)),
     );
-    return _handle(response);
   }
 
   Future<http.Response> send(http.BaseRequest request) async {
@@ -162,18 +174,65 @@ class ApiClient {
     String path,
     Map<String, dynamic> body,
   ) async {
-    final response = await http.patch(
-      _uri(path),
-      headers: _headers,
-      body: jsonEncode(body),
+    final uri = _uri(path);
+    return _run(
+      'PATCH',
+      uri,
+      () => http.patch(uri, headers: _headers, body: jsonEncode(body)),
     );
-    return _handle(response);
   }
 
   Future<dynamic> delete(String path) async {
-    final response = await http.delete(_uri(path), headers: _headers);
-    return _handle(response);
+    final uri = _uri(path);
+    return _run('DELETE', uri, () => http.delete(uri, headers: _headers));
   }
+
+  // -----------------------------------------------------------------
+  // Request execution + debug logging
+  // -----------------------------------------------------------------
+
+  /// Sends one request and logs it with `debugPrint`:
+  ///   `[ApiClient] GET /tasks -> 200 (84 ms)`
+  /// A failure logs the status, the response body and the stack trace, so a screen that
+  /// shows "Failed to load tasks" always leaves the real reason in the console. The
+  /// Authorization header and the token are never logged.
+  Future<dynamic> _run(
+    String method,
+    Uri uri,
+    Future<http.Response> Function() send,
+  ) async {
+    final where = '$method ${uri.path}${uri.hasQuery ? '?${uri.query}' : ''}';
+    final sw = Stopwatch()..start();
+    try {
+      final response = await send();
+      debugPrint(
+        '[ApiClient] $where -> ${response.statusCode} (${sw.elapsedMilliseconds} ms)',
+      );
+      try {
+        return _handle(response);
+      } catch (e, st) {
+        debugPrint('[ApiClient] $where FAILED: $e');
+        debugPrint(
+          '[ApiClient] response body: ${_clip(utf8.decode(response.bodyBytes, allowMalformed: true))}',
+        );
+        debugPrintStack(stackTrace: st, label: '[ApiClient] $where', maxFrames: 8);
+        rethrow;
+      }
+    } catch (e, st) {
+      // Transport-level failure (no response): offline, DNS, refused, timeout...
+      if (e is! ApiException && e is! UnauthorizedException) {
+        debugPrint(
+          '[ApiClient] $where NETWORK ERROR after ${sw.elapsedMilliseconds} ms: '
+          '${e.runtimeType}: $e',
+        );
+        debugPrintStack(stackTrace: st, label: '[ApiClient] $where', maxFrames: 8);
+      }
+      rethrow;
+    }
+  }
+
+  static String _clip(String s, [int max = 1500]) =>
+      s.length <= max ? s : '${s.substring(0, max)}… (${s.length} chars)';
 
   // -----------------------------------------------------------------
   // Response handling

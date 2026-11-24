@@ -31,6 +31,8 @@
   "capabilities": [
     {
       "id": "screen.capture",
+      "taskType": "one_shot",
+      "timeoutSeconds": 30,
       "description": "Take a screenshot. Uses grim (Wayland) or scrot/import (X11). Requires PAI_SCREEN_CONSENT=1 in the agent env.",
       "permissions": ["screen"],
       "requireConfirmation": true,

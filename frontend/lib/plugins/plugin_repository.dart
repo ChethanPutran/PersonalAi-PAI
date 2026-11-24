@@ -12,8 +12,11 @@ class PluginRepository {
 
   PluginRepository({required this.api});
 
-  Future<Map<String, dynamic>> fetchPlugin(String id) async {
-    final result = await api.get('/plugins/$id');
+  Future<Map<String, dynamic>> fetchPlugin(String id, {String? version}) async {
+    final result = await api.get(
+      '/plugins/$id',
+      query: version == null ? null : {'version': version},
+    );
 
     if (result is! Map) {
       throw PluginRepositoryException(
@@ -24,8 +27,11 @@ class PluginRepository {
     return Map<String, dynamic>.from(result);
   }
 
-  Future<Map<String, dynamic>> fetchManifest(String pluginId) async {
-    final result = await api.get('/plugins/$pluginId/manifest.json');
+  Future<Map<String, dynamic>> fetchManifest(String pluginId, {String? version}) async {
+    final result = await api.get(
+      '/plugins/$pluginId/manifest.json',
+      query: version == null ? null : {'version': version},
+    );
 
     if (result is! Map) {
       throw PluginRepositoryException(
@@ -33,6 +39,15 @@ class PluginRepository {
       );
     }
 
+    return Map<String, dynamic>.from(result);
+  }
+
+  /// `GET /plugins/updates` — per device: installed plugins with a newer version.
+  Future<Map<String, dynamic>> fetchUpdates() async {
+    final result = await api.get('/plugins/updates');
+    if (result is! Map) {
+      throw PluginRepositoryException('Invalid updates response: ${result.runtimeType}');
+    }
     return Map<String, dynamic>.from(result);
   }
 

@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 
 import '../../auth/auth_service.dart';
+import '../theme/theme.dart';
+import '../widgets/hud/hud.dart';
 
 class LoginScreen extends StatefulWidget {
   final AuthService auth;
@@ -61,84 +63,116 @@ class _LoginScreenState extends State<LoginScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      body: Center(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 420),
-          child: Padding(
-            padding: const EdgeInsets.all(24),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                const Text(
-                  'Personal AI',
-                  style: TextStyle(fontSize: 28, fontWeight: FontWeight.w700),
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  _isRegistering ? 'Create your account' : 'Sign in',
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(color: Colors.grey),
-                ),
-                const SizedBox(height: 24),
-
-                TextField(
-                  controller: _email,
-                  keyboardType: TextInputType.emailAddress,
-                  autocorrect: false,
-                  decoration: const InputDecoration(
-                    labelText: 'Email',
-                    border: OutlineInputBorder(),
+    final scheme = Theme.of(context).colorScheme;
+    final text = Theme.of(context).textTheme;
+    return HudScaffold(
+      resizeToAvoidBottomInset: true,
+      body: SafeArea(
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.symmetric(horizontal: PaiSpacing.xl, vertical: PaiSpacing.lg),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 420),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Center(
+                    child: ArcReactorOrb(
+                      state: _busy ? OrbState.thinking : OrbState.idle,
+                      size: 148,
+                    ),
                   ),
-                ),
-                const SizedBox(height: 12),
-
-                TextField(
-                  controller: _password,
-                  obscureText: true,
-                  decoration: const InputDecoration(
-                    labelText: 'Password',
-                    border: OutlineInputBorder(),
-                  ),
-                  onSubmitted: (_) => _submit(),
-                ),
-
-                if (_error != null) ...[
-                  const SizedBox(height: 12),
+                  const SizedBox(height: PaiSpacing.lg),
                   Text(
-                    _error!,
-                    style: const TextStyle(color: Colors.red),
+                    'PERSONAL AI',
+                    textAlign: TextAlign.center,
+                    style: text.displaySmall?.copyWith(color: scheme.primary, letterSpacing: 6),
+                  ),
+                  const SizedBox(height: PaiSpacing.xs),
+                  Text(
+                    _isRegistering ? 'CREATE YOUR ACCOUNT' : 'SECURE ACCESS',
+                    textAlign: TextAlign.center,
+                    style: text.labelMedium?.copyWith(color: scheme.onSurfaceVariant, letterSpacing: 4),
+                  ),
+                  const SizedBox(height: PaiSpacing.xl),
+                  HudPanel(
+                    blur: true,
+                    padding: const EdgeInsets.all(PaiSpacing.xl),
+                    title: _isRegistering ? 'Register' : 'Sign in',
+                    leadingIcon: Icons.lock_outline,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        HudTextField(
+                          controller: _email,
+                          label: 'Email',
+                          icon: Icons.alternate_email,
+                          keyboardType: TextInputType.emailAddress,
+                          textInputAction: TextInputAction.next,
+                          autofillHints: const [AutofillHints.email],
+                        ),
+                        const SizedBox(height: PaiSpacing.md),
+                        HudTextField(
+                          controller: _password,
+                          label: 'Password',
+                          icon: Icons.key_outlined,
+                          obscureText: true,
+                          textInputAction: TextInputAction.done,
+                          autofillHints: const [AutofillHints.password],
+                          onSubmitted: (_) => _submit(),
+                        ),
+                        if (_error != null) ...[
+                          const SizedBox(height: PaiSpacing.md),
+                          Semantics(
+                            liveRegion: true,
+                            child: Container(
+                              padding: const EdgeInsets.all(PaiSpacing.md),
+                              decoration: BoxDecoration(
+                                color: scheme.error.withValues(alpha: 0.10),
+                                borderRadius: BorderRadius.circular(PaiRadii.sm),
+                                border: Border.all(color: scheme.error.withValues(alpha: 0.5)),
+                              ),
+                              child: Row(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Icon(Icons.error_outline, size: 18, color: scheme.error),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Text(_error!,
+                                        style: text.bodySmall?.copyWith(color: scheme.onSurface)),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ],
+                        const SizedBox(height: PaiSpacing.xl),
+                        GlowButton(
+                          label: _isRegistering ? 'Create account' : 'Sign in',
+                          icon: _isRegistering ? Icons.person_add_alt_1 : Icons.login_rounded,
+                          expanded: true,
+                          loading: _busy,
+                          onPressed: _busy ? null : _submit,
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: PaiSpacing.md),
+                  TextButton(
+                    onPressed: _busy
+                        ? null
+                        : () => setState(() => _isRegistering = !_isRegistering),
+                    child: Text(
+                      _isRegistering
+                          ? 'Already have an account? Sign in'
+                          : "Don't have an account? Register",
+                      textAlign: TextAlign.center,
+                    ),
                   ),
                 ],
-
-                const SizedBox(height: 20),
-
-                ElevatedButton(
-                  onPressed: _busy ? null : _submit,
-                  child: _busy
-                      ? const SizedBox(
-                          width: 20,
-                          height: 20,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : Text(_isRegistering ? 'Create account' : 'Sign in'),
-                ),
-
-                const SizedBox(height: 12),
-
-                TextButton(
-                  onPressed: _busy
-                      ? null
-                      : () => setState(() => _isRegistering = !_isRegistering),
-                  child: Text(
-                    _isRegistering
-                        ? 'Already have an account? Sign in'
-                        : "Don't have an account? Register",
-                  ),
-                ),
-              ],
+              ),
             ),
           ),
         ),

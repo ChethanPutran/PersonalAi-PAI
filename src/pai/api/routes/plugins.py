@@ -6,13 +6,15 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 from pai.api.dependencies import get_current_admin, get_current_user
 from pai.app_context import PAIAppContext, get_app_context
 from pai.plugins.manifest import PluginManifest
 from pai.plugins.manifest_info import PluginInfo
 from pai.plugins.store import LocalArtifactStore
+from pai.plugins.updates import build_update_info, version_summary
+from pai.version import MANIFEST_SCHEMA_MAX, MANIFEST_SCHEMA_MIN, MIN_SUPPORTED_APP_VERSION, RUNTIME_VERSION
 
 
 router = APIRouter(prefix="/plugins", tags=["plugins"])
@@ -71,6 +73,7 @@ async def registry_index(
                 device_type=device_type,
                 device_platform=device_platform,
                 device_architecture=device_architecture,
+                app_version=getattr(device, "app_version", None) or None,
             )
             res[device.id] = plugins
             
@@ -84,9 +87,73 @@ async def registry_index(
     return res
 
 
+@router.get("/versions-info")
+async def versions_info() -> Dict[str, Any]:
+    """The versions this backend speaks (runtime, manifest schema range, min client app)."""
+    return {
+        "runtime_version": RUNTIME_VERSION,
+        "manifest_schema": {"min": MANIFEST_SCHEMA_MIN, "max": MANIFEST_SCHEMA_MAX},
+        "min_supported_app_version": MIN_SUPPORTED_APP_VERSION,
+    }
+
+
+@router.get("/updates")
+async def plugin_updates(
+    device_id: Optional[str] = None,
+    context: PAIAppContext = Depends(get_app_context),
+    user_id: str = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Per device: installed plugins that have a newer version, with release notes and the
+    capability diff. Devices of other users are never reported."""
+    pm = context.orchestrator.plugin_manager
+    devices = await context.orchestrator.device_manager.list_devices(user_id=user_id)
+    if device_id is not None:
+        devices = [d for d in devices if d.id == device_id]
+        if not devices:
+            raise HTTPException(404, f"Device '{device_id}' not found")
+
+    out: Dict[str, Any] = {}
+    for d in devices:
+        app_version = getattr(d, "app_version", None) or None
+        items = []
+        for rec in await pm.list_device_plugins(d.id):
+            if not rec["is_installed"]:
+                continue
+            items.append(build_update_info(pm.registry, rec["plugin_id"], rec["version"], app_version))
+        out[d.id] = {
+            "app_version": app_version,
+            "updates": [i for i in items if i["update_available"] or i["blocked"]],
+            "plugins": items,
+        }
+    return {"runtime_version": RUNTIME_VERSION, "devices": out}
+
+
+@router.get("/{plugin_id}/versions")
+async def list_plugin_versions(
+    plugin_id: str,
+    device_id: Optional[str] = None,
+    context: PAIAppContext = Depends(get_app_context),
+    user_id: str = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """All published versions of a plugin with release notes + per-version compatibility
+    (against this device's app version when ``device_id`` is given)."""
+    pm = context.orchestrator.plugin_manager
+    app_version = None
+    if device_id:
+        device = await context.orchestrator.device_manager.get(device_id)
+        if device is None or getattr(device, "user_id", user_id) != user_id:
+            raise HTTPException(404, f"Device '{device_id}' not found")
+        app_version = getattr(device, "app_version", None) or None
+    versions = version_summary(pm.registry, plugin_id, app_version)
+    if not versions:
+        raise HTTPException(404, f"Plugin '{plugin_id}' not found")
+    return {"plugin_id": plugin_id, "runtime_version": RUNTIME_VERSION, "versions": versions}
+
+
 @router.get("/{plugin_id}/manifest.json")
 async def get_manifest(
     plugin_id: str,
+    version: Optional[str] = None,
     context: PAIAppContext = Depends(get_app_context),
 ) -> PluginManifest:
     if not plugin_id:
@@ -94,7 +161,7 @@ async def get_manifest(
     
     plugin_manager = context.orchestrator.plugin_manager
 
-    plugin_manifest = plugin_manager.get_manifest(plugin_id)
+    plugin_manifest = plugin_manager.get_manifest(plugin_id, version)
     if not plugin_manifest:
         raise HTTPException(404, f"plugin manifest not found: {plugin_id}")
 
@@ -185,11 +252,13 @@ async def list_plugins(
 @router.get("/{plugin_id}")
 async def get_plugin(
     plugin_id: str,
+    version: Optional[str] = None,
     context: PAIAppContext = Depends(get_app_context),
 ) -> PluginInfo:
-    plugin = context.orchestrator.plugin_manager.get_plugin(plugin_id)
+    pm = context.orchestrator.plugin_manager
+    plugin = pm.get_plugin_version(plugin_id, version) if version else pm.get_plugin(plugin_id)
     if plugin is None:
-        raise HTTPException(404, f"Plugin '{plugin_id}' not found")
+        raise HTTPException(404, f"Plugin '{plugin_id}'{f'@{version}' if version else ''} not found")
     return plugin
 
 
@@ -220,23 +289,44 @@ async def install_plugin(
 
 
     # ---- 2. Resolve version ----
+    # Default = newest version THIS device can run (runtime + its app version), not merely the
+    # newest published; an explicit version is validated the same way below.
+    device_app_version = getattr(device, "app_version", None) or None
     if payload.version:
         version = payload.version
     else:
         try:
-            catalog_entry = plugin_manager.require_plugin(plugin_id)
+            plugin_manager.require_plugin(plugin_id)
         except ValueError as exc:
             raise HTTPException(404, str(exc)) from exc
-        version = catalog_entry.version
+        runnable = [
+            i for i in plugin_manager.list_plugin_versions(plugin_id)
+            if plugin_manager.registry.entry_compatibility(
+                plugin_manager.get_manifest(plugin_id, i.version), device_app_version).compatible
+        ]
+        if not runnable:
+            newest = plugin_manager.get_plugin(plugin_id)
+            reason = plugin_manager.registry.entry_compatibility(
+                plugin_manager.get_manifest(plugin_id, newest.version), device_app_version).reason
+            raise HTTPException(409, f"No version of '{plugin_id}' can run here: {reason}")
+        version = runnable[0].version
 
-    # ---- 3. Fetch the per-platform manifest ----
-    manifest = plugin_manager.get_manifest(plugin_id)
+    # ---- 3. Fetch the manifest of the requested version ----
+    manifest = plugin_manager.get_manifest(plugin_id, version)
     if manifest is None:
         raise HTTPException(
             404,
             f"Plugin '{plugin_id}@{version}' has no manifest "
             f"for platform '{device_platform}'",
         )
+
+    # ---- 4a. Version compatibility (runtime / app / manifest schema) ----
+    compat = plugin_manager.registry.entry_compatibility(manifest, device_app_version)
+    if not compat.compatible:
+        raise HTTPException(409, {
+            "error": "incompatible_version",
+            "plugin_id": plugin_id, "version": version, **compat.to_dict(),
+        })
 
     # ---- 4. Compatibility — against the per-platform manifest ----
     declared_types = manifest.deviceTypes
@@ -403,6 +493,38 @@ async def report_uninstall(
     if payload.success:
         await pm.mark_uninstalled_on_device(payload.device_id, plugin_id)
     return {"ok": True}
+
+
+class DevicePermissionsReport(BaseModel):
+    """What the user has allowed on a device, per installed plugin: {plugin_id: {permission: state}}."""
+    plugins: Dict[str, Dict[str, str]] = Field(default_factory=dict)
+
+    @field_validator("plugins")
+    @classmethod
+    def _bounded(cls, v: Dict[str, Dict[str, str]]) -> Dict[str, Dict[str, str]]:
+        if len(v) > 128 or any(len(p) > 32 for p in v.values()):
+            raise ValueError("too many plugins or permissions in one report")
+        return v
+
+
+@router.post("/device/{device_id}/permissions")
+async def report_device_permissions(
+    device_id: str,
+    payload: DevicePermissionsReport,
+    context: PAIAppContext = Depends(get_app_context),
+    user_id: str = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """The device tells the server which permissions the user allowed for its installed plugins.
+
+    Advisory (the device re-checks before every invoke): the server uses it to stop offering capabilities the
+    device would refuse. Only the device's OWNER may report, so nobody can hide another user's plugins.
+    """
+    device = await context.orchestrator.device_manager.get(device_id)
+    if device is None or getattr(device, "user_id", None) != user_id:        # not yours = not found
+        raise HTTPException(404, f"Device '{device_id}' not found")
+    result = await context.orchestrator.plugin_manager.report_device_permissions(
+        device_id=device_id, plugins=payload.plugins)
+    return {"ok": True, "device_id": device_id, **result}
 
 
 @router.get("/device/{device_id}/installed")

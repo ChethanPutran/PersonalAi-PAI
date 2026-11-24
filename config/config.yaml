@@ -8,7 +8,6 @@
 app:
   name: PAI
   environment: development
-  debug: true
   timezone: Asia/Kolkata
 
 api:
@@ -48,10 +47,9 @@ orchestration:
   chat_reply_max_tokens: 500
   chat_reply_temperature: 0.7 
   max_concurrent_tasks: 10
-  task_timeout: 300
-  max_retries: 3
-  retry_delay: 2
-  enable_planning: true
+  task_timeout_seconds: 300
+  max_task_retries: 3
+  retry_delay_seconds: 2
   enable_reflection: true
 
 # ============================================================
@@ -88,7 +86,6 @@ event_bus:
     url: nats://localhost:4222
     servers:
       - nats://localhost:4222
-    name: pai
   max_reconnect_attempts: 10
   reconnect_time_wait: 2
   connect_timeout: 5
@@ -99,8 +96,6 @@ event_bus:
 # ============================================================
 
 memory:
-  enabled: true
-
   short_term:
     enabled: true
     backend: memory  # redis / memory
@@ -139,8 +134,12 @@ memory:
 # ============================================================
 
 llm_provider:
-  provider: openrouter
-  model: nvidia/nemotron-3-ultra-550b-a55b:free
+  # provider: airouter | openrouter | openai | gemini | kimi
+  # airouter (https://www.airouter.in, OpenAI-compatible): models are gateway slugs (list:
+  # GET https://api.airouter.in/v1/models); base_url defaults to https://api.airouter.in/v1;
+  # key: LLM_PROVIDER__API_KEY=sk-air-v1-...
+  provider: airouter
+  model: anthropic/claude-haiku-5.5        # default for anything without its own route below
   base_url: null
   temperature: 0.2
   max_tokens: 4096
@@ -148,16 +147,44 @@ llm_provider:
   max_retries: 3
   retry_backoff: 2.0
 
+# Per-role models on the provider above. A role left out uses llm_provider.model.
+llm_routes:
+  planner: anthropic/claude-sonnet-5.5     # goal decomposition: strict JSON plans
+  chat: anthropic/claude-haiku-5.5         # replies + voice: latency matters most
+  agent: anthropic/claude-sonnet-5.5       # long-running ReAct agents: JSON actions
+
+# MODEL REGISTRY: which models exist, what they can do (tool_use, reasoning, vision, context) and what they cost.
+# Token prices (LLM cost) and voice prices (STT per minute / TTS per 1K characters) are read from this file; at
+# startup the configured models are checked against it (a planner/agent model must support tools).
+models_file: config/models.yaml
+
+# Per-deployment price OVERRIDES, USD per million tokens, per model id (wins over models.yaml). Cost of a call =
+# input tokens x input price + output tokens x output price. A model with no price anywhere uses the cost the
+# gateway reports (AIRouter returns one); with neither, the cost is recorded as unknown while tokens are counted.
+llm_pricing: {}
+#  anthropic/claude-sonnet-5.5: {input_per_million: 2.0, output_per_million: 10.0}
+#  anthropic/claude-sonnet-5.5: {input_per_million: 0.0, output_per_million: 0.0}
+#  anthropic/claude-haiku-5.5:  {input_per_million: 0.0, output_per_million: 0.0}
+
+# Token/cost totals: kept in memory and appended to a JSONL ledger so they survive restarts.
+# View them at GET /system/llm/usage (admin).
+llm_cost:
+  track: true
+  ledger_path: ./data/llm_usage.jsonl
+  # Credits you have on the gateway, in USD, to show "remaining" (null = don't track a balance).
+  # You can also set the balance from the admin panel (Usage page); that replaces this value until
+  # you reset it there. Informational only: nothing is blocked when it reaches 0. Calls with an unknown
+  # price (see llm_pricing) cannot be deducted.
+  initial_credits_usd: 2
+  credits_path: ./data/llm_credits.json
+
 # ============================================================
 # EXECUTOR
 # ============================================================
 
 executor:
-  default_timeout: 60
-  max_concurrent_executions: 5
+  max_concurrent_tasks: 5
   working_directory: ./workspace
-  allow_shell: false
-  allow_subprocess: true
 
 # ============================================================
 # PLUGINS
@@ -166,7 +193,7 @@ executor:
 plugins:
   plugin_registry_path: ./plugin_registry/plugins
   plugin_artifact_store: local
-  local_artifact_path: ./plugin_registry/.packages
+  plugin_local_artifact_path: ./plugin_registry/.packages
 
   s3_config:
     bucket: null
@@ -208,25 +235,31 @@ security:
   authentication:
     enabled: true
     access_token_expire_minutes: 30
-    refresh_token_expire_days: 7
+    refresh_token_expiration_days: 7
     algorithm: HS256
 
   authorization:
     enabled: true
     auth_policy: default_policy
+    # How far an approval of keyboard/mouse actions (the "input" plugin) may reach:
+    #   once     every action asks again (default; nothing typed or clicked can be remembered)
+    #   session  "approve for this session" is offered (up to 8h) so an agent does not need a prompt per click
+    # Camera control stays once-only regardless. Override per environment in development.yaml.
+    input_grant_scope: once
     roles:
-      - name: admin
+      - role: admin
         permissions:
           - read
           - write
           - delete
           - execute
           - manage
-      - name: user
+      - role: user
         permissions:
           - read
           - write
-      - name: guest
+          - execute   # run plugins on the user's own devices; risk/consent policies still gate each call
+      - role: guest
         permissions:
           - read
 
@@ -243,7 +276,7 @@ security:
 storage:
   data_directory: ./data
   temporary_directory: ./tmp
-  artifact_directory: ./artifacts
+  artifacts_directory: ./artifacts
   max_storage_size_mb: 100
 
 # ============================================================
@@ -348,6 +381,27 @@ tasks:
   default_timeout: 300
 
 # ============================================================
+# TASK EVENT STREAM  (GET /api/v1/tasks/events, per-user SSE with replay)
+# ============================================================
+# Every task status change is appended to a per-user log with a sequence number; clients
+# reconnect with `Last-Event-ID` and receive exactly what they missed (no polling needed).
+#   memory     - in-process ring buffer. Default. Fine for one backend instance; after a server
+#                restart clients get one `resync` event and reload their list once.
+#   jetstream  - NATS JetStream (needs `event_bus.nats` + a server started with -js): events
+#                survive restarts and are shared between several backend instances.
+task_events:
+  backend: memory
+  buffer_size: 1000
+  max_users: 10000
+  # ttl_seconds: 86400
+  subscriber_queue: 256
+  jetstream:
+    stream: PAI_TASK_EVENTS
+    subject_prefix: pai.tasks
+    max_age_seconds: 86400
+    max_msgs_per_user: 1000
+
+# ============================================================
 # FEATURE FLAGS
 # ============================================================
 
@@ -373,3 +427,62 @@ prompts:
     redact_secrets: true
     strip_tool_calls: true
     detect_jailbreak_success: true
+
+# ============================================================
+# VOICE (realtime, streaming)
+# ============================================================
+voice:
+  enabled: true
+  # Choose providers here. "auto" = OpenAI when a key is available, otherwise the FREE local engines.
+  # airouter STT is one request per utterance, so there are no live partial captions while speaking.
+  stt: airouter                # auto | airouter | openai_realtime | openai_batch | vosk (free, offline) | fake
+  tts: airouter                # auto | airouter | openai | piper (free, offline) | espeak (free, tiny) | fake
+  
+  # AIRouter speech (used when stt/tts above is `airouter`). Every value is read from here.
+  airouter:
+    api_base: https://api.airouter.in/v1
+    # api_key: omit to reuse LLM_PROVIDER__API_KEY (when llm_provider is airouter) or AIROUTER_API_KEY
+    stt_model: microsoft/mai-transcribe-2      # GET /v1/models?type=transcription
+    tts_model: openai/tts-1                    # GET /v1/models?type=speech
+    voice: alloy                               # voice names are per provider (openai: alloy, nova, onyx, ...)
+    tts_speed: null                            # null = model default (openai/tts-1: 0.25-4)
+    # Voice prices (USD): null = taken from models.yaml (speech.stt per_minute_cost / speech.tts per_1k_chars_cost);
+    # set a number here to override it for this deployment.
+    stt_cost_per_minute_usd: null
+    tts_cost_per_1k_chars_usd: null
+    stt_timeout_seconds: 30
+    tts_timeout_seconds: 30
+    
+  # api_key: set voice.api_key here or the OPENAI_API_KEY environment variable (OpenAI only)
+  voice: alloy                 # OpenAI voice name (ignored by the local engines)
+  # Free local engines: pip install 'ai-personal-agent[voice-local]'. Models are downloaded
+  # once into models_dir on first use (set auto_download_models: false to forbid downloads).
+  models_dir: ./data/voice_models
+  auto_download_models: true
+  vosk_model: vosk-model-small-en-us-0.15      # other languages: https://alphacephei.com/vosk/models
+  piper_voice: en_US-lessac-medium             # other voices: https://huggingface.co/rhasspy/piper-voices
+  language: null               # e.g. "en"; null = auto-detect
+  input_sample_rate: 16000     # PCM16 mono sent by clients
+  output_sample_rate: 24000    # PCM16 mono sent back
+  barge_in: true
+  barge_in_min_speech_ms: 250
+  thinking_filler: ""          # e.g. "One moment." — spoken if a turn needs tools and is slow
+  vad:
+    end_silence_ms: 700
+    min_speech_ms: 120
+  limits:
+    max_utterance_seconds: 30
+    idle_timeout_seconds: 120
+    max_sessions_per_user: 2
+
+# ============================================================
+# ADMIN PANEL  (served at /admin; API at /api/v1/admin)
+# ============================================================
+admin:
+  enabled: true
+  test_capabilities: false     # device-free admin.test.* capabilities: enable in development.yaml only
+  dag_history_size: 200         # finished DAG runs kept in memory (older ones are read from the history below)
+  # Persistent history shown in the Events and DAG tabs (JSONL, one file per UTC day):
+  history_enabled: true
+  history_dir: ./data/admin_history
+  history_retention_days: 7     # events + finished DAG runs older than this are deleted

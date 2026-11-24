@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../core/api/api_client.dart';
 import '../../config/app_config.dart';
+import '../widgets/hud/hud.dart';
 
 class PluginDetailScreen extends StatefulWidget {
   final String pluginId;
@@ -66,9 +67,9 @@ class _PluginDetailScreenState extends State<PluginDetailScreen> {
     // unchanged
     // (uses _loading, _error, _details, _configSchema, _configValues,
     //  _buildSchemaForm, _buildGenericForm, _save, _load)
-    return Scaffold(
-      appBar: AppBar(
-        title: Text('Plugin: ${widget.pluginId}'),
+    return HudScaffold(
+      appBar: HudAppBar(
+        titleWidget: Text('Plugin: ${widget.pluginId}'),
         actions: [
           IconButton(icon: const Icon(Icons.refresh), onPressed: _load),
         ],

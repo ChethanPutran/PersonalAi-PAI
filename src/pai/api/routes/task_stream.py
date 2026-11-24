@@ -114,6 +114,7 @@ async def sse_events(
     session_id: str,
     is_disconnected: Callable[[], Awaitable[bool]],
     heartbeat_seconds: float = SSE_HEARTBEAT_SECONDS,
+    should_stop: Callable[[], bool] = lambda: False,
 ) -> AsyncIterator[str]:
     """The text/event-stream body. Each event carries a per-connection ``id:``; a comment
     heartbeat keeps proxies from closing an idle connection and lets us notice a
@@ -121,13 +122,121 @@ async def sse_events(
     yield f"retry: {SSE_RETRY_MS}\n\n"
     yield f": connected session={session_id}\n\n"
     event_id = 0
+    idle = 0.0
+    # Wait in short slices so a server shutdown (``should_stop``) ends the stream within ~1s
+    # instead of after the next heartbeat.
+    slice_s = min(1.0, heartbeat_seconds)
     while True:
-        item = await stream.next_or_none(heartbeat_seconds)
+        if should_stop():
+            logger.debug("SSE stream for session {} ending: server shutting down", session_id)
+            return
+        item = await stream.next_or_none(slice_s)
         if await is_disconnected():
             logger.debug("SSE client for session {} went away", session_id)
             return
         if item is None:
-            yield ": keep-alive\n\n"
+            idle += slice_s
+            if idle >= heartbeat_seconds:
+                idle = 0.0
+                yield ": keep-alive\n\n"
             continue
+        idle = 0.0
         event_id += 1
         yield item.sse_frame(event_id)
+
+
+# ============================================================================
+# Per-USER task event stream  (GET /tasks/events)
+# ============================================================================
+
+class ReadyFrame(BaseModel):
+    """``event: ready`` — the stream is live; ``seq`` is the newest event the server has."""
+    seq: int
+    replayed: int = 0
+
+
+class ResyncFrame(BaseModel):
+    """``event: resync`` — events were lost (too old / server restarted / client too slow).
+    Reload the task list once; the stream continues from ``seq``."""
+    seq: int
+    reason: str
+
+
+def _frame(event_id: int, name: str, body: BaseModel | dict[str, Any]) -> str:
+    payload = body.model_dump_json() if isinstance(body, BaseModel) else json.dumps(body, default=str)
+    return f"id: {event_id}\nevent: {name}\ndata: {payload}\n\n"
+
+
+def parse_resume_point(last_event_id: Optional[str], after: Optional[int]) -> Optional[int]:
+    """Where the client says it left off: ``Last-Event-ID`` wins, then ``?after=``; else None
+    (a fresh connection). A malformed header is treated as fresh."""
+    if last_event_id is not None and last_event_id.strip():
+        try:
+            return max(0, int(last_event_id.strip()))
+        except ValueError:
+            return None
+    return after if after is None or after >= 0 else 0
+
+
+async def user_task_sse(
+    log: Any,                                   # TaskEventLog
+    user_id: str,
+    resume_after: Optional[int],
+    *,
+    is_disconnected: Callable[[], Awaitable[bool]],
+    should_stop: Callable[[], bool] = lambda: False,
+    heartbeat_seconds: float = SSE_HEARTBEAT_SECONDS,
+) -> AsyncIterator[str]:
+    """SSE body for ONE user's events: replay what was missed, then stream live.
+
+    Subscribes BEFORE replaying so nothing can fall in between; events seen twice are dropped
+    by seq. Only ``user_id``'s log is ever read, so there is no cross-user path.
+    """
+    sub = await log.subscribe(user_id)
+    try:
+        yield f"retry: {SSE_RETRY_MS}\n\n"
+        sent = resume_after or 0
+        replayed = 0
+        if resume_after is None:
+            sent = await log.latest_seq(user_id)
+        else:
+            result = await log.replay(user_id, resume_after)
+            if result.gap:
+                sent = result.latest_seq
+                yield _frame(sent, "resync", ResyncFrame(seq=sent, reason="history_unavailable"))
+            else:
+                for ev in result.events:
+                    if ev.seq > sent:
+                        sent = ev.seq
+                        replayed += 1
+                        yield _frame(ev.seq, ev.event, ev.data)
+        yield _frame(sent, "ready", ReadyFrame(seq=sent, replayed=replayed))
+
+        idle = 0.0
+        slice_s = min(1.0, heartbeat_seconds)
+        while True:
+            if should_stop():
+                return
+            item = await sub.get(slice_s)
+            if await is_disconnected():
+                return
+            if sub.needs_resync:
+                sub.clear_resync()
+                latest = await log.latest_seq(user_id)
+                sent = max(sent, latest)
+                idle = 0.0
+                yield _frame(sent, "resync", ResyncFrame(seq=sent, reason="slow_consumer"))
+                continue
+            if item is None:
+                idle += slice_s
+                if idle >= heartbeat_seconds:
+                    idle = 0.0
+                    yield ": keep-alive\n\n"
+                continue
+            if item.seq <= sent:                 # already delivered by the replay
+                continue
+            idle = 0.0
+            sent = item.seq
+            yield _frame(item.seq, item.event, item.data)
+    finally:
+        await sub.close()

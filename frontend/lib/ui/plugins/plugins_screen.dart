@@ -3,10 +3,17 @@ import 'package:pai_mobile/device/repositories/device_repository.dart';
 import 'package:pai_mobile/models/device.dart';
 import 'package:pai_mobile/plugins/plugin_repository.dart';
 import 'package:pai_mobile/plugins/plugin_service.dart';
+import '../../core/app_version.dart';
 import '../../plugins/models/plugin_info.dart';
+import '../../plugins/models/plugin_update.dart';
+import 'widgets/plugin_update_sheet.dart';
 import '../../plugins/plugin_manager.dart';
 import 'capability_config_screen.dart';
 import 'plugin_test_screen.dart';
+import '../../plugins/permissions/permissions_service.dart';
+import 'permissions/permissions_screen.dart';
+import '../theme/theme.dart';
+import '../widgets/hud/hud.dart';
 
 class PluginsScreen extends StatefulWidget {
   final PluginManager manager;
@@ -31,18 +38,73 @@ class _SectionHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 20, 16, 8),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(title, style: Theme.of(context).textTheme.titleMedium),
-          if (subtitle != null)
-            Text(
-              subtitle!,
-              style: TextStyle(fontSize: 11, color: Colors.grey[600]),
-            ),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        HudSectionHeader(title),
+        if (subtitle != null)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(PaiSpacing.lg, 0, PaiSpacing.lg, PaiSpacing.sm),
+            child: Text(subtitle!, style: context.pai.mono(size: 12)),
+          ),
+      ],
+    );
+  }
+}
+
+/// One plugin as a HUD panel. Same slots as a ListTile (leading / title / subtitle / trailing),
+/// but the actions drop under the text on narrow screens instead of squeezing the title.
+class _PluginRow extends StatelessWidget {
+  final Widget? leading;
+  final Widget title;
+  final Widget? subtitle;
+  final Widget? trailing;
+  final bool isThreeLine;
+  const _PluginRow({this.leading, required this.title, this.subtitle, this.trailing, this.isThreeLine = false});
+
+  @override
+  Widget build(BuildContext context) {
+    final text = Theme.of(context).textTheme;
+    final info = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        DefaultTextStyle.merge(style: text.titleMedium, child: title),
+        if (subtitle != null) ...[
+          const SizedBox(height: 3),
+          DefaultTextStyle.merge(style: text.bodySmall, child: subtitle!),
         ],
+      ],
+    );
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: PaiSpacing.lg, vertical: PaiSpacing.xs + 2),
+      child: HudPanel(
+        brackets: false,
+        padding: const EdgeInsets.fromLTRB(PaiSpacing.md, PaiSpacing.md, PaiSpacing.md, PaiSpacing.sm),
+        child: LayoutBuilder(
+          builder: (context, box) {
+            final head = Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (leading != null) ...[
+                  Padding(padding: const EdgeInsets.only(top: 2), child: leading),
+                  const SizedBox(width: PaiSpacing.md),
+                ],
+                Expanded(child: info),
+              ],
+            );
+            if (trailing == null) return head;
+            if (box.maxWidth >= 600) {
+              return Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [Expanded(child: head), const SizedBox(width: PaiSpacing.md), trailing!],
+              );
+            }
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [head, Align(alignment: Alignment.centerRight, child: trailing!)],
+            );
+          },
+        ),
       ),
     );
   }
@@ -99,6 +161,56 @@ Future<void> _handleInstall(String pluginId, String version) async {
 
 
   // ---------------------------------------------------------------------------
+  // Update
+  // ---------------------------------------------------------------------------
+
+  /// Shows what the update changes first; only installs if the user confirms.
+  Future<void> _showUpdate(PluginInfo plugin, {String? deviceId, String? deviceName}) async {
+    final update = widget.manager.updateFor(plugin.id, deviceId: deviceId);
+    if (update == null) return;
+    final go = await showPluginUpdateSheet(context, plugin: plugin, update: update);
+    if (go != true || !mounted) return;
+
+    final messenger = ScaffoldMessenger.of(context);
+    setState(() => _installing.add(plugin.id));
+    try {
+      if (deviceId == null) {
+        await widget.manager.update(plugin.id);
+        messenger.showSnackBar(SnackBar(content: Text('${plugin.name} updated to v${update.latestVersion}')));
+      } else {
+        await widget.manager.updateOnDevice(plugin.id, deviceId);
+        messenger.showSnackBar(SnackBar(content: Text('Update requested on ${deviceName ?? 'device'}')));
+      }
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text('Update failed: $e')));
+    } finally {
+      if (mounted) setState(() => _installing.remove(plugin.id));
+    }
+  }
+
+  /// "v1.0.0" or "v1.0.0 → v2.0.0" plus a tappable hint when a newer version is blocked.
+  Widget _versionLine(PluginInfo plugin, PluginUpdate? update, String? installed, List<String> caps) {
+    final shown = installed ?? plugin.version;
+    final label = (update?.updateAvailable ?? false)
+        ? 'v$shown → v${update!.latestVersion}'
+        : 'v$shown';
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text('$label  ·  ${caps.join(", ")}'),
+        if (update?.blocked != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: Text(
+              'v${update!.blocked!.version} needs ${update.blocked!.required ?? 'a newer version'}',
+              style: TextStyle(fontSize: 11, color: context.pai.muted),
+            ),
+          ),
+      ],
+    );
+  }
+
+  // ---------------------------------------------------------------------------
   // Uninstall (unchanged)
   // ---------------------------------------------------------------------------
 
@@ -122,8 +234,28 @@ Future<void> _handleInstall(String pluginId, String version) async {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('Plugins')),
+    return HudScaffold(
+      appBar: HudAppBar(
+        title: 'Plugins',
+        automaticallyImplyLeading: false,
+        actions: [
+          IconButton(
+            key: const Key('open-permissions'),
+            tooltip: 'Permissions',
+            icon: const Icon(Icons.verified_user_outlined),
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute<void>(
+                builder: (_) => PermissionsScreen(
+                  service: PermissionsService.of(widget.manager.api),
+                  deviceNames: {
+                    if (widget.thisDevice != null) widget.thisDevice!.id: widget.thisDevice!.name,
+                  },
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
       body: ListenableBuilder(
         listenable: widget.manager,
         builder: (context, _) {
@@ -133,21 +265,31 @@ Future<void> _handleInstall(String pluginId, String version) async {
           if (thisDevicePlugins.isEmpty && otherGroups.isEmpty) {
             return RefreshIndicator(
               onRefresh: widget.manager.loadCatalog,
-              child: ListView(
-                physics: const AlwaysScrollableScrollPhysics(),
-                children: const [
-                  SizedBox(height: 200),
-                  Center(
-                    child: Text('No plugins compatible with your devices.'),
-                  ),
-                ],
+              child: LayoutBuilder(
+                builder: (context, box) => ListView(
+                  physics: const AlwaysScrollableScrollPhysics(),
+                  children: [
+                    SizedBox(
+                      height: box.maxHeight,
+                      child: const HudEmptyState(
+                        icon: Icons.extension_outlined,
+                        title: 'No plugins',
+                        message: 'No plugins compatible with your devices.',
+                      ),
+                    ),
+                  ],
+                ),
               ),
             );
           }
 
           return RefreshIndicator(
             onRefresh: widget.manager.loadCatalog,
-            child: ListView(
+            child: Align(
+              alignment: Alignment.topCenter,
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 860),
+                child: ListView(
               physics: const AlwaysScrollableScrollPhysics(),
               children: [
                 _SectionHeader(
@@ -156,11 +298,11 @@ Future<void> _handleInstall(String pluginId, String version) async {
                       '${widget.thisDevice?.name} · ${widget.thisDevice?.platform}/${widget.thisDevice?.architecture}',
                 ),
                 if (thisDevicePlugins.isEmpty)
-                  const Padding(
+                  Padding(
                     padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                     child: Text(
                       'No plugins available for this device.',
-                      style: TextStyle(color: Colors.grey),
+                      style: TextStyle(color: context.pai.muted),
                     ),
                   )
                 else
@@ -192,16 +334,12 @@ Future<void> _handleInstall(String pluginId, String version) async {
                                   Expanded(
                                     child: Text(
                                       device.name,
-                                      style: const TextStyle(
-                                        fontWeight: FontWeight.w600,
-                                      ),
+                                      style: Theme.of(context).textTheme.titleMedium,
                                     ),
                                   ),
-                                  Chip(
-                                    label: Text(
-                                      device.connected ? 'Online' : 'Offline',
-                                      style: const TextStyle(fontSize: 10),
-                                    ),
+                                  StatusChip(
+                                    status: device.connected ? HudStatus.online : HudStatus.offline,
+                                    compact: true,
                                   ),
                                 ],
                               ),
@@ -213,10 +351,7 @@ Future<void> _handleInstall(String pluginId, String version) async {
                               ),
                               child: Text(
                                 device.subtitleParts,
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  color: Colors.grey[600],
-                                ),
+                                style: context.pai.mono(size: 12),
                               ),
                             ),
 
@@ -231,6 +366,8 @@ Future<void> _handleInstall(String pluginId, String version) async {
                 ],
                 const SizedBox(height: 24),
               ],
+                ),
+              ),
             ),
           );
         },
@@ -242,10 +379,17 @@ Future<void> _handleInstall(String pluginId, String version) async {
     final installing = _installing.contains(plugin.id);
     final installed = widget.manager.isInstalled(plugin.id);
     final enabled = widget.manager.isEnabled(plugin.id);
+    final update = installed ? widget.manager.updateFor(plugin.id) : null;
+    final canUpdate = update?.updateAvailable ?? false;
+    // Installed: show what THIS install can do (its version), not the newest catalog entry.
+    final caps = installed
+        ? (widget.manager.installedCapabilities(plugin.id) ?? plugin.capabilities)
+        : plugin.capabilities;
 
-    return ListTile(
+    return _PluginRow(
       title: Text(plugin.name),
-      subtitle: Text('${plugin.version}\n${plugin.capabilities.join(", ")}'),
+      subtitle: _versionLine(
+        plugin, update, installed ? widget.manager.installedVersion(plugin.id) : null, caps),
       isThreeLine: true,
       trailing: installing
           ? const SizedBox(
@@ -254,9 +398,29 @@ Future<void> _handleInstall(String pluginId, String version) async {
               child: CircularProgressIndicator(),
             )
           : installed
-          ? Row(
-              mainAxisSize: MainAxisSize.min,
+          ? Wrap(
+              // Wrap, not Row: with the Update button the actions no longer fit one line on a
+              // narrow screen or at large text sizes; they flow onto a second line instead.
+              alignment: WrapAlignment.end,
+              crossAxisAlignment: WrapCrossAlignment.center,
               children: [
+                if (canUpdate)
+                  Padding(
+                    padding: const EdgeInsets.only(right: 4),
+                    child: FilledButton.tonalIcon(
+                      key: Key('update-${plugin.id}'),
+                      icon: const Icon(Icons.system_update_alt, size: 18),
+                      label: const Text('Update'),
+                      onPressed: () => _showUpdate(plugin),
+                    ),
+                  )
+                else if (update?.blocked != null)
+                  IconButton(
+                    icon: const Icon(Icons.info_outline),
+                    tooltip: "Why can't I update?",
+                    onPressed: () => showPluginUpdateSheet(
+                      context, plugin: plugin, update: update!, canUpdate: false),
+                  ),
                 Switch(
                   value: enabled,
                   onChanged: (value) async {
@@ -319,10 +483,25 @@ Future<void> _handleInstall(String pluginId, String version) async {
                 ),
               ],
             )
-          : ElevatedButton(
-              onPressed: () => _handleInstall(plugin.id, plugin.version),
-              child: const Text('Install'),
-            ),
+          : _installButton(plugin),
+    );
+  }
+
+  /// Install, unless no version of the plugin can run on this device/app.
+  Widget _installButton(PluginInfo plugin) {
+    final why = !plugin.compatible
+        ? plugin.incompatibleReason
+        : appIncompatibility(plugin.runtimeSpec.minAppVersion);
+    if (why == null) {
+      return FilledButton(
+        onPressed: () => _handleInstall(plugin.id, plugin.version),
+        child: const Text('Install'),
+      );
+    }
+    return Tooltip(
+      message: why,
+      triggerMode: TooltipTriggerMode.tap,
+      child: FilledButton(onPressed: null, child: const Text('Unavailable')),
     );
   }
 
@@ -330,12 +509,12 @@ Future<void> _handleInstall(String pluginId, String version) async {
     final remote = widget.manager.remoteStateFor(device.id, plugin.id);
 
     if (remote.phase == RemotePhase.installing) {
-      return ListTile(
+      return _PluginRow(
         leading: const Icon(Icons.devices_other_outlined),
         title: Text(plugin.name),
         subtitle: Text(
           'Installing on ${device.name}…',
-          style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+          style: TextStyle(fontSize: 12, color: context.pai.muted),
         ),
         trailing: const SizedBox(
           width: 24,
@@ -346,20 +525,20 @@ Future<void> _handleInstall(String pluginId, String version) async {
     }
 
     if (remote.phase == RemotePhase.failed) {
-      return ListTile(
-        leading: const Icon(Icons.error_outline, color: Colors.red),
+      return _PluginRow(
+        leading: const Icon(Icons.error_outline, color: PaiColors.red),
         title: Text(plugin.name),
         subtitle: Text(
           remote.error ?? 'Install failed',
-          style: const TextStyle(fontSize: 12, color: Colors.red),
+          style: const TextStyle(fontSize: 12, color: PaiColors.red),
           maxLines: 3,
           overflow: TextOverflow.ellipsis,
         ),
-        trailing: ElevatedButton(
+        trailing: FilledButton(
           onPressed: device.connected
               ? () => _retryInstallOnRemote(plugin, device.id)
               : null,
-          child: const Text('Retry', style: TextStyle(fontSize: 12)),
+          child: const Text('Retry'),
         ),
       );
     }
@@ -374,18 +553,31 @@ Future<void> _handleInstall(String pluginId, String version) async {
       device.id,
     );
 
+    final remoteUpdate = remoteInstalled
+        ? widget.manager.updateFor(plugin.id, deviceId: device.id)
+        : null;
+
     if (remoteInstalled) {
-      return ListTile(
+      return _PluginRow(
         leading: const Icon(Icons.devices_other_outlined),
         title: Text(plugin.name),
         subtitle: Text(
-          'Installed · ${plugin.version}'
+          'Installed · v${remoteUpdate?.installedVersion ?? plugin.version}'
+          '${remoteUpdate?.updateAvailable == true ? " → v${remoteUpdate!.latestVersion}" : ""}'
           '${remoteEnabled ? " · enabled" : " · disabled"}',
           style: const TextStyle(fontSize: 12),
         ),
-        trailing: Row(
-          mainAxisSize: MainAxisSize.min,
+        trailing: Wrap(
+          alignment: WrapAlignment.end,
+          crossAxisAlignment: WrapCrossAlignment.center,
           children: [
+            if (remoteUpdate?.updateAvailable == true)
+              FilledButton.tonal(
+                onPressed: device.connected
+                    ? () => _showUpdate(plugin, deviceId: device.id, deviceName: device.name)
+                    : null,
+                child: const Text('Update'),
+              ),
             Switch(
               value: remoteEnabled,
               onChanged: device.connected
@@ -430,21 +622,18 @@ Future<void> _handleInstall(String pluginId, String version) async {
       );
     }
 
-    return ListTile(
+    return _PluginRow(
       leading: const Icon(Icons.devices_other_outlined),
       title: Text(plugin.name),
       subtitle: Text(
         'Available · ${plugin.version}',
-        style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+        style: TextStyle(fontSize: 12, color: context.pai.muted),
       ),
-      trailing: ElevatedButton(
+      trailing: FilledButton(
         onPressed: device.connected
             ? () => _installOnRemote(plugin, device)
             : null,
-        child: Text(
-          device.connected ? 'Install' : 'Offline',
-          style: const TextStyle(fontSize: 12),
-        ),
+        child: Text(device.connected ? 'Install' : 'Offline'),
       ),
     );
   }

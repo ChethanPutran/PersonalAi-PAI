@@ -244,6 +244,16 @@ def _configure_stdlib_logging(
 # Public API
 # ============================================================
 
+def shutdown_logging() -> None:
+    """Release the log files and the background writer threads (loguru ``enqueue=True`` sinks).
+
+    Call as the very last step of shutdown. A plain console sink is kept so anything logged
+    afterwards (e.g. by a late callback) is not lost.
+    """
+    logger.remove()
+    logger.add(sys.stderr, level="INFO", format="{time:HH:mm:ss} | {level: <7} | {message}")
+
+
 def configure_logging(config: LoggingConfig) -> None:
     """Configure Loguru using validated Pydantic settings."""
 

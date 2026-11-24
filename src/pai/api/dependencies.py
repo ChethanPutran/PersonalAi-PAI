@@ -39,6 +39,13 @@ async def get_current_user(request: Request) -> str:
         raise HTTPException(status_code=401, detail="Not authenticated")
     return user_id
 
+async def user_is_admin(session: AsyncSession, user_id: str) -> bool:
+    """The one admin determination (DB, so revoking is_admin takes effect immediately)."""
+    result = await session.execute(select(UserModel).where(UserModel.id == user_id))
+    user = result.scalar_one_or_none()
+    return bool(user is not None and user.is_admin)
+
+
 async def get_current_admin(
     user_id: str = Depends(get_current_user),
     session: AsyncSession = Depends(get_db),
@@ -49,10 +56,6 @@ async def get_current_admin(
     We hit the DB on every admin request so that revoking is_admin
     takes effect immediately (no stale JWT claim).
     """
-    result = await session.execute(
-        select(UserModel).where(UserModel.id == user_id)
-    )
-    user = result.scalar_one_or_none()
-    if user is None or not user.is_admin:
+    if not await user_is_admin(session, user_id):
         raise HTTPException(status_code=403, detail="Admin access required")
-    return user.id
+    return user_id

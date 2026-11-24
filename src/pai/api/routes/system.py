@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,14 +26,20 @@ from pai.storage.repositories import (
     UserPluginRepository,
     UserRepository,
 )
-from pai.tasks.models import TaskStatus
+from pai.tasks.store import TaskNotFoundError
+from pai.common.task_controls import TaskControls
+from pai.storage.repositories.task import upgrade_legacy_payload
+from pai.tasks.models import Task, TaskControlView, TaskStatus
+from pai.tasks.serialization import serialize_task
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/system", tags=["system"])
 
 _STARTED_AT = time.time()
-_ADMIN_HTML = Path(__file__).resolve().parent.parent / "admin" / "admin.html"
+_ADMIN_DIR = Path(__file__).resolve().parent.parent / "admin"
+_ADMIN_HTML = _ADMIN_DIR / "static" / "index.html"      # the HUD admin console (strict CSP, ES modules)
+_ADMIN_LEGACY_HTML = _ADMIN_DIR / "admin_legacy.html"   # the previous single-file page, kept as a safety net
 
 
 # ============================================================
@@ -111,43 +117,153 @@ class ActionExecuteRequest(BaseModel):
 # Task management (admin) — unchanged
 # ============================================================
 
-def _serialize_task(task: Any) -> Dict[str, Any]:
-    if hasattr(task, "to_dict"):
-        d = task.to_dict()
-    elif isinstance(task, dict):
-        d = task
-    else:
-        d = {k: v for k, v in getattr(task, "__dict__", {}).items()
-             if not k.startswith("_")}
+serialize_task = _serialize_task = serialize_task  # moved to pai.tasks.serialization (kept importable)
 
-    status = d.get("status")
-    if status is not None:
-        status = str(status)
 
-    def _ts(k):
-        v = d.get(k)
-        return _iso(v) if v is not None else None
+@router.get("/llm/usage", dependencies=[Depends(get_current_admin)])
+async def llm_usage(recent: int = 20, context: PAIAppContext = Depends(get_app_context)):
+    """Tokens and cost used by LLM calls: totals overall and per provider / model / route (planner,
+    chat, agent), plus the latest calls. Cost is null for a call with no known price (set
+    `llm_pricing` / `cost_per_million_*` in config); `unpriced_calls` counts those."""
+    tracker = _cost_tracker(context)
+    out = tracker.summary(recent=max(0, min(recent, 200)))
+    voice = tracker.voice_summary()
+    voice["active_sessions"] = context.voice.active_sessions if getattr(context, "voice", None) is not None else 0
+    out["voice"] = voice
+    return out
 
-    return {
-        "id": d.get("id") or d.get("task_id") or "",
-        "title": d.get("title") or d.get("input") or d.get("capability") or "",
-        "status": status,
-        "user_id": d.get("user_id"),
-        "session_id": d.get("session_id"),
-        "capability": d.get("capability") or d.get("task_type") or d.get("type"),
-        "device_id": d.get("device_id"),
-        "executor_id": d.get("executor_id"),
-        "created_at": _ts("created_at"),
-        "started_at": _ts("started_at"),
-        "completed_at": _ts("completed_at"),
-        "error": d.get("error") or d.get("last_error"),
-        "progress": d.get("progress"),
-        "input": d.get("input"),
-        "parameters": d.get("parameters"),
-        "metadata": d.get("metadata"),
-        "result": d.get("result"),
-        "retry_count": d.get("retry_count"),
-    }
+
+@router.get("/llm/usage/series", dependencies=[Depends(get_current_admin)])
+async def llm_usage_series(
+    bucket: str = "hour",
+    since: Optional[float] = None,
+    until: Optional[float] = None,
+    route: Optional[str] = None,
+    model: Optional[str] = None,
+    context: PAIAppContext = Depends(get_app_context),
+):
+    """Calls, tokens and cost per time bucket (minute | hour | day) for charts. `since`/`until` are epoch
+    seconds (default: the last 24 buckets); `route` (planner/chat/agent) and `model` filter."""
+    try:
+        return _cost_tracker(context).series(bucket=bucket, since=since, until=until, route=route, model=model)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.get("/models", dependencies=[Depends(get_current_admin)])
+async def models_registry(context: PAIAppContext = Depends(get_app_context)):
+    """The model registry (config/models.yaml): the models each role uses now, every model that can be chosen with
+    its capabilities and prices (cheapest first), and any problems (a model missing from the file, a planner/agent
+    model without tool support)."""
+    from pai.config.model_registry import ModelRegistry, registry_report
+    registry = context.model_registry or ModelRegistry(warnings=["no model registry loaded"])
+    return registry_report(registry, context.model_roles or {})
+
+
+# ---- settings editor ------------------------------------------------------------------------------------------
+
+class SettingsChange(BaseModel):
+    """`set`: {"voice.airouter.voice": "nova", "llm_routes": {...}}; `reset`: dotted paths to take back to config.yaml."""
+    set: Dict[str, Any] = Field(default_factory=dict, max_length=500)
+    reset: List[str] = Field(default_factory=list, max_length=500)
+
+    @field_validator("set", "reset")
+    @classmethod
+    def _paths(cls, v):
+        import re
+        for p in (v.keys() if isinstance(v, dict) else v):
+            if not re.fullmatch(r"[A-Za-z0-9_.\-]{1,200}", str(p)):
+                raise ValueError(f"invalid setting path {p!r}")
+        return v
+
+
+_settings_lock = asyncio.Lock()
+
+
+def _settings_state(context: PAIAppContext) -> Dict[str, Any]:
+    from pai.config import settings_admin as S
+    from pai.config.app import Config
+    base = S.load_yaml_dict(context.settings_base_path)
+    overrides = S.load_yaml_dict(context.settings_overrides_path)
+    out = S.snapshot(Config, context.running_settings, base, overrides)
+    out["overrides_file"] = context.settings_overrides_path
+    return out
+
+
+@router.get("/settings", dependencies=[Depends(get_current_admin)])
+async def get_settings(context: PAIAppContext = Depends(get_app_context)):
+    """Every setting with its schema, the value the server runs with, what config.yaml says, what the admin panel
+    saved on top, and which saved values are waiting for a restart. Secrets are never returned."""
+    return _settings_state(context)
+
+
+@router.put("/settings")
+async def update_settings(body: SettingsChange, admin_id: str = Depends(get_current_admin),
+                          context: PAIAppContext = Depends(get_app_context)):
+    """Validate (with the real Config model) and save changes to the overrides file. Nothing is written if any value is
+    invalid. Changes apply on the next start. Secrets cannot be changed here (they live in .env)."""
+    from pai.config import settings_admin as S
+    from pai.config.app import Config
+    async with _settings_lock:
+        base = S.load_yaml_dict(context.settings_base_path)
+        old = S.load_yaml_dict(context.settings_overrides_path)
+        try:
+            new = S.apply_changes(Config, Config.model_json_schema(), base, old, body.set, body.reset)
+        except S.SettingsError as exc:
+            raise HTTPException(status_code=exc.status, detail={"message": str(exc), "errors": exc.errors})
+        try:
+            S.write_overrides(context.settings_overrides_path, new)
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail={"message": f"could not save settings: {exc}", "errors": []})
+    changed = [{"path": p, "old": S.get_path(old, p), "new": S.get_path(new, p)}
+               for p in sorted(set(S.flatten(old)) | set(S.flatten(new))) if S.get_path(old, p) != S.get_path(new, p)]
+    if context.admin is not None:
+        context.admin.audit(admin_id, "settings_update", set=",".join(sorted(body.set)) or "-",
+                            reset=",".join(sorted(body.reset)) or "-")
+    state = _settings_state(context)
+    state["changed"] = changed
+    return state
+
+
+@router.post("/reload")
+async def reload_system(admin_id: str = Depends(get_current_admin), context: PAIAppContext = Depends(get_app_context)):
+    """Apply the saved settings to the running server WITHOUT a restart and without touching this admin session:
+    models/routes/prices, voice, credits and history retention swap in live; anything else is listed under
+    `restart_required`. A bad saved configuration changes nothing (`ok: false`)."""
+    from pai.config.app import Config
+    from pai.config.reload import reload_settings
+    async with _settings_lock:
+        report = await reload_settings(context, context.settings_loader or (lambda: Config()))
+    if context.admin is not None:
+        context.admin.audit(admin_id, "settings_reload", ok=report["ok"],
+                            applied=",".join(a["group"] for a in report["applied"]) or "-",
+                            restart_required=len(report["restart_required"]))
+    report["settings"] = _settings_state(context)
+    return report
+
+
+class CreditsRequest(BaseModel):
+    balance_usd: float = Field(ge=0, le=1e9, description="Credits you have right now, in USD")
+
+
+def _cost_tracker(context: PAIAppContext):
+    tracker = getattr(context.orchestrator.planner.llm, "cost_tracker", None)
+    if tracker is None:
+        raise HTTPException(status_code=404, detail="LLM cost tracking is disabled (llm_cost.track: false).")
+    return tracker
+
+
+@router.put("/llm/credits", dependencies=[Depends(get_current_admin)])
+async def set_llm_credits(body: CreditsRequest, context: PAIAppContext = Depends(get_app_context)):
+    """Set the credits you have right now (USD). Remaining credits = this balance minus the cost of calls
+    made from now on. Replaces the configured `llm_cost.initial_credits_usd` until reset."""
+    return _cost_tracker(context).set_credits(body.balance_usd)
+
+
+@router.delete("/llm/credits", dependencies=[Depends(get_current_admin)])
+async def reset_llm_credits(context: PAIAppContext = Depends(get_app_context)):
+    """Drop the admin-set balance and go back to the configured initial credits (if any)."""
+    return _cost_tracker(context).clear_credits()
 
 
 @router.get("/tasks", dependencies=[Depends(get_current_admin)])
@@ -180,7 +296,10 @@ async def admin_get_task(
     task_id: str,
     context: PAIAppContext = Depends(get_app_context),
 ) -> Dict[str, Any]:
-    task = await context.orchestrator.task_manager.get(task_id)
+    try:
+        task = await context.orchestrator.task_manager.get(task_id)
+    except TaskNotFoundError:
+        task = None
     if not task:
         raise HTTPException(404, "Task not found")
     return _serialize_task(task)
@@ -431,14 +550,29 @@ async def admin_execute_action(
 # ============================================================
 
 @router.get("/admin", response_class=HTMLResponse)
-async def admin_panel() -> HTMLResponse:
+async def admin_panel(context: PAIAppContext = Depends(get_app_context)) -> HTMLResponse:
+    from pai.api.admin.static_app import CSP, SECURITY_HEADERS
+    if context.admin is None:
+        # admin.enabled=false: the console's assets/API are not mounted, so serve the self-contained legacy page.
+        return await admin_panel_legacy()
     if not _ADMIN_HTML.exists():
         return HTMLResponse(
             f"<h1>Admin panel not installed</h1>"
             f"<p>Expected file: {_ADMIN_HTML}</p>",
             status_code=500,
         )
-    return HTMLResponse(_ADMIN_HTML.read_text(encoding="utf-8"))
+    return HTMLResponse(
+        _ADMIN_HTML.read_text(encoding="utf-8"),
+        headers={"Content-Security-Policy": CSP, "Cache-Control": "no-cache", **SECURITY_HEADERS},
+    )
+
+
+@router.get("/admin/legacy", response_class=HTMLResponse)
+async def admin_panel_legacy() -> HTMLResponse:
+    """The previous single-file admin page (inline script, no CSP) — a safety net."""
+    if not _ADMIN_LEGACY_HTML.exists():
+        return HTMLResponse("<h1>Legacy admin page not installed</h1>", status_code=404)
+    return HTMLResponse(_ADMIN_LEGACY_HTML.read_text(encoding="utf-8"))
 
 
 # ============================================================

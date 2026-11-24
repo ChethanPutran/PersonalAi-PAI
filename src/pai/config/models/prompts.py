@@ -1,4 +1,4 @@
-from enum import Enum
+from enum import Enum, StrEnum
 from typing import Dict
 
 from pydantic import BaseModel
@@ -9,7 +9,7 @@ class PromptRegistryConfig(BaseModel):
     frozen: bool = True
     override_versions: Dict[str, str] = {}
 
-class PromptGuardMode(Enum):
+class PromptGuardMode(StrEnum):
     OFF = "off"
     WARN = "warn"
     SANITIZE = "sanitize"

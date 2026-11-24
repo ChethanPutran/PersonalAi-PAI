@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from enum import Enum
+from enum import Enum, StrEnum
 from typing import Any, Dict, List, Optional
 import uuid
 
@@ -15,7 +15,7 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-class PlanStatus(str, Enum):
+class PlanStatus(StrEnum):
     CREATED = "created"
     VERIFIED = "verified"
     EXECUTING = "executing"
@@ -25,7 +25,7 @@ class PlanStatus(str, Enum):
     ADAPTED = "adapted"
 
 
-class PlanTaskStatus(str, Enum):
+class PlanTaskStatus(StrEnum):
     PENDING = "pending"
     READY = "ready"
     BLOCKED = "blocked"
@@ -57,7 +57,7 @@ class TaskSpec:
 
     # Planning metadata.
     timeout: float = field(default=10) #10s
-    retry_count: int = 0
+    retry_count: int = 3
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     status: PlanTaskStatus = PlanTaskStatus.PENDING

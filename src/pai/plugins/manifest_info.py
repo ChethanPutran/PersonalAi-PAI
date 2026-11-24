@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from pai.common.enums.device import DeviceArchitecture, DevicePlatform, DeviceType
 from pai.common.enums.permission import PermissionResource
-from pai.plugins.manifest_models import PlatformSpec, PluginRuntime
+from pai.plugins.manifest_models import Changelog, PlatformSpec, PluginRuntime
 
 from .manifest_enums import PluginLanguage, RuntimeKind
 
@@ -30,6 +30,8 @@ class PluginInfo(BaseModel):
     name: str
     version: str
     description: str = ""
+    schemaVersion: int = 1
+    changelog: Optional[Changelog] = None
 
     # ── classification ──────────────────────────────────────────
     type: PluginLanguage            # native | kotlin | python | swift | javascript
@@ -50,6 +52,10 @@ class PluginInfo(BaseModel):
     packageUrl: Optional[str] = None
     checksum: Optional[str] = None
     size: int = 0
+
+    # ── per-request compatibility (filled in by the catalog for a specific device) ──
+    compatible: bool = True
+    incompatibleReason: Optional[str] = None
 
     # ── convenience ─────────────────────────────────────────────
     @property
@@ -81,6 +87,8 @@ class PluginInfo(BaseModel):
             name=m.name,
             version=m.version,
             description=m.description,
+            schemaVersion=m.schemaVersion,
+            changelog=m.changelog,
             type=m.type,
             runtimeKind=m.runtime.kind,
             runtimeSpec=m.runtime,

@@ -23,6 +23,9 @@ class Origin(StrEnum):
     AGENT_AUTONOMOUS = "agent_autonomous"
     SCHEDULED = "scheduled"
     PLUGIN = "plugin"
+    # Spoken request. Voice can be spoofed (another speaker, a TV, a replayed recording),
+    # so sensitive actions started by voice need on-screen approval, like autonomous ones.
+    VOICE = "voice"
 
 class PolicySubject(StrEnum):
     USER = "user"
@@ -30,6 +33,17 @@ class PolicySubject(StrEnum):
     AGENT = "agent"
     PLUGIN = "plugin"
     ANY = "any"
+
+class ConsentScope(StrEnum):
+    """How long an approval lasts. ONCE is never stored; SESSION and ALWAYS are grants."""
+    ONCE = "once"          # just this run
+    SESSION = "session"    # until the session (chat/voice/tester) ends or the TTL passes
+    ALWAYS = "always"      # persistent, revocable, expiring
+
+    @property
+    def rank(self) -> int:
+        return {"once": 0, "session": 1, "always": 2}[self.value]
+
 
 class RiskLevel(StrEnum):
     """Risk classification for plugin capabilities."""
@@ -56,6 +70,8 @@ class PermissionResource(StrEnum):
 
     SCREEN = "screen"
     CLIPBOARD = "clipboard"
+    # Synthetic keyboard / mouse input: can do anything the user can do on screen.
+    INPUT = "input"
 
     DEVICE = "device"
     PROCESS = "process"

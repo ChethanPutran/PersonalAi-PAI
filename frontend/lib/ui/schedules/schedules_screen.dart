@@ -1,11 +1,16 @@
 import 'package:flutter/material.dart';
+import 'package:pai_mobile/models/device.dart';
 import 'package:pai_mobile/profile/profile_service.dart';
 import 'package:pai_mobile/tasks/task_service.dart';
 import 'package:pai_mobile/ui/schedules/schedule_history_screen.dart';
 
 import '../../models/schedule.dart';
 import '../../schedules/schedule_service.dart';
+import 'consent_widgets.dart';
+import 'schedule_card.dart';
 import 'schedule_editor_sheet.dart';
+import '../theme/theme.dart';
+import '../widgets/hud/hud.dart';
 
 class SchedulesScreen extends StatefulWidget {
   final ScheduleService service;
@@ -31,17 +36,42 @@ class SchedulesScreen extends StatefulWidget {
 
 class _SchedulesScreenState extends State<SchedulesScreen> {
   List<Schedule> _schedules = const [];
+  Map<String, String> _deviceNames = const {};
   bool _loading = true;
   String? _error;
 
   @override
   void initState() {
     super.initState();
+    _loadDeviceNames();
     _load();
     widget.events?.listen((msg) {
       final type = msg['type']?.toString() ?? '';
       if (type.startsWith('schedule.')) _load();
     });
+  }
+
+  /// Device names for the cards ("on Pixel 8"). Best-effort: ids are shown if this fails.
+  Future<void> _loadDeviceNames() async {
+    final ps = widget.profileService;
+    if (ps == null) return;
+    try {
+      final profile = await ps.getProfile();
+      final list = await ps.getDevices(userId: profile.id, currentDeviceId: widget.currentDeviceId);
+      if (!mounted) return;
+      setState(() => _deviceNames = {
+            for (final DeviceInfo d in list) d.id: d.isCurrent ? '${d.name} (this device)' : d.name,
+          });
+    } catch (e, st) {
+      debugPrint('[SchedulesScreen] loading device names failed: $e');
+      debugPrintStack(stackTrace: st, label: '[SchedulesScreen] device names', maxFrames: 5);
+    }
+  }
+
+  String _deviceLabel(Schedule s) {
+    final id = s.targetDeviceId;
+    if (id == null) return 'any online device';
+    return _deviceNames[id] ?? id;
   }
 
   Future<void> _load() async {
@@ -56,7 +86,9 @@ class _SchedulesScreenState extends State<SchedulesScreen> {
         _schedules = list;
         _loading = false;
       });
-    } catch (e) {
+    } catch (e, st) {
+      debugPrint('[SchedulesScreen] load failed: ${e.runtimeType}: $e');
+      debugPrintStack(stackTrace: st, label: '[SchedulesScreen] load', maxFrames: 8);
       if (!mounted) return;
       setState(() {
         _error = e.toString();
@@ -65,8 +97,8 @@ class _SchedulesScreenState extends State<SchedulesScreen> {
     }
   }
 
-  Future<void> _openEditor() async {
-  final created = await showDialog<bool>(
+  Future<void> _openEditor({Schedule? existing}) async {
+  await showDialog<bool>(
     context: context,
     barrierDismissible: true,
     builder: (_) => Dialog(
@@ -79,19 +111,58 @@ class _SchedulesScreenState extends State<SchedulesScreen> {
       service: widget.service,
       profileService: widget.profileService,
       currentDeviceId: widget.currentDeviceId,
+      existing: existing,
     ),
   ),
       ),
     ),
   );
-  if (created == true) await _load();
+  // The editor may have saved, approved or revoked even if it was dismissed by tapping
+  // outside, so always refresh.
+  if (mounted) await _load();
 }
+
+  Future<void> _approve(Schedule s) async {
+    final days = await showApproveConsentDialog(
+      context,
+      ApprovalRequest.fromSchedule(s, deviceLabel: _deviceLabel(s)),
+    );
+    if (days == null || !mounted) return; // cancelled: nothing is approved
+    try {
+      await widget.service.approve(s.id, days: days);
+      await _load();
+    } catch (e, st) {
+      debugPrint('[SchedulesScreen] approve failed: ${e.runtimeType}: $e');
+      debugPrintStack(stackTrace: st, label: '[SchedulesScreen] approve', maxFrames: 6);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Approval failed: $e')));
+    }
+  }
+
+  Future<void> _revoke(Schedule s) async {
+    try {
+      await widget.service.revoke(s.id);
+      await _load();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('Approval revoked')));
+    } catch (e, st) {
+      debugPrint('[SchedulesScreen] revoke failed: ${e.runtimeType}: $e');
+      debugPrintStack(stackTrace: st, label: '[SchedulesScreen] revoke', maxFrames: 6);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Revoke failed: $e')));
+    }
+  }
 
   Future<void> _toggle(Schedule s) async {
     try {
       await widget.service.setEnabled(s.id, !s.enabled);
       await _load();
-    } catch (e) {
+    } catch (e, st) {
+      debugPrint('[SchedulesScreen] toggle failed: ${e.runtimeType}: $e');
+      debugPrintStack(stackTrace: st, label: '[SchedulesScreen] toggle', maxFrames: 6);
       if (!mounted) return;
       ScaffoldMessenger.of(context)
           .showSnackBar(SnackBar(content: Text('Update failed: $e')));
@@ -102,7 +173,7 @@ class _SchedulesScreenState extends State<SchedulesScreen> {
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Delete reminder?'),
+        title: Text(s.isReminder ? 'Delete reminder?' : 'Delete scheduled action?'),
         content: Text('"${s.title}" will be permanently removed.'),
         actions: [
           TextButton(
@@ -123,7 +194,9 @@ class _SchedulesScreenState extends State<SchedulesScreen> {
     try {
       await widget.service.delete(s.id);
       await _load();
-    } catch (e) {
+    } catch (e, st) {
+      debugPrint('[SchedulesScreen] delete failed: ${e.runtimeType}: $e');
+      debugPrintStack(stackTrace: st, label: '[SchedulesScreen] delete', maxFrames: 6);
       if (!mounted) return;
       ScaffoldMessenger.of(context)
           .showSnackBar(SnackBar(content: Text('Delete failed: $e')));
@@ -143,15 +216,17 @@ void _openHistory(Schedule s) {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Reminders'),
+    return HudScaffold(
+      appBar: HudAppBar(
+        title: 'Reminders',
+        automaticallyImplyLeading: false,
         actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh),
+          HudIconButton(
+            icon: Icons.refresh,
             tooltip: 'Refresh',
             onPressed: _loading ? null : _load,
           ),
+          const SizedBox(width: 8),
         ],
       ),
       floatingActionButton: FloatingActionButton.extended(
@@ -168,90 +243,74 @@ void _openHistory(Schedule s) {
 
   Widget _buildBody() {
     if (_loading) {
-      return const Center(child: CircularProgressIndicator());
+      return const HudSkeletonList(count: 3);
     }
     if (_error != null) {
-      return ListView(
-        padding: const EdgeInsets.all(24),
-        children: [
-          const Icon(Icons.error_outline, size: 48, color: Colors.red),
-          const SizedBox(height: 16),
-          Text('Failed to load reminders\n\n$_error',
-              textAlign: TextAlign.center),
-          const SizedBox(height: 24),
-          Center(
-            child: ElevatedButton(onPressed: _load, child: const Text('Retry')),
-          ),
-        ],
+      return LayoutBuilder(
+        builder: (context, box) => ListView(
+          children: [
+            SizedBox(
+              height: box.maxHeight,
+              child: HudErrorState(
+                title: 'Failed to load reminders',
+                details: _error,
+                onRetry: _load,
+              ),
+            ),
+          ],
+        ),
       );
     }
     if (_schedules.isEmpty) {
-      return ListView(
-        padding: const EdgeInsets.all(32),
-        children: [
-          const SizedBox(height: 60),
-          Icon(Icons.alarm_off,
-              size: 64,
-              color: Theme.of(context).colorScheme.outline),
-          const SizedBox(height: 16),
-          const Text(
-            'No reminders yet',
-            textAlign: TextAlign.center,
-            style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
-          ),
-          const SizedBox(height: 8),
-          const Text(
-            'Tap "New" to add your first reminder.',
-            textAlign: TextAlign.center,
-            style: TextStyle(color: Colors.grey),
-          ),
-        ],
+      return LayoutBuilder(
+        builder: (context, box) => ListView(
+          children: [
+            SizedBox(
+              height: box.maxHeight,
+              child: const HudEmptyState(
+                icon: Icons.alarm_off,
+                title: 'No reminders yet',
+                message: 'Tap "New" to add a reminder or schedule a plugin action.',
+              ),
+            ),
+          ],
+        ),
       );
     }
 
-    return ListView.separated(
-      padding: const EdgeInsets.only(bottom: 88),
-      itemCount: _schedules.length,
-      separatorBuilder: (_, __) => const Divider(height: 1),
-      itemBuilder: (_, i) {
-        final s = _schedules[i];
-        return ListTile(
-          leading: Icon(
-            s.enabled ? Icons.alarm : Icons.alarm_off,
-            color: s.enabled
-                ? Theme.of(context).colorScheme.primary
-                : Theme.of(context).colorScheme.outline,
-          ),
-          title: Text(
-            s.title,
-            style: TextStyle(
-              decoration:
-                  s.enabled ? null : TextDecoration.lineThrough,
-            ),
-          ),
-          subtitle: Text('${s.repeatLabel}\n${s.nextLabel}'),
-          isThreeLine: true,
-          trailing: PopupMenuButton<String>(
-            onSelected: (v) {
-              if (v == 'history') _openHistory(s);
-              if (v == 'toggle') _toggle(s);
-              if (v == 'delete') _delete(s);
-            },
-            itemBuilder: (_) => [
-              const PopupMenuItem(value: 'history', child: Text('History')),
-              PopupMenuItem(
-                value: 'toggle',
-                child: Text(s.enabled ? 'Disable' : 'Enable'),
-              ),
-              const PopupMenuItem(
-                value: 'delete',
-                child: Text('Delete'),
-              ),
-            ],
-          ),
-          onTap: () => _toggle(s),
-        );
-      },
+    return Align(
+      alignment: Alignment.topCenter,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 860),
+        child: ListView.separated(
+          padding: const EdgeInsets.fromLTRB(PaiSpacing.lg, PaiSpacing.lg, PaiSpacing.lg, 96),
+          itemCount: _schedules.length,
+          separatorBuilder: (_, _) => const SizedBox(height: PaiSpacing.md),
+          itemBuilder: (_, i) {
+            final s = _schedules[i];
+            return ScheduleCard(
+              schedule: s,
+              deviceLabel: _deviceLabel(s),
+              onToggle: () => _toggle(s),
+              onApprove: () => _approve(s),
+              onMenu: (action) {
+                switch (action) {
+                  case ScheduleMenuAction.history:
+                    _openHistory(s);
+                  case ScheduleMenuAction.edit:
+                    _openEditor(existing: s);
+                  case ScheduleMenuAction.toggle:
+                    _toggle(s);
+                  case ScheduleMenuAction.revoke:
+                    _revoke(s);
+                  case ScheduleMenuAction.delete:
+                    _delete(s);
+                }
+              },
+            );
+          },
+        ),
+      ),
     );
   }
 }

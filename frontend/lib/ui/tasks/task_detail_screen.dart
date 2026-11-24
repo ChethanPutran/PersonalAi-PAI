@@ -4,22 +4,29 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 
 import '../../../tasks/task.dart';
+import '../../../tasks/task_event_stream.dart';
+import '../../../tasks/task_events.dart';
 import '../../../tasks/task_service.dart';
+import '../theme/theme.dart';
+import '../widgets/hud/hud.dart';
+import 'live_feed_notice.dart';
+import 'retry_countdown.dart';
+import 'tasks_screen.dart' show AbandonedCancelNote;
 
 
 class TaskDetailScreen extends StatefulWidget {
   final Task initialTask;
   final TaskService service;
 
-  /// Optional live feed from [DeviceConnectionService.taskEvents].
-  /// When provided, refreshes whenever a task/plan event arrives.
-  final Stream<Map<String, dynamic>>? taskEvents;
+  /// The live task feed. This task's state is replaced by each event that mentions it (events
+  /// carry the whole task), so the screen updates the instant the server publishes — no polling.
+  final TaskLiveFeed? live;
 
   const TaskDetailScreen({
     super.key,
     required this.initialTask,
     required this.service,
-    this.taskEvents,
+    this.live,
   });
 
   @override
@@ -30,8 +37,9 @@ class TaskDetailScreen extends StatefulWidget {
 class _TaskDetailScreenState extends State<TaskDetailScreen> {
   late Task _task;
 
-  StreamSubscription<Map<String, dynamic>>? _taskEventSub;
-  Timer? _pollTimer;
+  StreamSubscription<TaskStreamEvent>? _eventSub;
+  StreamSubscription<TaskStreamConnection>? _connSub;
+  TaskStreamConnection _conn = TaskStreamConnection.connected;
   bool _loading = false;
   bool _busy = false;   // prevents double-tapping pause/resume/cancel
 
@@ -39,59 +47,55 @@ class _TaskDetailScreenState extends State<TaskDetailScreen> {
   void initState() {
     super.initState();
     _task = widget.initialTask;
-    _setupAutoRefresh();
-  }
 
-  void _setupAutoRefresh() {
-    // WS events are the preferred refresh signal.
-    final events = widget.taskEvents;
-    if (events != null) {
-      _taskEventSub = events.listen((msg) {
-        final taskId = msg['task_id']?.toString();
-        // taskId == null → plan-level event, refresh anyway.
-        if (taskId == null || taskId == _task.id) {
-          _refresh();
-        }
+    final live = widget.live;
+    if (live != null) {
+      _conn = live.state;
+      _eventSub = live.events.listen(_onLiveEvent, onError: (Object e) {
+        debugPrint('[TaskDetail] live feed error: $e');
+      });
+      _connSub = live.connection.listen((c) {
+        if (mounted && c != _conn) setState(() => _conn = c);
       });
     }
 
-    // 2-second poll as a belt-and-suspenders fallback while the task
-    // is non-terminal. Cancels itself once the task finishes.
-    _pollTimer = Timer.periodic(
-      const Duration(seconds: 2),
-      (_) {
-        if (_isTerminalStatus(_task.status)) {
-          _pollTimer?.cancel();
-          _pollTimer = null;
-          return;
-        }
-        _refresh();
-      },
-    );
+    // One fetch for the full record (the list entry may be a slimmer snapshot); after that the
+    // feed keeps it current.
+    unawaited(_refresh());
+  }
+
+  void _onLiveEvent(TaskStreamEvent event) {
+    switch (event) {
+      case TaskUpdated(:final task):
+        if (task.id == _task.id && mounted) setState(() => _task = task);
+      case TaskStreamResync():
+        unawaited(_refresh());
+      case TaskStreamReady():
+        break;
+    }
   }
 
   @override
   void dispose() {
-    _taskEventSub?.cancel();
-    _pollTimer?.cancel();
+    _eventSub?.cancel();
+    _connSub?.cancel();
     super.dispose();
   }
 
   Future<void> _refresh() async {
     if (_loading) return;
     _loading = true;
+    if (mounted) setState(() {});
     try {
       final updated = await widget.service.getTask(_task.id);
       if (!mounted) return;
       setState(() => _task = updated);
-      if (_isTerminalStatus(_task.status)) {
-        _pollTimer?.cancel();
-        _pollTimer = null;
-      }
-    } catch (e) {
-      debugPrint('[TaskDetail] refresh failed: $e');
+    } catch (e, st) {
+      debugPrint('[TaskDetail] refresh failed: ${e.runtimeType}: $e');
+      debugPrintStack(stackTrace: st, label: '[TaskDetail] refresh', maxFrames: 6);
     } finally {
       _loading = false;
+      if (mounted) setState(() {});
     }
   }
 
@@ -103,8 +107,16 @@ class _TaskDetailScreenState extends State<TaskDetailScreen> {
     setState(() => _busy = true);
     try {
       await op(_task.id);
-      await _refresh();
-    } catch (e) {
+      // Never optimistic: the confirming event updates this screen. If no event can arrive
+      // (no feed / feed down) fetch once so the screen isn't left stale.
+      final live = widget.live;
+      if (live == null || live.state != TaskStreamConnection.connected) await _refresh();
+    } on TaskControlException catch (e) {
+      debugPrint('[TaskDetail] $label refused (${e.code}): ${e.message}');
+      _snack(e.message);
+    } catch (e, st) {
+      debugPrint('[TaskDetail] $label failed: ${e.runtimeType}: $e');
+      debugPrintStack(stackTrace: st, label: '[TaskDetail] $label', maxFrames: 6);
       _snack('$label failed: $e');
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -119,51 +131,64 @@ class _TaskDetailScreenState extends State<TaskDetailScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final status = _task.status;
-    final running = status.name == 'running';
-    final paused = status.name == 'paused';
-    final terminal = _isTerminalStatus(status);
+    // What the controls offer is decided by the server per plugin capability.
+    final canPause = _task.canPause;
+    final canResume = _task.canResume;
+    final canCancel = _task.canCancel;
 
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(_task.title, overflow: TextOverflow.ellipsis),
+    return HudScaffold(
+      appBar: HudAppBar(
+        titleWidget: Text(_task.title.toUpperCase(),
+            maxLines: 1, overflow: TextOverflow.ellipsis,
+            style: Theme.of(context).textTheme.titleMedium?.copyWith(letterSpacing: 2)),
         actions: [
-          IconButton(
+          HudIconButton(
             tooltip: 'Refresh',
-            icon: const Icon(Icons.refresh),
+            icon: Icons.refresh,
             onPressed: _loading ? null : _refresh,
           ),
-          if (running)
-            IconButton(
+          if (canPause)
+            HudIconButton(
               tooltip: 'Pause',
-              icon: const Icon(Icons.pause),
+              icon: Icons.pause,
               onPressed: _busy
                   ? null
                   : () => _action('Pause', widget.service.pause),
             ),
-          if (paused)
-            IconButton(
+          if (canResume)
+            HudIconButton(
               tooltip: 'Resume',
-              icon: const Icon(Icons.play_arrow),
+              icon: Icons.play_arrow,
+              active: true,
               onPressed: _busy
                   ? null
                   : () => _action('Resume', widget.service.resume),
             ),
-          if (!terminal)
-            IconButton(
+          if (canCancel)
+            HudIconButton(
               tooltip: 'Cancel',
-              icon: const Icon(Icons.stop),
+              icon: Icons.stop,
+              color: Theme.of(context).colorScheme.error,
               onPressed: _busy
                   ? null
                   : () => _action('Cancel', widget.service.cancel),
             ),
+          const SizedBox(width: 8),
         ],
       ),
       body: RefreshIndicator(
         onRefresh: _refresh,
-        child: ListView(
-          padding: const EdgeInsets.all(16),
+        child: Align(
+          alignment: Alignment.topCenter,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 860),
+            child: ListView(
+          padding: const EdgeInsets.all(PaiSpacing.lg),
           children: [
+            if (_conn == TaskStreamConnection.offline) ...[
+              const Align(alignment: Alignment.centerLeft, child: LiveFeedNotice()),
+              const SizedBox(height: PaiSpacing.sm),
+            ],
             _statusHeader(),
             const SizedBox(height: 20),
             _section('Overview', [
@@ -227,6 +252,8 @@ class _TaskDetailScreenState extends State<TaskDetailScreen> {
             ],
             const SizedBox(height: 32),
           ],
+            ),
+          ),
         ),
       ),
     );
@@ -237,50 +264,77 @@ class _TaskDetailScreenState extends State<TaskDetailScreen> {
   // ------------------------------------------------------------------
 
   Widget _statusHeader() {
-    final color = _statusColor(_task.status);
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: color.withOpacity(0.08),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: color.withOpacity(0.35)),
-      ),
-      child: Row(
+    final hud = HudStatusX.fromTaskStatus(_task.status.name);
+    final color = hud.color;
+    final text = Theme.of(context).textTheme;
+    return HudPanel(
+      accent: color,
+      selected: hud == HudStatus.running || hud == HudStatus.failed,
+      padding: const EdgeInsets.all(PaiSpacing.lg),
+      semanticLabel: 'Task status ${_task.status.name}',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(_statusIcon(_task.status), color: color, size: 32),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  _task.status.name.toUpperCase(),
-                  style: TextStyle(
-                    color: color,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 15,
-                    letterSpacing: 0.6,
-                  ),
-                ),
-                if (_task.capability != null)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 2),
-                    child: Text(
-                      _task.capability!,
-                      style: const TextStyle(
-                        fontFamily: 'monospace',
-                        fontSize: 12,
+          Row(
+            children: [
+              Icon(_statusIcon(_task.status), color: color, size: 34),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      (_task.isRetrying ? _task.retryLabel : _task.status.name).toUpperCase(),
+                      style: TextStyle(
+                        fontFamily: PaiFonts.display,
+                        color: color,
+                        fontWeight: FontWeight.w700,
+                        fontSize: 18,
+                        letterSpacing: 3,
                       ),
                     ),
-                  ),
-              ],
-            ),
+                    if (_task.capability != null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 4),
+                        child: Text(_task.capability!, style: context.pai.mono(size: 12.5)),
+                      ),
+                  ],
+                ),
+              ),
+              if (_loading)
+                const SizedBox(
+                  width: 20, height: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+            ],
           ),
-          if (_loading)
-            const SizedBox(
-              width: 20, height: 20,
-              child: CircularProgressIndicator(strokeWidth: 2),
+          const SizedBox(height: PaiSpacing.lg),
+          _Timeline(task: _task),
+          if (_task.status.name == 'running') ...[
+            const SizedBox(height: PaiSpacing.md),
+            const LinearProgressIndicator(minHeight: 2),
+          ],
+          if (_task.isRetrying && _task.retry != null) ...[
+            const SizedBox(height: PaiSpacing.md),
+            RetryCountdown(retry: _task.retry!),
+          ],
+          if (_task.cancelAbandoned) ...[
+            const SizedBox(height: PaiSpacing.md),
+            const AbandonedCancelNote(),
+          ],
+          if (_task.pauseBlocked && (_task.controlBlockedReason ?? '').isNotEmpty) ...[
+            const SizedBox(height: PaiSpacing.md),
+            Text(
+              'Pause isn\'t available: ${_task.controlBlockedReason}',
+              key: const Key('pause-blocked-note'),
+              style: text.bodySmall?.copyWith(color: context.pai.muted),
             ),
+          ],
+          if (_task.retryCount > 0) ...[
+            const SizedBox(height: PaiSpacing.md),
+            Text('RETRY ${_task.retryCount} OF ${_task.maxRetries}',
+                style: text.labelSmall?.copyWith(color: PaiColors.amber, letterSpacing: 2)),
+          ],
         ],
       ),
     );
@@ -291,55 +345,34 @@ class _TaskDetailScreenState extends State<TaskDetailScreen> {
   // ------------------------------------------------------------------
 
   Widget _section(String title, List<Widget> children) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Padding(
-          padding: const EdgeInsets.only(bottom: 6, left: 4),
-          child: Text(
-            title.toUpperCase(),
-            style: TextStyle(
-              fontSize: 11,
-              fontWeight: FontWeight.bold,
-              color: Colors.grey.shade600,
-              letterSpacing: 0.6,
-            ),
-          ),
-        ),
-        Card(
-          margin: EdgeInsets.zero,
-          child: Padding(
-            padding: const EdgeInsets.all(12),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: children,
-            ),
-          ),
-        ),
-      ],
+    return HudPanel(
+      title: title,
+      padding: const EdgeInsets.all(PaiSpacing.md),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: children,
+      ),
     );
   }
 
   Widget _kv(String key, String value) {
+    final text = Theme.of(context).textTheme;
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
+      padding: const EdgeInsets.symmetric(vertical: 5),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           SizedBox(
-            width: 100,
+            width: 104,
             child: Text(
-              key,
-              style: TextStyle(
-                color: Colors.grey.shade600,
-                fontSize: 12,
-              ),
+              key.toUpperCase(),
+              style: text.labelSmall?.copyWith(letterSpacing: 1.4),
             ),
           ),
           Expanded(
             child: SelectableText(
               value,
-              style: const TextStyle(fontSize: 13),
+              style: text.bodyMedium,
             ),
           ),
         ],
@@ -356,18 +389,17 @@ class _TaskDetailScreenState extends State<TaskDetailScreen> {
   Widget _codeBlock(String text, {bool mono = true}) {
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.all(10),
+      padding: const EdgeInsets.all(PaiSpacing.md),
       decoration: BoxDecoration(
-        color: Colors.grey.shade100,
-        borderRadius: BorderRadius.circular(6),
-        border: Border.all(color: Colors.grey.shade300),
+        color: Colors.black.withValues(alpha: 0.28),
+        borderRadius: BorderRadius.circular(PaiRadii.sm),
+        border: Border.all(color: context.pai.line),
       ),
       child: SelectableText(
         text,
-        style: TextStyle(
-          fontFamily: mono ? 'monospace' : null,
-          fontSize: 12,
-        ),
+        style: mono
+            ? context.pai.mono(size: 12, strong: true)
+            : Theme.of(context).textTheme.bodyMedium,
       ),
     );
   }
@@ -398,16 +430,15 @@ class _TaskDetailScreenState extends State<TaskDetailScreen> {
         children: [
           Icon(
             ok ? Icons.check_circle : Icons.error,
-            color: ok ? Colors.green : Colors.red,
+            color: ok ? PaiColors.green : PaiColors.red,
             size: 18,
           ),
           const SizedBox(width: 6),
           Text(
             ok ? 'Success' : 'Failed',
-            style: TextStyle(
-              color: ok ? Colors.green : Colors.red,
-              fontWeight: FontWeight.bold,
-            ),
+            style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                  color: ok ? PaiColors.green : PaiColors.red,
+                ),
           ),
         ],
       ),
@@ -415,7 +446,7 @@ class _TaskDetailScreenState extends State<TaskDetailScreen> {
         const SizedBox(height: 8),
         SelectableText(
           error,
-          style: const TextStyle(color: Colors.red, fontSize: 12),
+          style: Theme.of(context).textTheme.bodySmall?.copyWith(color: PaiColors.red),
         ),
       ],
       const SizedBox(height: 8),
@@ -424,16 +455,14 @@ class _TaskDetailScreenState extends State<TaskDetailScreen> {
   }
 
   Widget _errorBox(String error) {
-    return Container(
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: Colors.red.shade50,
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: Colors.red.shade200),
-      ),
+    return HudPanel(
+      title: 'Error',
+      leadingIcon: Icons.warning_amber_rounded,
+      accent: PaiColors.red,
+      padding: const EdgeInsets.all(PaiSpacing.md),
       child: SelectableText(
         error,
-        style: const TextStyle(color: Colors.red, fontSize: 12),
+        style: context.pai.mono(size: 12.5, strong: true),
       ),
     );
   }
@@ -441,26 +470,6 @@ class _TaskDetailScreenState extends State<TaskDetailScreen> {
   // ------------------------------------------------------------------
   // Helpers
   // ------------------------------------------------------------------
-
-  static bool _isTerminalStatus(TaskStatus s) {
-    // Compare by name so this works regardless of which statuses the
-    // Dart enum actually declares.
-    final n = s.name;
-    return n == 'completed' || n == 'failed' || n == 'cancelled';
-  }
-
-  Color _statusColor(TaskStatus status) {
-    switch (status.name) {
-      case 'completed': return Colors.green;
-      case 'failed':    return Colors.red;
-      case 'cancelled': return Colors.grey;
-      case 'running':   return Colors.blue;
-      case 'paused':    return Colors.orange;
-      case 'queued':    return Colors.purple;
-      case 'retrying':  return Colors.amber;
-      default:          return Colors.grey;
-    }
-  }
 
   IconData _statusIcon(TaskStatus status) {
     switch (status.name) {
@@ -492,5 +501,84 @@ class _TaskDetailScreenState extends State<TaskDetailScreen> {
       return '${d.inSeconds}s ${d.inMilliseconds.remainder(1000)}ms';
     }
     return '${d.inMilliseconds}ms';
+  }
+}
+
+
+/// Created → Queued → Started → Finished, from the task's timestamps.
+class _Timeline extends StatelessWidget {
+  const _Timeline({required this.task});
+  final Task task;
+
+  @override
+  Widget build(BuildContext context) {
+    final failed = task.status.name == 'failed';
+    final cancelled = task.status.name == 'cancelled';
+    final end = task.completedAt;
+    final steps = <(String, DateTime?, Color)>[
+      ('Created', task.createdAt, PaiColors.cyan),
+      ('Queued', task.queuedAt, PaiColors.azure),
+      ('Started', task.startedAt, PaiColors.cyan),
+      (
+        failed ? 'Failed' : cancelled ? 'Cancelled' : 'Finished',
+        end,
+        failed ? PaiColors.red : cancelled ? context.pai.faint : PaiColors.green,
+      ),
+    ];
+    final text = Theme.of(context).textTheme;
+    return Semantics(
+      label: 'Timeline: ${steps.where((s) => s.$2 != null).map((s) => s.$1).join(', ')}',
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          for (var i = 0; i < steps.length; i++) ...[
+            Expanded(
+              child: Column(
+                children: [
+                  Row(
+                    children: [
+                      Expanded(child: i == 0 ? const SizedBox() : _line(steps[i].$2 != null, steps[i].$3, context.pai.line)),
+                      Container(
+                        width: 12,
+                        height: 12,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: steps[i].$2 != null ? steps[i].$3 : Colors.transparent,
+                          border: Border.all(
+                              color: steps[i].$2 != null ? steps[i].$3 : context.pai.line, width: 1.6),
+                          boxShadow: steps[i].$2 != null
+                              ? [BoxShadow(color: steps[i].$3.withValues(alpha: 0.5), blurRadius: 8)]
+                              : null,
+                        ),
+                      ),
+                      Expanded(child: i == steps.length - 1 ? const SizedBox() : _line(steps[i + 1].$2 != null, steps[i + 1].$3, context.pai.line)),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  Text(steps[i].$1.toUpperCase(),
+                      textAlign: TextAlign.center,
+                      style: text.labelSmall?.copyWith(
+                          letterSpacing: 1.2,
+                          color: steps[i].$2 != null ? context.pai.strong : context.pai.faint)),
+                  if (steps[i].$2 != null)
+                    Text(_hm(steps[i].$2!), style: PaiText.mono(size: 10.5, color: context.pai.muted)),
+                ],
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  static Widget _line(bool reached, Color color, Color idle) => Container(
+        height: 2,
+        color: reached ? color.withValues(alpha: 0.7) : idle,
+      );
+
+  static String _hm(DateTime t) {
+    final l = t.toLocal();
+    String two(int v) => v.toString().padLeft(2, '0');
+    return '${two(l.hour)}:${two(l.minute)}:${two(l.second)}';
   }
 }

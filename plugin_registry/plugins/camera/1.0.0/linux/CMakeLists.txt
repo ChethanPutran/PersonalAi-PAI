@@ -4,7 +4,7 @@ project(pai_camera CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-set(SHARED_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../shared")
+set(SHARED_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../../shared")
 
 
 add_library(pai_camera SHARED

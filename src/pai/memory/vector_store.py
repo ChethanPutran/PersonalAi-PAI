@@ -65,9 +65,21 @@ class VectorStore:
                     None,
                 )
                 if embedding_fn_class:
-                    self.embed_fn = embedding_fn_class(
-                        model_name=self.embedding_model
-                    )
+                    # Prefer the local HuggingFace cache: no network round-trips (and no
+                    # "unauthenticated request" warnings) on every start. Download only
+                    # the first time, when the model is not cached yet.
+                    try:
+                        self.embed_fn = embedding_fn_class(
+                            model_name=self.embedding_model, local_files_only=True,
+                        )
+                    except Exception as exc:
+                        logger.info(
+                            "Embedding model {} not cached locally ({}); downloading",
+                            self.embedding_model, type(exc).__name__,
+                        )
+                        self.embed_fn = embedding_fn_class(
+                            model_name=self.embedding_model
+                        )
                 else:
                     self.embed_fn = embedding_functions.DefaultEmbeddingFunction()
 
@@ -542,9 +554,20 @@ class VectorStore:
                 )
 
     async def shutdown(self) -> None:
-        self.client = None
+        client, self.client = self.client, None
         self.collection = None
         self.embed_fn = None
+        if client is not None:
+            # chromadb keeps a shared "system" (sqlite handle + worker threads) alive until it
+            # is stopped explicitly: dropping our reference is not enough.
+            try:
+                system = getattr(client, "_system", None)
+                if system is not None:
+                    await asyncio.to_thread(system.stop)
+                from chromadb.api.client import SharedSystemClient
+                SharedSystemClient.clear_system_cache()
+            except Exception as exc:
+                logger.warning("VectorStore: chroma did not release cleanly: {}", exc)
         logger.info("VectorStore shutdown")
 
 

@@ -1,0 +1,14 @@
+# Keep third-party actions and dependencies current (and surface pinned-version bumps as reviewable PRs).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule: { interval: weekly }
+  - package-ecosystem: pip
+    directory: "/"
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+  - package-ecosystem: pub
+    directory: "/frontend"
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5

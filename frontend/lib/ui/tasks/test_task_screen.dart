@@ -7,6 +7,8 @@ import '../../plugins/models/plugin_capability.dart';
 import '../../plugins/plugin_manager.dart';
 import '../../tasks/local_task.dart';
 import '../../tasks/local_task_runner.dart';
+import '../theme/theme.dart';
+import '../widgets/hud/hud.dart';
 
 class TestTaskScreen extends StatefulWidget {
   final PluginManager pluginManager;
@@ -90,9 +92,9 @@ class _TestTaskScreenState extends State<TestTaskScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Test Task'),
+    return HudScaffold(
+      appBar: HudAppBar(
+        titleWidget: const Text('Test Task'),
         actions: [
           IconButton(
             tooltip: 'Clear finished',
@@ -140,7 +142,7 @@ class _TestTaskScreenState extends State<TestTaskScreen> {
               padding: EdgeInsets.only(bottom: 8),
               child: Text(
                 'No enabled capabilities. Install and enable a plugin first.',
-                style: TextStyle(color: Colors.orange),
+                style: TextStyle(color: PaiColors.amber),
               ),
             )
           else
@@ -306,9 +308,9 @@ class _TestTaskScreenState extends State<TestTaskScreen> {
             width: double.infinity,
             padding: const EdgeInsets.all(8),
             decoration: BoxDecoration(
-              color: Colors.grey.shade100,
+              color: PaiColors.bg2,
               borderRadius: BorderRadius.circular(6),
-              border: Border.all(color: Colors.grey.shade300),
+              border: Border.all(color: context.pai.line),
             ),
             child: SelectableText(
               text,
@@ -326,7 +328,7 @@ class _TestTaskScreenState extends State<TestTaskScreen> {
   Widget _statusIcon(LocalTaskStatus s) {
     switch (s) {
       case LocalTaskStatus.pending:
-        return const Icon(Icons.schedule, color: Colors.orange);
+        return const Icon(Icons.schedule, color: PaiColors.amber);
       case LocalTaskStatus.running:
         return const SizedBox(
           width: 20,
@@ -334,13 +336,13 @@ class _TestTaskScreenState extends State<TestTaskScreen> {
           child: CircularProgressIndicator(strokeWidth: 2),
         );
       case LocalTaskStatus.paused:
-        return const Icon(Icons.pause_circle, color: Colors.blue);
+        return const Icon(Icons.pause_circle, color: PaiColors.cyan);
       case LocalTaskStatus.completed:
-        return const Icon(Icons.check_circle, color: Colors.green);
+        return const Icon(Icons.check_circle, color: PaiColors.green);
       case LocalTaskStatus.failed:
-        return const Icon(Icons.error, color: Colors.red);
+        return const Icon(Icons.error, color: PaiColors.red);
       case LocalTaskStatus.cancelled:
-        return const Icon(Icons.cancel, color: Colors.grey);
+        return const Icon(Icons.cancel, color: PaiColors.textMid);
     }
   }
 

@@ -13,7 +13,7 @@
   },
   "platforms": {
     "linux": {
-      "artifact": "server/browser_plugin.py",
+      "artifact": "linux/browser_plugin.py",
       "entrypoint": "create_plugin"
     }
   },
@@ -26,6 +26,8 @@
   "capabilities": [
     {
       "id": "browser.navigate",
+      "taskType": "one_shot",
+      "timeoutSeconds": 60,
       "description": "Open a URL and return the rendered text/title.",
       "requireConfirmation": true,
       "confirmationReason": "Navigating to arbitrary URLs can be dangerous. Please confirm that you want to open this URL.",
@@ -46,6 +48,8 @@
     },
     {
       "id": "browser.fillForm",
+      "taskType": "one_shot",
+      "timeoutSeconds": 90,
       "description": "Fill fields and optionally submit a form.",
       "requireConfirmation": true,
       "confirmationReason": "Filling forms can be dangerous. Please confirm that you want to fill this form.",
@@ -72,6 +76,8 @@
     },
     {
       "id": "browser.book",
+      "taskType": "one_shot",
+      "timeoutSeconds": 300,
       "description": "High-level booking flow: navigate, fill, submit, capture confirmation.",
       "requireConfirmation": true,
       "confirmationReason": "Booking services can be risky. Please confirm that you want to proceed with this booking.",

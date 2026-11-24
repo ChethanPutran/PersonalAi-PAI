@@ -130,6 +130,7 @@ class CapabilityResolver(Lifecycle):
             return CapabilityResolution(
                 capability=capability,
                 plugin_id=primary.plugin_id,
-                plugin_manifest=self.plugin_manager.get_manifest(primary.plugin_id),
+                plugin_manifest=self.plugin_manager.get_manifest(
+                    primary.plugin_id, primary.plugin_version),
                 targets=targets,
             )

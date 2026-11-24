@@ -1,7 +1,10 @@
-  import 'package:shared_preferences/shared_preferences.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:uuid/uuid.dart';
 
 import '../core/api/api_client.dart';
 import '../models/chat.dart';
+import 'chat_stream.dart';
+import 'sse_client.dart';
 
 class ChatService {
   final ApiClient api;
@@ -41,10 +44,47 @@ class ChatService {
   }
 
 
+  /// Streams the reply token-by-token (`POST /chat/stream`, SSE).
+  ///
+  /// The same [idempotencyKey] can be reused for the non-streaming fallback
+  /// ([sendMessage]) so a retry never runs the goal twice. On `done` the session
+  /// id the server assigned is adopted, exactly like [sendMessage].
+  Stream<ChatStreamEvent> sendMessageStream({
+    required String deviceId,
+    required String message,
+    String mode = 'text',
+    String? idempotencyKey,
+    SseClient? client,
+  }) async* {
+    final sse = client ?? SseClient();
+    final events = sse.post(
+      api.urlFor('/chat/stream'),
+      headers: {
+        ...api.authHeaders,
+        'Idempotency-Key': ?idempotencyKey,
+      },
+      body: {
+        'device_id': deviceId,
+        'message': message,
+        'mode': mode,
+        'session_id': ?_sessionId,
+      },
+    );
+    await for (final raw in events) {
+      final ev = ChatStreamEvent.fromSse(raw);
+      if (ev == null) continue;
+      if (ev is ChatStreamDone && ev.response.sessionId.isNotEmpty) {
+        await setSessionId(ev.response.sessionId);
+      }
+      yield ev;
+    }
+  }
+
   Future<ChatResponse> sendMessage({
     required String deviceId,
     required String message,
     String mode = 'text',
+    String? idempotencyKey,
   }) async {
     final result = await api.post(
       '/chat',
@@ -54,6 +94,9 @@ class ChatService {
         'mode': mode,
         if (_sessionId != null) 'session_id': _sessionId,   
       },
+      headers: idempotencyKey == null
+          ? null
+          : {'Idempotency-Key': idempotencyKey},
     );
 
     // If this was /new, adopt the new session id.
@@ -82,10 +125,23 @@ class ChatService {
 
 
   Future<void> startNewSession() async {
-    // Do NOT mint a local id. The server assigns the real session id
-    // on the first POST /chat; until then there is no session to
-    // subscribe to, and opening a WS on a fake id gets a 403.
+    // A new chat has no session yet; the id is picked when the first message is sent
+    // ([beginClientSession]) and persisted once the server confirms it.
     _sessionId = null;
     await _persistSession();
+  }
+
+  /// Picks the id of a brand-new conversation NOW, so the live-status and confirmation sockets (keyed by
+  /// session id) can be open BEFORE the first message is sent.
+  ///
+  /// Without this the first message of a new chat had no socket at all (the server only used to hand out the
+  /// id in its reply), so it showed a bare "Working…" while every later message showed stage-by-stage status,
+  /// and a confirmation prompt in that first message could not reach the screen. The backend accepts a stream
+  /// for a not-yet-existing session and the first POST creates it under the caller with this id (a 32-char hex
+  /// id, the same shape the server mints). Held in memory only: it is persisted once the server confirms it.
+  String beginClientSession() {
+    final id = const Uuid().v4().replaceAll('-', '');
+    _sessionId = id;
+    return id;
   }
 }

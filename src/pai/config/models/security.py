@@ -1,7 +1,7 @@
-from enum import Enum
+from enum import Enum, StrEnum
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 from pai.common.enums.permission import PermissionAction, PermissionResource, Role
 
@@ -13,7 +13,7 @@ class AuthenticationConfig(BaseModel):
     algorithm: str = Field(default="HS256")
 
 
-class AuthorizationPolicy(Enum):
+class AuthorizationPolicy(StrEnum):
     """Authorization policies."""
     DEFAULT_POLICY = "default_policy"
     ADMIN_POLICY = "admin_policy"
@@ -32,7 +32,10 @@ class DefaultAuthorizationPolicyConfig(BaseModel):
 
 class RolePolicyConfig(BaseModel):
     """Role-based authorization policy configuration."""
-    role: Role = Field(default=Role.USER)
+    # `name` is accepted as an alias: the YAML used `name:` and it was silently ignored, which
+    # collapsed every role into "user" (last one wins) and denied `execute` to everybody.
+    model_config = ConfigDict(populate_by_name=True)
+    role: Role = Field(default=Role.USER, validation_alias=AliasChoices("role", "name"))
     permissions: list[PermissionAction] = Field(default=[PermissionAction.READ, PermissionAction.WRITE])
 
 class PolicyRuleConfig(BaseModel):
@@ -62,6 +65,13 @@ class AuthorizationConfig(BaseModel):
     
     default_role: Role = Field(default=Role.USER)
     admin_role: Role = Field(default=Role.ADMIN)
+    # How far an approval of keyboard/mouse actions may reach ("input" permission).
+    #   once     every action asks again (the default: typing and clicking is the most powerful thing
+    #            a plugin can do, and nothing it approved can be remembered)
+    #   session  "approve for this session" may be offered (up to 8 hours; high-risk actions never get
+    #            "always"). Lets an agent work without a prompt per click, after ONE explicit approval.
+    # Camera control is not affected: it stays once-only whatever this says.
+    input_grant_scope: Literal["once", "session"] = "once"
     auth_policy: AuthorizationPolicy = Field(default=AuthorizationPolicy.DEFAULT_POLICY)
     rules: list[PolicyRuleConfig] = Field(default_factory=list)
 

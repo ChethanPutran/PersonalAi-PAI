@@ -1,3 +1,4 @@
+import 'connection_liveness.dart';
 import 'dart:async';
 import 'dart:convert';
 
@@ -42,13 +43,10 @@ class DeviceConnectionService {
   final String baseUrl;
   final String deviceId;
 
-  DateTime? _lastHeartbeatAck;
+  /// Silence for 3 × the heartbeat interval (90s) marks the socket dead: one lost beat is fine,
+  /// two in a row is not. Refreshed by EVERY received frame, not just heartbeat acks.
+  final ConnectionLiveness _liveness = ConnectionLiveness();
 Timer? _heartbeatWatchdog;
-
-/// If no heartbeat_ack arrives within this window, treat the socket
-/// as dead. `3 × heartbeat interval` = 90s — one lost beat is fine,
-/// two in a row is not.
-static const _heartbeatAckTimeout = Duration(seconds: 90);
 
   // Log a warning after this many consecutive failures, but keep retrying.
   static const _maxConsecutiveFailures = 5;
@@ -304,6 +302,7 @@ _heartbeatWatchdog = null;
   // -----------------------------------------------------------------
 
   Future<void> _handleMessage(dynamic rawMessage) async {
+    _liveness.touch();          // any frame at all proves the socket is alive
     try {
       debugPrint('[DeviceConnection] Received: $rawMessage');
 
@@ -658,7 +657,7 @@ void _startHeartbeat() {
   _heartbeatTimer?.cancel();
   _heartbeatWatchdog?.cancel();
 
-  _lastHeartbeatAck = DateTime.now();
+  _liveness.touch();
 
   _heartbeatTimer = Timer.periodic(
     const Duration(seconds: 30),
@@ -683,12 +682,9 @@ void _startHeartbeat() {
     const Duration(seconds: 30),
     (_) {
       if (!isConnected) return;
-      final last = _lastHeartbeatAck;
-      if (last == null) return;
-      final age = DateTime.now().difference(last);
-      if (age > _heartbeatAckTimeout) {
+      if (_liveness.isStale) {
         debugPrint(
-          '[DeviceConnection] no heartbeat_ack for ${age.inSeconds}s '
+          '[DeviceConnection] nothing received for ${_liveness.silence!.inSeconds}s '
           '— reconnecting',
         );
         _handleDeadSocket('heartbeat_ack_timeout');

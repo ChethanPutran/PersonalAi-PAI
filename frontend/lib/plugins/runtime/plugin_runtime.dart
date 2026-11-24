@@ -299,4 +299,23 @@ Future<String> getAbi() async {
       return {'ok': 'false', 'error': e.toString()};
     }
   }
+
+  /// What the user has ALREADY decided on this device, without asking: {permission: granted|denied|pending}.
+  ///
+  /// Returns null when this platform cannot answer without prompting (Android asks on request; no native
+  /// method yet): the caller must then treat every permission as unknown, never as granted or denied.
+  Future<Map<String, String>?> permissionStatus(List<String> permissions) async {
+    try {
+      final r = await _channel.invokeMethod<Map<dynamic, dynamic>>(
+          'permissionStatus', {'permissions': permissions});
+      if (r == null) return null;
+      return {for (final e in r.entries) e.key.toString(): e.value.toString()};
+    } on MissingPluginException {
+      return null;
+    } on PlatformException {
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
 }

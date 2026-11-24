@@ -23,6 +23,9 @@ def main() -> None:
         reload=config.server.reload,
         workers=config.server.workers,
         access_log=False,
+        # Open SSE/WebSocket streams never end on their own; without a cap a reload or Ctrl+C
+        # hangs on "Waiting for connections to close".
+        timeout_graceful_shutdown=5,
     )
 
 

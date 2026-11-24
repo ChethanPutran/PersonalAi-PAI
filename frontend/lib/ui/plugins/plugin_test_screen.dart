@@ -1,4 +1,5 @@
 
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -8,7 +9,13 @@ import 'package:pai_mobile/plugins/models/plugin_capability.dart';
 import '../../plugins/models/plugin_info.dart';
 import '../../plugins/plugin_manager.dart';
 import '../../plugins/capability_dispatcher.dart';
+import '../../plugins/permissions/permission_models.dart';
+import '../../plugins/permissions/permissions_service.dart';
+import 'permissions/confirmation_dialog.dart';
+import 'permissions/permissions_screen.dart';
 import 'widgets/param_field.dart';
+import '../theme/theme.dart';
+import '../widgets/hud/hud.dart';
 
 /// Unified plugin tester.
 ///
@@ -62,6 +69,9 @@ class PluginTestScreen extends StatefulWidget {
   /// Remote capability schemas must come from the backend/device manifest.
   final List<PluginCapability> remoteCapabilities;
 
+  /// Server permission checks / confirmation. Defaults to the app-wide instance.
+  final PermissionsService? permissions;
+
   const PluginTestScreen({
     super.key,
     required this.manager,
@@ -70,6 +80,7 @@ class PluginTestScreen extends StatefulWidget {
     this.plugin,
     required this.device,
     this.remoteCapabilities = const [],
+    this.permissions,
   });
 
   @override
@@ -87,6 +98,9 @@ class _PluginTestScreenState extends State<PluginTestScreen> {
 
   bool get _isFocused => widget.plugin != null;
 
+  PermissionsService get _permissions =>
+      widget.permissions ?? PermissionsService.of(widget.manager.api);
+
   @override
   Widget build(BuildContext context) {
     return _isFocused ? _buildFocused() : _buildGlobal();
@@ -100,9 +114,9 @@ class _PluginTestScreenState extends State<PluginTestScreen> {
     final plugin = widget.plugin!;
     final device = widget.device;
 
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(
+    return HudScaffold(
+      appBar: HudAppBar(
+        titleWidget: Text(
           _isRemote ? '${plugin.name} on ${device.name}'
               : plugin.name,
         ),
@@ -138,12 +152,12 @@ class _PluginTestScreenState extends State<PluginTestScreen> {
 
   Widget _offlineBanner(DeviceInfo device) {
     return Card(
-      color: Colors.orange.shade50,
+      color: PaiColors.amber.withValues(alpha: 0.10),
       child: Padding(
         padding: const EdgeInsets.all(12),
         child: Row(
           children: [
-            Icon(Icons.cloud_off, color: Colors.orange.shade700),
+            Icon(Icons.cloud_off, color: PaiColors.amber),
             const SizedBox(width: 8),
             Expanded(
               child: Text(
@@ -151,7 +165,7 @@ class _PluginTestScreenState extends State<PluginTestScreen> {
                 'Invocations will fail until the device reconnects.',
                 style: TextStyle(
                   fontSize: 12,
-                  color: Colors.orange.shade900,
+                  color: PaiColors.amber,
                 ),
               ),
             ),
@@ -170,9 +184,9 @@ class _PluginTestScreenState extends State<PluginTestScreen> {
         .where((plugin) => widget.manager.isInstalled(plugin.id))
         .toList();
 
-    return Scaffold(
-      appBar: AppBar(              
-        title: const Text('Plugin Tester'),
+    return HudScaffold(
+      appBar: HudAppBar(              
+        titleWidget: const Text('Plugin Tester'),
         actions: [
           IconButton(
             tooltip: 'Reload plugin list',
@@ -274,10 +288,10 @@ class _PluginTestScreenState extends State<PluginTestScreen> {
                   ? Icons.check_circle
                   : Icons.pause_circle,
           color: !installed
-              ? Colors.red
+              ? PaiColors.red
               : enabled
-                  ? Colors.green
-                  : Colors.orange,
+                  ? PaiColors.green
+                  : PaiColors.amber,
         ),
         title: Text(plugin.name),
         subtitle: Text(
@@ -346,13 +360,14 @@ class _PluginTestScreenState extends State<PluginTestScreen> {
       context: context,
       isScrollControlled: true,
       useSafeArea: true,
-      builder: (_) => _CapabilityTestSheet(
+      builder: (_) => CapabilityTestSheet(
         manager: widget.manager,
         dispatcher: widget.dispatcher,
         plugin: plugin,
         capability: capability,
         device: widget.device,
         thisDeviceId: widget.thisDeviceId,
+        permissions: _permissions,
       ),
     );
   }
@@ -362,29 +377,32 @@ class _PluginTestScreenState extends State<PluginTestScreen> {
 // Capability test bottom sheet
 // ==========================================================================
 
-class _CapabilityTestSheet extends StatefulWidget {
+class CapabilityTestSheet extends StatefulWidget {
   final PluginManager manager;
   final CapabilityDispatcher dispatcher;
   final PluginInfo plugin;
   final PluginCapability capability;
   final DeviceInfo? device;
   final String thisDeviceId;
+  final PermissionsService permissions;
 
-  const _CapabilityTestSheet({
+  const CapabilityTestSheet({
+    super.key,
     required this.manager,
     required this.dispatcher,
     required this.plugin,
     required this.capability,
     required this.thisDeviceId,
     required this.device,
+    required this.permissions,
   });
 
   @override
-  State<_CapabilityTestSheet> createState() =>
+  State<CapabilityTestSheet> createState() =>
       _CapabilityTestSheetState();
 }
 
-class _CapabilityTestSheetState extends State<_CapabilityTestSheet> {
+class _CapabilityTestSheetState extends State<CapabilityTestSheet> {
   bool get _isRemote =>
       widget.device != null &&
       widget.device!.id != widget.thisDeviceId;
@@ -394,6 +412,9 @@ class _CapabilityTestSheetState extends State<_CapabilityTestSheet> {
   bool _busy = false;
   bool _showCodepoints = false;
 
+  /// Shown while we wait on the server ("Checking permissions…", "Waiting for the device…").
+  String? _status;
+
   String? _error;
   Map<String, dynamic>? _result;
 
@@ -401,6 +422,8 @@ class _CapabilityTestSheetState extends State<_CapabilityTestSheet> {
   void initState() {
     super.initState();
     _seedParamDefaults();
+    // Warm the "am I an admin?" answer now so it is known even if the server drops later.
+    unawaited(widget.permissions.isAdmin());
   }
 
   // ------------------------------------------------------------------
@@ -463,6 +486,7 @@ class _CapabilityTestSheetState extends State<_CapabilityTestSheet> {
       _busy = true;
       _error = null;
       _result = null;
+      _status = null;
     });
 
     try {
@@ -471,6 +495,9 @@ class _CapabilityTestSheetState extends State<_CapabilityTestSheet> {
       } else {
         await _invokeLocal();
       }
+    } on TimeoutException catch (e) {
+      debugPrint('[PluginTester] Gave up waiting: $e');
+      _error = 'Still running after 60 s — it may still finish. Check the Tasks screen.';
     } catch (e, stackTrace) {
       debugPrint('[PluginTester] Invocation failed: $e');
       debugPrintStack(stackTrace: stackTrace);
@@ -480,29 +507,93 @@ class _CapabilityTestSheetState extends State<_CapabilityTestSheet> {
       if (mounted) {
         setState(() {
           _busy = false;
+          _status = null;
         });
       }
     }
   }
 
+  void _setStatus(String? message) {
+    if (mounted) setState(() => _status = message);
+  }
+
   /// Local invocation.
   ///
-  /// Do not call PluginRuntime.invoke() here.
-  /// The dispatcher resolves the capability through PluginRegistry,
-  /// verifies plugin state, resolves the native artifact, and invokes
-  /// the native runtime.
+  /// Nothing runs natively before the server has said it may: the server decides (allow /
+  /// confirm / deny) exactly as it does for chat, plans and schedules. If no decision can be
+  /// obtained at all, only an admin may run it; everyone else is refused.
   Future<void> _invokeLocal() async {
+    final params = Map<String, dynamic>.from(_paramValues);
+    _setStatus('Checking permissions…');
+
+    final PreflightResult decision;
+    try {
+      decision = await widget.permissions.preflight(
+        deviceId: widget.thisDeviceId,
+        capability: widget.capability.id,
+        parameters: params,
+      );
+    } on PreflightUnavailable catch (e) {
+      final admin = widget.permissions.cachedIsAdmin ?? await widget.permissions.isAdmin();
+      if (admin) {
+        debugPrint('[PluginTester] No permission decision (${e.reason}); running because the user is an admin.');
+        await _runNative(params);
+        return;
+      }
+      _error = 'Can’t check permissions right now (${e.reason}). Connect to the server and try '
+          'again — only admins can run actions without a permission check.';
+      return;
+    }
+
+    switch (decision.decision) {
+      case PreflightDecision.allow:
+        await _runNative(params);
+      case PreflightDecision.deny:
+        _error = decision.reason?.isNotEmpty == true
+            ? 'Not allowed: ${decision.reason}'
+            : 'This action is not allowed.';
+      case PreflightDecision.confirm:
+        await _confirmThenRunViaServer(decision);
+    }
+  }
+
+  Future<void> _runNative(Map<String, dynamic> params) async {
+    _setStatus(null);
     final result = await widget.dispatcher.invoke(
+      capability: widget.capability.id,
+      parameters: params,
+    );
+    _result = _normalizeResult(result);
+  }
+
+  /// The action needs approval. A natively-started run has no server task to approve, so the
+  /// run goes through the server instead (`/devices/{this device}/invoke`), which creates the
+  /// task, asks the same approval dialog, and executes it on this device.
+  Future<void> _confirmThenRunViaServer(PreflightResult decision) async {
+    final device = widget.device;
+    if (device == null || !device.connected) {
+      _error = 'This action needs your approval, and this device is not connected to the '
+          'server to ask for it. Connect and try again.';
+      return;
+    }
+    _setStatus('Asking for approval…');
+    final outcome = await widget.permissions.invoke(
+      deviceId: widget.thisDeviceId,
       capability: widget.capability.id,
       parameters: Map<String, dynamic>.from(_paramValues),
     );
-
-    _result = _normalizeResult(result);
+    await _completeRun(
+      outcome,
+      deviceName: device.name,
+      // Local runs offer "once" and "this session" only.
+      limitScopes: const {ConfirmationScope.once, ConfirmationScope.session},
+    );
   }
 
   /// Remote invocation.
   ///
-  /// Remote execution is handled by the backend/device.
+  /// Goes through the server's normal task pipeline, so authorization, confirmation and audit
+  /// all apply. Admins are never prompted; everyone else is asked via the approval dialog.
   Future<void> _invokeRemote() async {
     final device = widget.device;
 
@@ -514,20 +605,78 @@ class _CapabilityTestSheetState extends State<_CapabilityTestSheet> {
       throw StateError('${device.name} is offline.');
     }
 
-    final response = await widget.manager.api.post(
-      '/devices/${device.id}/invoke',
-      {
-        'capability': widget.capability.id,
-        'parameters': Map<String, dynamic>.from(_paramValues),
-        'timeout_seconds': 60,
-      },
+    final outcome = await widget.permissions.invoke(
+      deviceId: device.id,
+      capability: widget.capability.id,
+      parameters: Map<String, dynamic>.from(_paramValues),
+      timeoutSeconds: 60,
     );
+    await _completeRun(outcome, deviceName: device.name);
+  }
 
-    final raw = response['result'];
+  /// Shared tail of both server-run paths: approval (if asked), then the result.
+  Future<void> _completeRun(
+    InvokeOutcome outcome, {
+    required String deviceName,
+    Set<ConfirmationScope>? limitScopes,
+  }) async {
+    final taskId = outcome.taskId;
 
-    _result = raw is Map
-        ? Map<String, dynamic>.from(raw)
-        : {'result': raw};
+    if (outcome.awaitingConfirmation) {
+      if (taskId == null) {
+        throw StateError('The server asked for approval but did not say which task.');
+      }
+      _setStatus(null);
+      final request = (outcome.confirmation ??
+              ConfirmationRequest(capability: widget.capability.id))
+          .withDeviceName(deviceName);
+      final approved = await showConfirmationDialog(
+        context,
+        request: request,
+        limitScopes: limitScopes,
+        onConfirm: (decision) => widget.permissions.confirmTask(taskId, decision),
+        onDeny: () => widget.permissions.denyTask(taskId),
+      );
+      if (!mounted) return;
+      if (!approved) {
+        _error = 'Denied — nothing was run.';
+        return;
+      }
+      _setStatus('Waiting for the device…');
+      _applyState(await widget.permissions.waitForTask(taskId));
+      return;
+    }
+
+    if (outcome.finished) {
+      _applyOutcome(outcome);
+      return;
+    }
+
+    if (taskId != null) {
+      _setStatus('Waiting for the device…');
+      _applyState(await widget.permissions.waitForTask(taskId));
+      return;
+    }
+
+    _result = _normalizeResult(outcome.result);
+  }
+
+  void _applyOutcome(InvokeOutcome o) {
+    if (o.status == 'failed' || o.status == 'cancelled') {
+      _error = o.error ?? (o.status == 'cancelled' ? 'The task was cancelled.' : 'The action failed.');
+      return;
+    }
+    _result = _normalizeResult(o.result);
+  }
+
+  void _applyState(TaskRunState state) {
+    if (state.succeeded) {
+      _result = _normalizeResult(state.output);
+    } else if (state.status == 'cancelled') {
+      _error = 'The task was cancelled.';
+    } else {
+      _error = state.error ?? 'The action failed.';
+    }
   }
 
   Map<String, dynamic> _normalizeResult(dynamic result) {
@@ -579,9 +728,9 @@ class _CapabilityTestSheetState extends State<_CapabilityTestSheet> {
     return Container(
       padding: const EdgeInsets.all(10),
       decoration: BoxDecoration(
-        color: Colors.grey.shade100,
+        color: PaiColors.bg2,
         borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: Colors.grey.shade300),
+        border: Border.all(color: context.pai.line),
       ),
       child: SelectableText(
         data is String
@@ -592,18 +741,31 @@ class _CapabilityTestSheetState extends State<_CapabilityTestSheet> {
     );
   }
 
+  /// Calm "something is happening on the server/device" line (not an error).
+  Widget _statusRow(String message) {
+    return Padding(
+      key: const Key('tester-status'),
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: Row(children: [
+        const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
+        const SizedBox(width: 10),
+        Expanded(child: Text(message, style: TextStyle(color: context.pai.muted))),
+      ]),
+    );
+  }
+
   Widget _errorBox(String message) {
     return Container(
       margin: const EdgeInsets.symmetric(vertical: 6),
       padding: const EdgeInsets.all(10),
       decoration: BoxDecoration(
-        color: Colors.red.shade50,
-        border: Border.all(color: Colors.red.shade200),
+        color: PaiColors.red.withValues(alpha: 0.10),
+        border: Border.all(color: PaiColors.red.withValues(alpha: 0.45)),
         borderRadius: BorderRadius.circular(8),
       ),
       child: Text(
         message,
-        style: const TextStyle(color: Colors.red),
+        style: const TextStyle(color: PaiColors.red),
       ),
     );
   }
@@ -638,17 +800,36 @@ class _CapabilityTestSheetState extends State<_CapabilityTestSheet> {
                     padding: const EdgeInsets.only(top: 2),
                     child: Text(
                       widget.capability.description,
-                      style: TextStyle(color: Colors.grey.shade700),
+                      style: TextStyle(color: context.pai.muted),
                     ),
                   ),
               ],
             ),
           ),
           IconButton(
+            key: const Key('open-permissions'),
+            tooltip: 'Permissions',
+            icon: const Icon(Icons.verified_user_outlined),
+            onPressed: _busy ? null : _openPermissions,
+          ),
+          IconButton(
             icon: const Icon(Icons.close),
             onPressed: () => Navigator.of(context).pop(),
           ),
         ],
+      ),
+    );
+  }
+
+  void _openPermissions() {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => PermissionsScreen(
+          service: widget.permissions,
+          deviceNames: {
+            if (widget.device != null) widget.device!.id: widget.device!.name,
+          },
+        ),
       ),
     );
   }
@@ -674,7 +855,7 @@ class _CapabilityTestSheetState extends State<_CapabilityTestSheet> {
               Icon(
                 enabled ? Icons.check_circle : Icons.info_outline,
                 size: 16,
-                color: enabled ? Colors.green : Colors.orange,
+                color: enabled ? PaiColors.green : PaiColors.amber,
               ),
               const SizedBox(width: 4),
               Text(
@@ -682,7 +863,7 @@ class _CapabilityTestSheetState extends State<_CapabilityTestSheet> {
                     ? 'Plugin enabled on ${device.name}'
                     : 'Plugin disabled on ${device.name}',
                 style: TextStyle(
-                  color: enabled ? Colors.green : Colors.orange,
+                  color: enabled ? PaiColors.green : PaiColors.amber,
                   fontWeight: FontWeight.w600,
                 ),
               ),
@@ -719,7 +900,7 @@ class _CapabilityTestSheetState extends State<_CapabilityTestSheet> {
             Icon(
               enabled ? Icons.check_circle : Icons.info_outline,
               size: 16,
-              color: enabled ? Colors.green : Colors.orange,
+              color: enabled ? PaiColors.green : PaiColors.amber,
             ),
             const SizedBox(width: 4),
             Text(
@@ -729,7 +910,7 @@ class _CapabilityTestSheetState extends State<_CapabilityTestSheet> {
                       ? 'Plugin enabled'
                       : 'Plugin disabled',
               style: TextStyle(
-                color: enabled ? Colors.green : Colors.orange,
+                color: enabled ? PaiColors.green : PaiColors.amber,
                 fontWeight: FontWeight.w600,
               ),
             ),
@@ -809,16 +990,17 @@ class _CapabilityTestSheetState extends State<_CapabilityTestSheet> {
                   ),
                   const SizedBox(height: 8),
                   if (_paramValues.isEmpty)
-                    const Text(
+                    Text(
                       'No parameters.',
                       style: TextStyle(
                         fontSize: 12,
-                        color: Colors.grey,
+                        color: context.pai.muted,
                       ),
                     )
                   else
                     ..._paramValues.keys.map(_buildParamField),
                   const SizedBox(height: 8),
+                  if (_status != null) _statusRow(_status!),
                   if (_error != null) _errorBox(_error!),
                   if (_result != null) ...[
                     const SizedBox(height: 12),

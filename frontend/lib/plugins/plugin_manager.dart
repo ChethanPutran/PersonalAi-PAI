@@ -4,9 +4,12 @@ import 'package:pai_mobile/plugins/capability_dispatcher.dart';
 import 'package:pai_mobile/plugins/models/permission_consent_handler.dart';
 
 import '../core/api/api_client.dart';
+import '../core/app_version.dart';
 import 'models/catalog_response.dart';
+import 'models/plugin_update.dart';
 import 'models/plugin_info.dart';
 import 'models/plugin_state.dart';
+import 'permission_reporter.dart';
 import 'plugin_service.dart';
 
 // ---------------------------------------------------------------------------
@@ -67,6 +70,9 @@ class PluginManager extends ChangeNotifier {
   /// operating-system permissions.
   final PermissionConsentHandler? onPermissionConsent;
 
+  /// Reports the user's device-side permission choices to the backend (advisory). Optional.
+  final PermissionReporter? permissionReporter;
+
   /// Plugin installation states reported by other devices.
   ///
   /// Shape:
@@ -103,6 +109,12 @@ class PluginManager extends ChangeNotifier {
   /// IDs known to be installed locally.
   final Set<String> _localInstalledIds = {};
 
+  /// Installed version of each locally installed plugin.
+  final Map<String, String> _localVersions = {};
+
+  /// Backend-computed update status: deviceId -> pluginId -> update.
+  final Map<String, Map<String, PluginUpdate>> _updates = {};
+
   // -------------------------------------------------------------------------
   // Remote operation state
   // -------------------------------------------------------------------------
@@ -131,7 +143,25 @@ class PluginManager extends ChangeNotifier {
     required this.deviceId,
     required this.dispatcher,
     this.onPermissionConsent,
+    this.permissionReporter,
   });
+
+  /// Reports, for every plugin installed here, the permissions its manifest declares and what the user
+  /// decided. Safe to call anywhere: never throws, does nothing without a reporter.
+  Future<void> reportPermissions({bool force = false}) async {
+    final reporter = permissionReporter;
+    if (reporter == null) return;
+    try {
+      final declared = <String, List<String>>{};
+      for (final id in _localInstalledIds) {
+        final perms = _plugins[id]?.permissions ?? const <String>[];
+        if (perms.isNotEmpty) declared[id] = perms;
+      }
+      await reporter.report(declared, force: force);
+    } catch (e) {
+      debugPrint('[PluginManager] permission report failed: $e');
+    }
+  }
 
   // -------------------------------------------------------------------------
   // Getters
@@ -165,6 +195,74 @@ class PluginManager extends ChangeNotifier {
 
   bool isInstalled(String pluginId) {
     return _localInstalledIds.contains(pluginId);
+  }
+
+  // -------------------------------------------------------------------------
+  // Versions / updates
+  // -------------------------------------------------------------------------
+
+  /// Capability ids exposed by the version actually installed here (NOT the newest catalog
+  /// version): what the plugin can do on this device right now.
+  List<String>? installedCapabilities(String pluginId) =>
+      service.registry.byId(pluginId)?.capabilities.map((c) => c.id).toList(growable: false);
+
+  /// Version installed on this device, or null.
+  String? installedVersion(String pluginId) => _localVersions[pluginId];
+
+  /// Update status of an installed plugin (this device unless [deviceId] is given).
+  PluginUpdate? updateFor(String pluginId, {String? deviceId}) =>
+      _updates[deviceId ?? this.deviceId]?[pluginId];
+
+  /// True only when a newer, *runnable* version exists. A newer version that is blocked by an
+  /// old app/server does not count (see [PluginUpdate.blocked]).
+  bool hasUpdate(String pluginId, {String? deviceId}) =>
+      updateFor(pluginId, deviceId: deviceId)?.updateAvailable ?? false;
+
+  /// Number of plugins with an update on this device.
+  int get updateCount =>
+      (_updates[deviceId]?.values ?? const <PluginUpdate>[]).where((u) => u.updateAvailable).length;
+
+  /// Fetches update status for all of the user's devices. Never throws: updates are a
+  /// convenience and must not break the plugin screen if the backend is older/unreachable.
+  Future<void> loadUpdates() async {
+    try {
+      final res = await api.get('/plugins/updates');
+      final devices = (res is Map ? res['devices'] : null);
+      if (devices is! Map) return;
+      _updates.clear();
+      devices.forEach((did, v) {
+        final plugins = (v is Map ? v['plugins'] : null) as List? ?? const [];
+        _updates[did.toString()] = {
+          for (final p in plugins.whereType<Map>())
+            (p['plugin_id']?.toString() ?? ''):
+                PluginUpdate.fromJson(Map<String, dynamic>.from(p)),
+        };
+      });
+      notifyListeners();
+    } catch (e) {
+      debugPrint('[PluginManager] loadUpdates failed (ignored): $e');
+    }
+  }
+
+  /// Updates an installed plugin to the newest version this device can run.
+  Future<void> update(String pluginId) async {
+    final u = updateFor(pluginId);
+    final target = u?.latestVersion;
+    if (u == null || !u.updateAvailable || target == null) {
+      throw StateError('No update available for $pluginId');
+    }
+    await install(pluginId, target);
+    await loadUpdates();
+  }
+
+  /// Updates a plugin on another of the user's devices.
+  Future<void> updateOnDevice(String pluginId, String targetDeviceId) async {
+    final u = updateFor(pluginId, deviceId: targetDeviceId);
+    final target = u?.latestVersion;
+    if (u == null || !u.updateAvailable || target == null) {
+      throw StateError('No update available for $pluginId on $targetDeviceId');
+    }
+    await installOnDevice(pluginId, target, targetDeviceId);
   }
 
   bool isEnabled(String pluginId) {
@@ -249,6 +347,7 @@ class PluginManager extends ChangeNotifier {
 
       // The backend catalog is not the source of truth for local installation.
       await _refreshLocalPluginStates();
+      await loadUpdates();
 
       debugPrint(
         '[PluginManager] Catalog loaded: '
@@ -270,6 +369,7 @@ class PluginManager extends ChangeNotifier {
     final snapshot = await service.localSnapshot();
 
     final installedIds = <String>{};
+    _localVersions.clear();
 
     for (final item in snapshot) {
       final id = item['id']?.toString();
@@ -277,6 +377,8 @@ class PluginManager extends ChangeNotifier {
       if (id == null || id.isEmpty) continue;
 
       installedIds.add(id);
+      final ver = item['version']?.toString();
+      if (ver != null && ver.isNotEmpty) _localVersions[id] = ver;
 
       final enabled = item['enabled'] == true;
 
@@ -315,7 +417,13 @@ class PluginManager extends ChangeNotifier {
   /// If permission consent is pending, the package remains installed but
   /// disabled and the manager reflects that state.
   Future<void> install(String pluginId, String version) async {
-    _requireForThisDevice(pluginId);
+    final info = _requireForThisDevice(pluginId);
+
+    // Client-side gate (the server checks too): never install what this app can't run.
+    final blocked = info.compatible
+        ? appIncompatibility(info.runtimeSpec.minAppVersion)
+        : info.incompatibleReason;
+    if (blocked != null) throw StateError(blocked);
 
     _pluginStates[pluginId] = PluginState.installing;
     _pluginErrors[pluginId] = null;
@@ -330,6 +438,8 @@ class PluginManager extends ChangeNotifier {
 
       // PluginService enables the plugin when installation succeeds.
       _localInstalledIds.add(pluginId);
+      _localVersions[pluginId] = version;
+      _updates[deviceId]?.remove(pluginId);
       _pluginStates[pluginId] = PluginState.enabled;
       _pluginErrors[pluginId] = null;
 
@@ -344,9 +454,16 @@ class PluginManager extends ChangeNotifier {
           '[PluginManager] report-install failed: $e',
         );
       }
+
+      // The app now shows the plugin as enabled, so the server must agree (see _enableOnBackend).
+      if (!await _enableOnBackend(pluginId, deviceId)) {
+        _pluginErrors[pluginId] =
+            'Installed, but the server could not enable it. Turn "Enable" off and on to retry.';
+      }
     } on PluginPermissionPendingException catch (e) {
       // The package was installed successfully, but activation is pending.
       _localInstalledIds.add(pluginId);
+      _localVersions[pluginId] = version;
       _pluginStates[pluginId] = PluginState.disabled;
       _pluginErrors[pluginId] = e.toString();
 
@@ -369,6 +486,7 @@ class PluginManager extends ChangeNotifier {
     } on PluginPermissionDeniedException catch (e) {
       // The package remains installed but cannot be activated.
       _localInstalledIds.add(pluginId);
+      _localVersions[pluginId] = version;
       _pluginStates[pluginId] = PluginState.disabled;
       _pluginErrors[pluginId] = e.toString();
 
@@ -403,6 +521,7 @@ class PluginManager extends ChangeNotifier {
       rethrow;
     } finally {
       notifyListeners();
+      await reportPermissions();
     }
   }
 
@@ -414,6 +533,7 @@ class PluginManager extends ChangeNotifier {
       await service.uninstall(pluginId);
 
       _localInstalledIds.remove(pluginId);
+      _localVersions.remove(pluginId);
       _pluginStates[pluginId] = PluginState.available;
       _pluginErrors[pluginId] = null;
 
@@ -436,6 +556,7 @@ class PluginManager extends ChangeNotifier {
       rethrow;
     } finally {
       notifyListeners();
+      await reportPermissions();
     }
   }
 
@@ -468,15 +589,7 @@ class PluginManager extends ChangeNotifier {
       _pluginStates[pluginId] = PluginState.enabled;
       _pluginErrors[pluginId] = null;
 
-      try {
-        await api.post('/plugins/$pluginId/enable', {
-          'device_id': deviceId,
-        });
-      } catch (e) {
-        debugPrint(
-          '[PluginManager] backend enable failed: $e',
-        );
-      }
+      await _enableOnBackend(pluginId, deviceId);
     } on PluginPermissionPendingException catch (e) {
       // The plugin is still installed, but remains disabled.
       _pluginStates[pluginId] = PluginState.disabled;
@@ -492,6 +605,22 @@ class PluginManager extends ChangeNotifier {
       rethrow;
     } finally {
       notifyListeners();
+      await reportPermissions();
+    }
+  }
+
+  /// Tells the backend this plugin is enabled for the account (and on [targetDeviceId]).
+  ///
+  /// Installing makes the app SHOW a plugin as enabled, but only this call makes the server's router and
+  /// authorization treat it as enabled. Without it every action fails with "'x' is provided by [...] but none
+  /// are enabled for your account. Enable plugin first". Returns false (and logs) if the server refused.
+  Future<bool> _enableOnBackend(String pluginId, String targetDeviceId) async {
+    try {
+      await api.post('/plugins/$pluginId/enable', {'device_id': targetDeviceId});
+      return true;
+    } catch (e) {
+      debugPrint('[PluginManager] backend enable failed: $e');
+      return false;
     }
   }
 
@@ -526,6 +655,7 @@ class PluginManager extends ChangeNotifier {
       rethrow;
     } finally {
       notifyListeners();
+      await reportPermissions();
     }
   }
 
@@ -628,6 +758,9 @@ class PluginManager extends ChangeNotifier {
 
           notifyListeners();
 
+          // The other device enabled it locally on install; make the server agree (see _enableOnBackend).
+          await _enableOnBackend(pluginId, targetDeviceId);
+
           // Refresh catalog after the remote installation completes.
           await loadCatalog();
           return;
@@ -705,7 +838,8 @@ class PluginManager extends ChangeNotifier {
   /// Sends the local plugin snapshot to the backend.
   ///
   /// The backend can use this to reconcile its view of device plugin state.
-  Future<void> reconcileWithBackend() async {
+  /// Returns true if the backend accepted the report (false: it failed, retry later).
+  Future<bool> reconcileWithBackend() async {
     debugPrint('[PluginManager] Reconciling with backend...');
 
     try {
@@ -732,9 +866,12 @@ class PluginManager extends ChangeNotifier {
 
       await _refreshLocalPluginStates();
       notifyListeners();
+      await reportPermissions(force: true);   // a reconcile may follow a server restart
+      return true;
     } catch (e, st) {
       debugPrint('[PluginManager] reconcile failed: $e');
       debugPrintStack(stackTrace: st);
+      return false;
     }
   }
 
@@ -1003,6 +1140,8 @@ class PluginManager extends ChangeNotifier {
     _pluginStates.clear();
     _pluginErrors.clear();
     _localInstalledIds.clear();
+    _localVersions.clear();
+    _updates.clear();
     _remoteOps.clear();
     _capConfigCache.clear();
     _devicePluginStates.clear();

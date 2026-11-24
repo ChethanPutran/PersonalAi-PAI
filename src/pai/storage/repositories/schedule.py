@@ -77,3 +77,14 @@ class ScheduleRepository:
                 updated_at=datetime.now(timezone.utc),
             )
         )
+
+    async def record_run(
+        self, schedule_id: str, *, status: str, at: datetime,
+        error: Optional[str] = None, task_id: Optional[str] = None,
+    ) -> None:
+        """Remember the outcome of the latest firing (shown in the Reminders screen)."""
+        values = dict(last_run_at=at, last_run_status=status, last_run_error=error)
+        if task_id is not None:
+            values["last_task_id"] = task_id
+        await self.session.execute(
+            update(ScheduleModel).where(ScheduleModel.id == schedule_id).values(**values))

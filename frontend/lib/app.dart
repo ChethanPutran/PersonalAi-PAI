@@ -1,5 +1,7 @@
 import 'dart:async';
 
+import 'plugins/permissions/permission_labels.dart';
+import 'plugins/reconcile_gate.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:pai_mobile/device/repositories/device_repository.dart';
@@ -20,6 +22,7 @@ import 'device/device_connection_service.dart';
 
 import 'chat/chat_service.dart';
 
+import 'plugins/permission_reporter.dart';
 import 'plugins/plugin_manager.dart';
 import 'plugins/plugin_service.dart';
 import 'plugins/plugin_installer.dart';
@@ -31,6 +34,7 @@ import 'plugins/runtime/plugin_runtime.dart';
 
 import 'plugins/capability_dispatcher.dart';
 
+import 'tasks/task_event_stream.dart';
 import 'tasks/task_service.dart';
 
 import 'ui/auth/login_screen.dart';
@@ -40,6 +44,9 @@ import 'ui/tasks/tasks_screen.dart';
 import 'profile/profile_service.dart';
 import 'profile/settings_service.dart';
 import 'ui/profile/profile_screen.dart';
+import 'ui/shell/pai_shell.dart';
+import 'ui/theme/theme.dart';
+import 'ui/widgets/hud/hud.dart';
 
 import 'tasks/local_task_runner.dart'; // NEW
 import 'ui/tasks/test_task_screen.dart'; // NEW
@@ -83,8 +90,12 @@ class _PaiAppState extends State<PaiApp> {
     },
   );
 
-  /// Broadcast stream of `task.*` / `plan.*` events received over the WS.
-  /// Fed by [_handleDeviceMessage]; consumed by TasksScreen for auto-refresh.
+  /// The per-user live task feed (SSE `GET /tasks/events`): owned here, started after sign-in,
+  /// stopped on logout. The Tasks screens consume it; nothing polls.
+  TaskEventStream? _taskEventStream;
+
+  /// Broadcast stream of `task.*` / `plan.*` events received over the device WebSocket.
+  /// (Still used by the Reminders screen; the Tasks screens use [_taskEventStream].)
   final _taskEventsController =
       StreamController<Map<String, dynamic>>.broadcast(); // NEW
   String? _initialUserId;
@@ -140,18 +151,34 @@ if (context == null || !mounted) {
         children: [
           const Text('This plugin is requesting access to:'),
           const SizedBox(height: 12),
-          ...permissions.map(
-            (permission) => Padding(
-              padding: const EdgeInsets.symmetric(vertical: 4),
+          ...permissions.map((permission) {
+            final label = describePermission(permission);
+            final warn = Theme.of(dialogContext).colorScheme.error;
+            return Padding(
+              padding: const EdgeInsets.symmetric(vertical: 6),
               child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Icon(Icons.security, size: 18),
+                  Icon(
+                    label.sensitive ? Icons.warning_amber_rounded : Icons.security,
+                    size: 18,
+                    color: label.sensitive ? warn : null,
+                  ),
                   const SizedBox(width: 8),
-                  Expanded(child: Text(permission)),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(label.title, style: const TextStyle(fontWeight: FontWeight.w600)),
+                        if (label.detail.isNotEmpty)
+                          Text(label.detail, style: Theme.of(dialogContext).textTheme.bodySmall),
+                      ],
+                    ),
+                  ),
                 ],
               ),
-            ),
-          ),
+            );
+          }),
         ],
       ),
       actions: [
@@ -240,6 +267,15 @@ if (context == null || !mounted) {
 
       final scheduleService = ScheduleService(api: api);
       final taskService = TaskService(api);
+
+      // The live task feed. A 401 here means the session is dead → same flow as any other
+      // unauthorized API call. The previous stream (re-login) is stopped first.
+      _taskEventStream?.dispose();
+      final taskEvents = TaskEventStream(
+        url: api.urlFor('/tasks/events'),
+        headers: () => api.authHeaders,
+        onUnauthorized: auth.handleUnauthorized,
+      )..start();
       final profileService = ProfileService(api: api);
       final deviceRepo = DeviceRepository(profileService: profileService);
 
@@ -269,6 +305,11 @@ if (context == null || !mounted) {
         deviceId: id,
         dispatcher: dispatcher,
         onPermissionConsent: _requestPluginPermissionConsent,
+        permissionReporter: PermissionReporter(
+          api: api,
+          deviceId: id,
+          status: runtime.permissionStatus,
+        ),
       );
 
       // Load the catalog so that the PluginManager has the latest plugin
@@ -303,10 +344,12 @@ if (context == null || !mounted) {
 
       if (!mounted) {
         connection.dispose();
+        unawaited(taskEvents.dispose());
         return;
       }
 
       setState(() {
+        _taskEventStream = taskEvents;
         deviceId = id;
         _device = device;
         _pluginManager = pluginManager;
@@ -350,18 +393,26 @@ unawaited(_refreshDevicesAfterConnect());
   // Reconcile (called on WS connect)
   // ----------------------------------------------------------------
 
+  /// At most one reconcile in flight and one per minute: a socket that reconnects repeatedly
+  /// must not repeat reconcile + catalog + update requests each time.
+  final ReconcileGate _reconcileGate = ReconcileGate();
+
   Future<void> _reconcilePlugins() async {
     final manager = _pluginManager;
     final dispatcher = _dispatcher;
 
     if (manager == null || dispatcher == null) return;
 
-    await manager.reconcileWithBackend();
-    await manager.loadCatalog();
+    final ran = await _reconcileGate.run(() async {
+      final ok = await manager.reconcileWithBackend();
+      await manager.loadCatalog();
+      dispatcher.invalidateCache();
+      return ok;
+    });
 
-    dispatcher.invalidateCache();
-
-    debugPrint('[PaiApp] Plugin state reconciled + catalog refreshed');
+    debugPrint(ran
+        ? '[PaiApp] Plugin state reconciled + catalog refreshed'
+        : '[PaiApp] Reconcile skipped (one ran recently or is in progress)');
   }
 
   // ------------------------------------------------
@@ -730,6 +781,8 @@ Future<void> _refreshDevicesAfterConnect() async {
   Future<void> _logout() async {
     _connectionService?.dispose();
     _testTaskRunner?.dispose();
+    unawaited(_taskEventStream?.dispose() ?? Future<void>.value());
+    _taskEventStream = null;
 
     _connectionService = null;
     _testTaskRunner = null;
@@ -763,6 +816,7 @@ Future<void> _refreshDevicesAfterConnect() async {
 
   @override
   void dispose() {
+    unawaited(_taskEventStream?.dispose() ?? Future<void>.value());
     _taskEventsController.close();
     _testTaskRunner?.dispose();
     _connectionService?.dispose();
@@ -777,9 +831,12 @@ Future<void> _refreshDevicesAfterConnect() async {
   Widget build(BuildContext context) {
     // 1. Booting.
     if (_booting) {
-      return const MaterialApp(
+      return MaterialApp(
         debugShowCheckedModeBanner: false,
-        home: Scaffold(body: Center(child: CircularProgressIndicator())),
+        theme: PaiTheme.light(),
+        darkTheme: PaiTheme.dark(),
+        themeMode: ThemeMode.dark,
+        home: const _BootScreen(message: 'Initializing'),
       );
     }
 
@@ -787,10 +844,9 @@ Future<void> _refreshDevicesAfterConnect() async {
     if (!auth.isAuthenticated) {
       return MaterialApp(
         debugShowCheckedModeBanner: false,
-        theme: ThemeData(
-          colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
-          useMaterial3: true,
-        ),
+        theme: PaiTheme.light(),
+        darkTheme: PaiTheme.dark(),
+        themeMode: ThemeMode.dark,
         home: LoginScreen(
           auth: auth,
           onAuthenticated: () {
@@ -806,41 +862,30 @@ Future<void> _refreshDevicesAfterConnect() async {
     if (_initError != null) {
       return MaterialApp(
         debugShowCheckedModeBanner: false,
-        home: Scaffold(
-          body: Center(
+        theme: PaiTheme.light(),
+        darkTheme: PaiTheme.dark(),
+        themeMode: ThemeMode.dark,
+        home: HudScaffold(
+          body: HudErrorState(
+            title: 'Failed to connect to PAI',
+            message: 'The assistant could not be reached. Check that the server is running '
+                'and that this device can reach it.',
+            details: _initError!,
+            onRetry: _initialize,
+            retryLabel: 'Retry',
+          ),
+          bottomNavigationBar: SafeArea(
             child: Padding(
-              padding: const EdgeInsets.all(24),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Icon(Icons.error_outline, size: 48, color: Colors.red),
-                  const SizedBox(height: 16),
-                  const Text(
-                    'Failed to connect to PAI',
-                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    _initError!,
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(color: Colors.grey),
-                  ),
-                  const SizedBox(height: 24),
-                  Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      OutlinedButton(
-                        onPressed: _logout,
-                        child: const Text('Sign out'),
-                      ),
-                      const SizedBox(width: 12),
-                      ElevatedButton(
-                        onPressed: _initialize,
-                        child: const Text('Retry'),
-                      ),
-                    ],
-                  ),
-                ],
+              padding: const EdgeInsets.all(PaiSpacing.lg),
+              child: Align(
+                alignment: Alignment.center,
+                heightFactor: 1,
+                child: GlowButton(
+                  label: 'Sign out',
+                  icon: Icons.logout_rounded,
+                  variant: GlowVariant.ghost,
+                  onPressed: _logout,
+                ),
               ),
             ),
           ),
@@ -868,20 +913,12 @@ Future<void> _refreshDevicesAfterConnect() async {
         _deviceRepository == null ||
         _device == null ||
         _testTaskRunner == null) {
-      return const MaterialApp(
+      return MaterialApp(
         debugShowCheckedModeBanner: false,
-        home: Scaffold(
-          body: Center(
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                CircularProgressIndicator(),
-                SizedBox(height: 16),
-                Text('Connecting to PAI...'),
-              ],
-            ),
-          ),
-        ),
+        theme: PaiTheme.light(),
+        darkTheme: PaiTheme.dark(),
+        themeMode: ThemeMode.dark,
+        home: const _BootScreen(message: 'Connecting to PAI'),
       );
     }
 
@@ -890,7 +927,7 @@ Future<void> _refreshDevicesAfterConnect() async {
       ChatScreen(service: _chatService!, deviceId: deviceId!),
       TasksScreen(
         service: _taskService!,
-        taskEvents: _taskEventsController.stream,
+        live: _taskEventStream,
       ),
       PluginsScreen(
         manager: _pluginManager!,
@@ -926,53 +963,46 @@ Future<void> _refreshDevicesAfterConnect() async {
       key: ValueKey('app-${appKey ?? "anon"}'),
       navigatorKey: _navigatorKey,
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
-        useMaterial3: true,
-      ),
-      home: Scaffold(
-        appBar: AppBar(
-          title: const Text('PAI'),
-          actions: [
-            IconButton(
-              icon: const Icon(Icons.logout),
-              tooltip: 'Sign out',
-              onPressed: _logout,
-            ),
-          ],
-        ),
-        // >>> The change <<<
+      theme: PaiTheme.light(),
+        darkTheme: PaiTheme.dark(),
+        themeMode: ThemeMode.dark,
+      home: PaiShell(
+        index: page,
+        onSelect: (i) => setState(() => page = i),
+        onSignOut: _logout,
         body: IndexedStack(index: page, children: screens),
-        bottomNavigationBar: BottomNavigationBar(
-          currentIndex: page,
-          onTap: (i) => setState(() => page = i),
-          type: BottomNavigationBarType.fixed,
-          items: [
-            const BottomNavigationBarItem(
-              icon: Icon(Icons.chat),
-              label: 'Chat',
-            ),
-            const BottomNavigationBarItem(
-              icon: Icon(Icons.task),
-              label: 'Tasks',
-            ),
-            const BottomNavigationBarItem(
-              icon: Icon(Icons.extension),
-              label: 'Plugins',
-            ),
-            const BottomNavigationBarItem(
-              icon: Icon(Icons.alarm),
-              label: 'Reminders',
-            ),
-            const BottomNavigationBarItem(
-              icon: Icon(Icons.person),
-              label: 'Profile',
-            ),
-            if (kDebugMode)
-              const BottomNavigationBarItem(
-                icon: Icon(Icons.bug_report),
-                label: 'Test',
-              ),
+        destinations: [
+          const PaiDestination(icon: Icons.forum_outlined, selectedIcon: Icons.forum, label: 'Chat'),
+          const PaiDestination(icon: Icons.checklist_rtl_outlined, selectedIcon: Icons.checklist_rtl, label: 'Tasks'),
+          const PaiDestination(icon: Icons.extension_outlined, selectedIcon: Icons.extension, label: 'Plugins'),
+          const PaiDestination(icon: Icons.alarm_outlined, selectedIcon: Icons.alarm, label: 'Reminders'),
+          const PaiDestination(icon: Icons.person_outline, selectedIcon: Icons.person, label: 'Profile'),
+          if (kDebugMode)
+            const PaiDestination(icon: Icons.bug_report_outlined, selectedIcon: Icons.bug_report, label: 'Test'),
+        ],
+      ),
+    );
+  }
+}
+
+
+/// Full-screen "initializing / connecting" state: the orb thinking, with a label.
+class _BootScreen extends StatelessWidget {
+  const _BootScreen({required this.message});
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return HudScaffold(
+      body: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const ArcReactorOrb(state: OrbState.thinking, size: 180),
+            const SizedBox(height: PaiSpacing.xl),
+            Text(message.toUpperCase(),
+                style: Theme.of(context).textTheme.titleMedium?.copyWith(color: scheme.primary, letterSpacing: 4)),
           ],
         ),
       ),
