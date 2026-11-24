@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from enum import Enum
+from enum import Enum, StrEnum
 from typing import Any, Dict, Optional
 
 
-class EventKind(str, Enum):
+class EventKind(StrEnum):
     TRACE_START = "trace.start"
     TRACE_END   = "trace.end"
     SPAN_START  = "span.start"
@@ -47,6 +47,9 @@ class TraceSummary:
     error_count: int
     has_llm: bool
     has_tool: bool
+    # Summed over the trace's LLM calls. cost_usd counts only calls whose cost is known.
+    total_tokens: int = 0
+    cost_usd: float = 0.0
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

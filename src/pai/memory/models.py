@@ -31,6 +31,9 @@ class MemoryRecord:
 
     metadata: Dict[str, Any] = field(default_factory=dict)
 
+    # Long-term preferences only: the preference name.
+    key: Optional[str] = None
+
     def __post_init__(self) -> None:
         self.importance = max(0.0, min(1.0, float(self.importance)))
 
@@ -45,4 +48,5 @@ class MemoryRecord:
             "updated_at": self.updated_at.isoformat(),
             "importance": self.importance,
             "metadata": self.metadata,
+            "key": self.key,
         }

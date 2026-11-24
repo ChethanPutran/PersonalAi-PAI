@@ -1,257 +1,33 @@
-"""Main entry point for the Personal AI system."""
-from __future__ import annotations
+"""PAI development/server runner."""
+import uvicorn
 
-import asyncio
-from contextlib import asynccontextmanager
-
-from fastapi import Depends, FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from loguru import logger
-
-from pai.api.middleware.auth import AuthMiddleware
-from pai.api.middleware.logging import LoggingMiddleware
-from pai.api.routes import auth, chat, devices, plugins, system, tasks
-from pai.api.routes.schedules import router as schedules_router
-from pai.api.routes.push_tokens import router as push_tokens_router
-
-from pai.api.routes import observability as observability_routes
-from pai.app_context import (
-    PAIAppContext,
-    create_app_context,
-    get_app_context,
-)
-from pathlib import Path
-from pai.logging_config import configure_logging
-from pai.config import config
-from pai.observability import TraceStore, Tracer, set_tracer
-from pai.observability.tracer import get_tracer
+from pai.config.loader import load_config
 
 
-API_PREFIX = "/api/v1"
+def main() -> None:
+    config = load_config()
 
-# ── Configure logging BEFORE anything else that might log ──
-configure_logging(
-    log_dir=Path("logs"),
-    level="DEBUG" if config.debug else "INFO",
-    json_access=False,     # True → logs/http_access.jsonl
-)
-
-def create_lifespan(context: PAIAppContext):
-    """Application lifespan manager."""
-
-    @asynccontextmanager
-    async def lifespan(app: FastAPI):
-        app.state.context = context
-
-        # ── 1. Tracing ──
-        store = TraceStore(persist_dir="data/traces")
-        await store.start()
-        set_tracer(Tracer(store=store))
-        app.state.tracer = get_tracer()
-
-        # ── 2. Database schema ──
-        logger.info("Creating database schema...")
-        await context.database.initialize()
-
-        # ── 3. Event bus ──
-        #
-        # `EventBus` was being constructed but never started. Nothing
-        # in `orchestrator.initialize()` calls `.start()`, so the
-        # worker task that drains the queue and dispatches to
-        # subscribers was never created. Every `event_bus.publish()`
-        # succeeded — the event went into the queue — but `_dispatch()`
-        # was never called, so subscribers (including the chat status
-        # WS route's `_on_status`) never fired.
-        #
-        # Start it before the orchestrator, so any manager that wants
-        # to subscribe during its own `_on_initialize()` has a live bus.
-        await context.orchestrator._event_bus.start()
-
-
-        # ── 4. Status bridges ──
-        #
-        # Register BEFORE the orchestrator initializes so any events
-        # published during manager `_on_initialize()` are caught. No
-        # manager currently publishes at init, but this is defensive:
-        # moving a publish into an init hook later shouldn't quietly
-        # drop events because the bus subscriber list was still empty.
-        from pai.orchestration.status_bridge import StatusBridge
-        bridge = StatusBridge(
-            event_bus=context.orchestrator._event_bus,
-            device_manager=context.orchestrator.device_manager,
+    # uvicorn treats these as mutually exclusive; reject early with a
+    # clear message instead of getting the silent fallback.
+    if config.server.reload and (config.server.workers or 1) > 1:
+        raise SystemExit(
+            "server.reload and server.workers>1 are mutually exclusive; "
+            "pick one."
         )
-        await bridge.start()
-        app.state.status_bridge = bridge
-        logger.info("EventBus started")
 
-            
-        # ── 6. Orchestrator final flag ──
-        await context.orchestrator.initialize()
-
-
-        logger.info(
-            "Startup complete: {} plugins, {} devices, {} executors, "
-            "{} routes",
-            len(context.orchestrator.plugin_manager.get_catalog()),
-            len(await context.orchestrator.device_manager.registry.all()),
-            len(context.orchestrator.executor_manager.names()),
-            len([r for r in app.routes if hasattr(r, "methods")]),
-        )
-        logger.info(
-            "API server running on {}:{}", config.api_host, config.api_port,
-        )
-        logger.info("Tracing enabled → data/traces")
-
-        context.orchestrator.scheduler_service.start()
-
-        # ── 7. Embedded device agent (optional) ──
-        # Runs the PAI DeviceAgent as a supervised background task in
-        # this same event loop. Skips itself if PAI_EMBED_AGENT is false
-        # or the credentials are not set. Delay in EmbeddedAgent gives
-        # uvicorn time to bind its socket before the agent's login.
-        # from pai.agent_runtime import EmbeddedAgent
-        # embedded_agent = EmbeddedAgent()
-        # await embedded_agent.start()
-        # app.state.embedded_agent = embedded_agent
-
-
-
-        yield
-
-        # ── Shutdown ──
-        # Unsubscribe bridges before tearing down the bus so no dispatch
-        # races the shutdown (a bridge handler firing during bus.shutdown
-        # would try to publish or send through a half-closed context).
-        for sub_id in getattr(app.state, "bridge_subscriptions", []):
-            try:
-                await context.orchestrator.event_bus.unsubscribe(sub_id)
-            except Exception:
-                pass
-
-        # Stop the embedded agent BEFORE the scheduler — the agent is a
-        # client of the backend and should disconnect before the server
-        # side stops firing notifications through its WS / push paths.
-        if getattr(app.state, "embedded_agent", None) is not None:
-            try:
-                await asyncio.wait_for(
-                    app.state.embedded_agent.stop(),
-                    timeout=10.0,
-                )
-            except asyncio.TimeoutError:
-                logger.warning("embedded_agent stop timed out")
-                
-        await context.orchestrator.scheduler_service.stop()
-        logger.info("Shutting down Personal AI System...")
-
-        async def _step(name: str, coro, timeout: float = 5.0):
-            try:
-                await asyncio.wait_for(coro, timeout=timeout)
-            except asyncio.TimeoutError:
-                logger.error(
-                    "⏱ shutdown step '{}' timed out after {}s", name, timeout,
-                )
-            except Exception as exc:
-                logger.warning("shutdown step '{}' failed: {}", name, exc)
-
-        # 1. Orchestrator owns its managers (executors, memory, plugins,
-        #    device, capability_router, etc.) and drains its own tracker.
-        #    Give it more time — it has the most to do.
-        await _step("orchestrator", context.orchestrator.shutdown(), timeout=10.0)
-
-        # 2. Trace store last among the app's services — nothing else
-        #    is still logging once the orchestrator is down.
-        await _step("trace_store", store.stop(), timeout=2.0)
-
-        # 3. Database last — its connections are the session_factory
-        #    that the managers above used.
-        await _step("database", context.database.close(), timeout=3.0)
-
-
-        # 4. Unsubscribe from task events so the bus can drain and stop.
-        if context._task_event_subscription:
-            context._task_event_subscription = None
-
-        logger.info("Shutdown complete")
-
-    return lifespan
-
-
-def create_app(context: PAIAppContext) -> FastAPI:
-    app = FastAPI(
-        title="Personal AI System",
-        description="Context-Aware Autonomous Personal Agent System",
-        version="1.0.0",
-        lifespan=create_lifespan(context),
+    uvicorn.run(
+        "pai.server.app:create_app",   # import string, not an object
+        factory=True,                  # tell uvicorn to *call* it
+        host=config.api.host,
+        port=config.api.port,
+        reload=config.server.reload,
+        workers=config.server.workers,
+        access_log=False,
+        # Open SSE/WebSocket streams never end on their own; without a cap a reload or Ctrl+C
+        # hangs on "Waiting for connections to close".
+        timeout_graceful_shutdown=5,
     )
-    app.state.context = context
-
-    # Order matters: AuthMiddleware wraps CORS so that 401/403
-    # responses still carry CORS headers. Add it FIRST.
-    app.add_middleware(AuthMiddleware)
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-    app.add_middleware(LoggingMiddleware)
-
-    # Routers
-    app.include_router(auth.router, prefix=API_PREFIX)
-    app.include_router(devices.router, prefix=API_PREFIX)
-    app.include_router(plugins.router, prefix=API_PREFIX)
-    app.include_router(tasks.router, prefix=API_PREFIX)
-    app.include_router(chat.router, prefix=API_PREFIX)
-    app.include_router(system.router, prefix=API_PREFIX)
-    app.include_router(observability_routes.router, prefix=API_PREFIX)
-    app.include_router(schedules_router, prefix=API_PREFIX)
-    app.include_router(push_tokens_router, prefix=API_PREFIX)
-
-    @app.get("/")
-    async def root(context: PAIAppContext = Depends(get_app_context)):
-        return {
-            "name": "Personal AI System",
-            "version": "1.0.0",
-            "status": "running",
-            "user_id": context.user_id,
-            "session_id": context.session_id,
-            "request_id": context.request_id,
-            "source_device_id": context.source_device_id,
-            "kernel": context.orchestrator.get_status(user_id=context.user_id),
-        }
-        
-    @app.middleware("http")
-    async def _log_ws_rejections(request, call_next):
-        response = await call_next(request)
-        if (
-            request.headers.get("upgrade", "").lower() == "websocket"
-            and response.status_code != 101
-        ):
-            logger.warning(
-                "WS upgrade rejected: path=%s status=%d",
-                request.url.path, response.status_code,
-            )
-        return response
-
-    return app
-
-
-
-default_context = create_app_context(config)
-app = create_app(default_context)
 
 
 if __name__ == "__main__":
-    import uvicorn
-
-    uvicorn.run(
-        "pai.main:app",
-        host=config.api_host,
-        port=config.api_port,
-        reload=config.debug,
-        reload_dirs=["src"],
-        reload_includes=[".env"],          # env edits now trigger reload
-        timeout_graceful_shutdown=5,
-        log_level="info",
-    )
+    main()

@@ -1,0 +1,86 @@
+# Validate every plugin manifest, and check that each plugin version packages deterministically.
+#
+# Layers:  1. JSON Schema (src/pai/plugins/manifest.schema.json)   2. Pydantic models   3. PluginPackager
+# Version rules (immutability, monotonic versions, changelog) live in versions.yml.
+
+name: plugin-manifests
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "plugin_registry/**"
+      - "src/pai/plugins/**"
+      - "src/pai/common/enums/**"
+      - "src/pai/version.py"
+      - "pyproject.toml"
+      - ".github/requirements-tools.txt"
+      - ".github/workflows/plugin-manifests.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "plugin_registry/**"
+      - "src/pai/plugins/**"
+      - "src/pai/common/enums/**"
+      - "src/pai/version.py"
+      - "pyproject.toml"
+      - ".github/requirements-tools.txt"
+      - ".github/workflows/plugin-manifests.yml"
+  workflow_dispatch:
+    inputs:
+      registry_path:
+        description: "Directory to scan for manifest.json files"
+        required: false
+        default: "plugin_registry/plugins"
+        type: string
+
+concurrency:
+  group: plugin-manifests-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: validate manifests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: .github/requirements-tools.txt
+
+      - name: Install the tools (no heavy runtime dependencies)
+        run: |
+          python -m pip install --upgrade pip
+          pip install --no-deps -e .
+          pip install -r .github/requirements-tools.txt
+
+      - name: Validate manifests (JSON Schema + Pydantic)
+        id: validate
+        env:
+          TARGET: ${{ inputs.registry_path || 'plugin_registry/plugins' }}
+        run: ./plugin_registry/tests/install_plugin_manifest.sh "$TARGET"
+
+      - name: Packaging is deterministic and the schema matches the models
+        run: pytest -q plugin_registry/tests/test_packaging.py -p no:cacheprovider
+
+      - name: Job summary
+        if: always()
+        env:
+          RESULT: ${{ steps.validate.outcome }}
+        run: |
+          {
+            echo "## Plugin manifest validation"
+            echo
+            if [ "$RESULT" = "success" ]; then echo "✅ every manifest passes JSON Schema + Pydantic"; else echo "❌ validation failed — see the step log"; fi
+            echo
+            echo 'Run locally: `./plugin_registry/tests/install_plugin_manifest.sh plugin_registry/plugins`'
+          } >> "$GITHUB_STEP_SUMMARY"

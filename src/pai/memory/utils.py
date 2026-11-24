@@ -54,3 +54,24 @@ def _matches_where(
             if value != cond:
                 return False
     return True
+
+import re as _re
+
+_TOKEN_RE = _re.compile(r"[\w']{3,}", _re.UNICODE)
+
+
+def keyword_tokens(query: str, *, max_tokens: int = 8) -> list[str]:
+    """Distinct lowercase words (>=3 chars) from a free-text query, in order."""
+    seen: list[str] = []
+    for tok in _TOKEN_RE.findall((query or "").lower()):
+        if tok not in seen:
+            seen.append(tok)
+        if len(seen) >= max_tokens:
+            break
+    return seen
+
+
+def like_pattern(token: str) -> str:
+    """LIKE pattern for ``token`` with wildcard characters escaped (use ESCAPE '\\')."""
+    escaped = token.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"

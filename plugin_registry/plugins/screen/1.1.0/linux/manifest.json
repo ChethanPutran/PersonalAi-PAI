@@ -1,0 +1,69 @@
+{
+  "schemaVersion": 1,
+  "id": "screen",
+  "name": "Screen",
+  "version": "1.1.0",
+  "description": "Capture screenshots of the host screen.",
+  "author": "PAI",
+  "license": "MIT",
+  "type": "native",
+  "runtime": {
+    "kind": "device",
+    "nativeModule": "pai.screen",
+    "minPaiVersion": "0.4.0"
+  },
+  "platforms": {
+    "linux": {
+      "artifact": "linux/libpai_screen.so",
+      "entrypoint": "pai_plugin_module_create"
+    }
+  },
+  "architectures": [
+    "x86_64"
+  ],
+  "deviceTypes": [
+    "desktop"
+  ],
+  "permissions": [
+    "screen"
+  ],
+  "metadata": {
+    "requireConsentEnv": "PAI_SCREEN_CONSENT"
+  },
+  "capabilities": [
+    {
+      "id": "screen.capture",
+      "taskType": "one_shot",
+      "timeoutSeconds": 90,
+      "description": "Take a screenshot of the whole desktop and save it as a PNG. Uses the desktop's screenshot portal (GNOME, KDE), or grim / scrot where that is all there is. Returns the file path and the image width and height. Requires the screen permission.",
+      "permissions": [
+        "screen"
+      ],
+      "requireConfirmation": true,
+      "confirmationReason": "Capturing screenshots can be sensitive. Please confirm that you want to take a screenshot.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "outputPath": {
+            "type": "string",
+            "description": "Absolute path for the PNG. Defaults to ~/Pictures/PAI/screen_<timestamp>.png"
+          }
+        }
+      },
+      "risk": "high"
+    }
+  ],
+  "changelog": {
+    "summary": "Screenshots now work on GNOME and KDE Wayland, through the desktop's screenshot portal.",
+    "features": [
+      "screen.capture uses the XDG desktop portal first, so it works where grim does not (GNOME's compositor has no wlr-screencopy)",
+      "screen.capture reports the image width and height (needed to place mouse clicks)"
+    ],
+    "fixes": [
+      "A declined or unanswered permission dialog is reported as capture_denied / capture_timeout instead of silently trying another tool",
+      "A tool that exits successfully without producing a PNG is reported as capture_invalid",
+      "Screenshots are saved readable by the owner only (0600)"
+    ],
+    "breaking": []
+  }
+}

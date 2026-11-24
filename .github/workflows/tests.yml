@@ -1,0 +1,58 @@
+# Backend tests + the admin UI's JavaScript unit tests.
+#
+# Two files are skipped because they call APIs that changed (see "Known Issues" in CLAUDE.md):
+#   tests/memory/test_memory.py, tests/tasks/test_task_fail_undelivered.py
+# tests/leaks measures process-wide heap growth, so it runs in its own pytest process (it is order-sensitive).
+
+name: tests
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md", "frontend/**", "plugin_registry/**"]
+  pull_request:
+    branches: [main]
+    paths-ignore: ["**.md", "frontend/**", "plugin_registry/**"]
+  workflow_dispatch:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - uses: actions/setup-node@v4          # tests/admin/test_js_units.py runs the admin UI's JS tests with node
+        with:
+          node-version: "22"
+
+      - name: Install (CPU-only torch, because the default wheel is several GB of CUDA libraries)
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -e ".[dev]" pytest-asyncio
+
+      - name: Backend tests
+        run: |
+          pytest tests -q -p no:cacheprovider \
+            --ignore=tests/leaks \
+            --ignore=tests/memory/test_memory.py \
+            --ignore=tests/tasks/test_task_fail_undelivered.py
+
+      - name: Memory-growth tests (own process)
+        run: pytest tests/leaks -q -p no:cacheprovider

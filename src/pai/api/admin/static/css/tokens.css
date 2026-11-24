@@ -1,0 +1,80 @@
+/* PAI Admin — design tokens.
+   The --pai-* values are copied from the Flutter app (frontend/lib/ui/theme/pai_tokens.dart and the
+   dark ColorScheme in pai_theme.dart). tests/admin/test_theme_tokens.py parses both files and fails
+   if they drift. Everything below the "aliases" line is derived from them. */
+:root {
+  color-scheme: dark;
+
+  /* ---- Flutter PaiColors ---- */
+  --pai-bg0: #05080F;          /* app background */
+  --pai-bg1: #0B1220;          /* screens / large surfaces */
+  --pai-bg2: #101A2E;          /* panels */
+  --pai-bg3: #16233D;          /* raised / hovered */
+  --pai-cyan: #00E5FF;         /* primary */
+  --pai-cyan-dim: #00B8D4;
+  --pai-azure: #3D8BFF;        /* secondary */
+  --pai-teal: #1DE9B6;         /* tertiary */
+  --pai-amber: #FFB300;        /* warning / paused / retrying */
+  --pai-red: #FF4D6D;          /* error / failed */
+  --pai-green: #3DDC97;        /* success / completed */
+  --pai-text-high: #E6F4FF;
+  --pai-text-mid: #9FB3C8;
+  --pai-text-low: #7A92AA;
+  --pai-line: #1B3556;         /* quiet divider / border */
+
+  /* ---- Flutter dark ColorScheme extras (pai_theme.dart) ---- */
+  --pai-on-primary: #00222A;
+  --pai-primary-container: #06323B;
+  --pai-secondary-container: #12254A;
+  --pai-error-container: #3A0F1B;
+  --pai-surface-highest: #1C2D4D;
+  --pai-outline: #3B6089;
+
+  /* ---- Flutter PaiSpacing / PaiRadii ---- */
+  --pai-space-xs: 4px; --pai-space-sm: 8px; --pai-space-md: 12px; --pai-space-lg: 16px; --pai-space-xl: 24px; --pai-space-xxl: 32px;
+  --pai-radius-sm: 6px; --pai-radius-md: 10px; --pai-radius-lg: 14px;
+
+  /* ---- aliases used by the stylesheets ---- */
+  --bg-0: var(--pai-bg0); --bg-1: var(--pai-bg1); --bg-2: var(--pai-bg2); --bg-3: var(--pai-bg3); --bg-4: var(--pai-surface-highest);
+  --line: var(--pai-line); --line-strong: var(--pai-outline);
+  --text: var(--pai-text-high); --text-dim: var(--pai-text-mid); --text-faint: var(--pai-text-low);
+
+  --accent: var(--pai-cyan); --accent-strong: var(--pai-cyan-dim); --accent-ink: var(--pai-on-primary);
+  --accent-soft: rgba(0, 229, 255, 0.12);
+  --accent-line: rgba(0, 229, 255, 0.28);              /* PaiColors.border */
+  --accent-line-strong: rgba(0, 229, 255, 0.6);        /* PaiColors.borderStrong */
+  --glow-color: rgba(0, 229, 255, 0.22);               /* PaiColors.glow */
+  --secondary: var(--pai-azure); --tertiary: var(--pai-teal);
+
+  --ok: var(--pai-green);      --ok-soft: rgba(61, 220, 151, 0.12);
+  --warn: var(--pai-amber);    --warn-soft: rgba(255, 179, 0, 0.12);
+  --danger: var(--pai-red);    --danger-soft: rgba(255, 77, 109, 0.12);
+  --info: var(--pai-azure);    --info-soft: rgba(61, 139, 255, 0.14);
+  --running: var(--pai-cyan);  --running-soft: var(--accent-soft);
+  --queued: var(--pai-azure);
+  --pending: var(--pai-text-low); --pending-soft: rgba(122, 146, 170, 0.14);
+  --skipped: #A78BFA;          --skipped-soft: rgba(167, 139, 250, 0.14);   /* DAG-only: not a task status in the app */
+  --cancelled: var(--pai-text-mid); --cancelled-soft: rgba(159, 179, 200, 0.12);
+  --llm: #B794FF; --tool: #FF9E57;                      /* trace kinds (LLM purple / tool orange), AA on bg2 */
+
+  /* ---- type (fonts are bundled in ../fonts, see fonts.css) ---- */
+  --font-display: "Orbitron", ui-sans-serif, system-ui, sans-serif;
+  --font-hud: "Rajdhani", ui-sans-serif, system-ui, sans-serif;
+  --font-ui: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrainsMono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --fs-xs: 12px; --fs-sm: 13px; --fs-md: 14px; --fs-lg: 16px; --fs-xl: 20px; --fs-2xl: 26px;
+  --lh-tight: 1.2; --lh-normal: 1.5;
+
+  --s-1: var(--pai-space-xs); --s-2: var(--pai-space-sm); --s-3: var(--pai-space-md); --s-4: var(--pai-space-lg);
+  --s-5: var(--pai-space-xl); --s-6: var(--pai-space-xxl); --s-7: 48px;
+  --r-sm: var(--pai-radius-sm); --r-md: var(--pai-radius-md); --r-lg: var(--pai-radius-lg); --r-pill: 999px;
+
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.5);
+  --shadow-2: 0 8px 24px rgba(0, 0, 0, 0.5);
+  --shadow-3: 0 24px 64px rgba(0, 0, 0, 0.65);
+  --glow: 0 0 0 1px var(--accent-line), 0 0 18px var(--glow-color);
+  --focus-ring: 0 0 0 2px var(--pai-bg0), 0 0 0 4px var(--pai-cyan);
+
+  --dur-fast: 140ms; --dur: 260ms; --dur-slow: 520ms; --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --sidebar-w: 224px; --sidebar-w-rail: 76px; --topbar-h: 60px; --content-max: 1520px;
+}

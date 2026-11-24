@@ -16,6 +16,12 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+#: What a device may report for one permission. "pending" = asked but not answered yet (or declined).
+PERMISSION_STATES = frozenset({"granted", "denied", "pending"})
+#: States that mean "the user has NOT allowed this on the device".
+NOT_ALLOWED = frozenset({"denied", "pending"})
+
+
 class DevicePluginRepository(BaseRepository[DevicePluginModel]):
     """Tracks which plugins are installed on which device."""
 
@@ -146,9 +152,27 @@ class DevicePluginRepository(BaseRepository[DevicePluginModel]):
             record.is_installed = False
             record.enabled_on_device = False
             record.installed_at = None
+            record.permissions = None                    # nothing installed, nothing to report
+            record.permissions_reported_at = None
             await self.session.flush()
             span.set_attribute("found", True)
             return True
+
+    async def set_permissions(
+        self, device_id: str, plugin_id: str, permissions: dict[str, str],
+    ) -> bool:
+        """Store what the device says the user allowed for an INSTALLED plugin.
+
+        Returns False (nothing stored) when the plugin is not installed on that device: a report cannot
+        create rows. Callers pass already-validated names/states; unknown states are dropped here too.
+        """
+        record = await self.get(device_id, plugin_id)
+        if record is None or not record.is_installed:
+            return False
+        record.permissions = {k: v for k, v in permissions.items() if v in PERMISSION_STATES}
+        record.permissions_reported_at = _utc_now()
+        await self.session.flush()
+        return True
 
     async def set_device_enabled(
         self, device_id: str, plugin_id: str, enabled: bool,
@@ -274,6 +298,8 @@ class DevicePluginRepository(BaseRepository[DevicePluginModel]):
                         record.is_installed = False
                         record.enabled_on_device = False
                         record.installed_at = None
+                        record.permissions = None
+                        record.permissions_reported_at = None
                         removed.append(plugin_id)
 
             # 2. Add or update entries from the report.

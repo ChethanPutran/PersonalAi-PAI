@@ -18,6 +18,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Awaitable, Callable, Dict, Optional, TypeVar
 
+import contextlib
+
 from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -107,6 +109,8 @@ class Manager(Lifecycle):
         try:
             await self._on_shutdown()
         finally:
+            with contextlib.suppress(Exception):
+                await self.drain_emits(timeout=0.5)
             self._initialized = False
             logger.info("{}: shutdown", self.name)
 
@@ -119,6 +123,9 @@ class Manager(Lifecycle):
         reached before the lifespan startup has run."""
         if not self._initialized:
             await self.initialize()
+
+    # _publish() and _emit() are inherited from Lifecycle (core/lifecycle.py)
+    # which supports the full `distributed=` keyword argument.
 
     def get_session(self) -> Optional[AsyncSession]:
         """Get a session from the session manager, if any."""

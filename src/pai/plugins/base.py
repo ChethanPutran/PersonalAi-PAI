@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from enum import Enum
+from enum import Enum, StrEnum
 from typing import Any, Dict, Optional
 
 
-class PluginState(str, Enum):
+class PluginState(StrEnum):
     """Runtime lifecycle state of a plugin instance."""
 
     CREATED = "created"

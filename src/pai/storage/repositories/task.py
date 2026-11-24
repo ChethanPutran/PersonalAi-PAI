@@ -9,11 +9,39 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from pai.storage.models import TaskModel
-from pai.tasks.models import Task, TaskStatus
+from pai.tasks.models import Task, TaskStatus, TaskType
 from pai.tasks.store import TaskNotFoundError
 
 
 logger = logging.getLogger(__name__)
+
+
+_TASK_TYPES = {t.value for t in TaskType}
+
+
+def upgrade_legacy_payload(payload: dict) -> dict:
+    """Bring a stored task written by an older schema up to the current Task shape.
+
+    Older versions stored: ``title`` (now ``name``); ``type`` as a free-form action name
+    ("create_reminder") rather than a TaskType; and a ``result`` without ``task_id``.
+    Nothing is deleted: the old action name is kept as the capability (if none) and in
+    ``metadata.legacy_type``. Current-format payloads pass through unchanged.
+    """
+    data = dict(payload)
+    if not data.get("name"):
+        data["name"] = data.get("title") or data.get("capability") or data.get("type") or str(data.get("id", "task"))
+    if data.get("type") not in _TASK_TYPES:
+        legacy = data.get("type")
+        data["type"] = TaskType.ONE_SHOT.value
+        if legacy:
+            data["metadata"] = {**(data.get("metadata") or {}), "legacy_type": legacy}
+            data.setdefault("capability", None)
+            if not data.get("capability"):
+                data["capability"] = legacy
+    result = data.get("result")
+    if isinstance(result, dict) and "task_id" not in result:
+        data["result"] = {**result, "task_id": data.get("id", "")}
+    return data
 
 
 class TaskRepository:
@@ -146,7 +174,15 @@ class TaskRepository:
                 stmt = stmt.limit(limit)
 
             rows = (await session.execute(stmt)).scalars().all()
-            return [self._row_to_task(r) for r in rows]
+            tasks: List[Task] = []
+            for r in rows:
+                try:
+                    tasks.append(self._row_to_task(r))
+                except Exception as exc:
+                    # One unreadable row must not take the whole task list down with it.
+                    logger.warning("TaskRepository: skipping unreadable task row %s: %s",
+                                   r.id, str(exc).splitlines()[0] if str(exc) else type(exc).__name__)
+            return tasks
 
     async def count(
         self,
@@ -212,4 +248,4 @@ class TaskRepository:
     @staticmethod
     def _row_to_task(row: TaskModel) -> Task:
         # Pydantic parses strings/enums/result dict back into types.
-        return Task(**row.payload)
+        return Task(**upgrade_legacy_payload(row.payload))

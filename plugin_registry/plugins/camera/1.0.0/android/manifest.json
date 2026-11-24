@@ -1,0 +1,72 @@
+{
+  "schemaVersion": 1,
+  "id": "camera_android",
+  "name": "Camera",
+  "type": "kotlin",
+  "version": "1.0.0",
+  "description": "Capture photos and record video using the device camera.",
+  "author": "PAI",
+  "license": "MIT",
+  "runtime": {
+    "kind": "device",
+    "nativeModule": "pai.camera",
+    "minPaiVersion": "0.4.0"
+  },
+
+  "platforms": {
+    "android": {
+      "artifact": "android/plugin.dex",
+      "entrypoint": "com.pai.plugins.camera.CameraPlugin"
+    }
+  },
+    "architectures": ["x86_64", "arm64"],
+
+  "deviceTypes": ["phone", "tablet"],
+
+  "permissions": ["camera", "microphone", "filesystem"],
+
+  "capabilities": [
+    {
+      "id": "camera.capture",
+      "taskType": "one_shot",
+      "timeoutSeconds": 30,
+      "description": "Take a still photo.",
+      "permissions": ["camera", "filesystem"],
+      "requireConfirmation": true,
+      "confirmationReason": "Capturing photos can be sensitive. Please confirm that you want to take a photo.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "lens":       { "type": "string", "enum": ["front", "back"], "default": "back", "askIfUnspecified": true },
+          "outputPath": { "type": "string" },
+          "format":     { "type": "string", "enum": ["jpeg"], "default": "jpeg" }
+        }
+      }
+    },
+    {
+      "id": "camera.record",
+      "taskType": "long_running",
+      "description": "Record a video.",
+      "permissions": ["camera", "microphone", "filesystem"],
+      "requireConfirmation": true,
+      "confirmationReason": "Recording video can be sensitive. Please confirm that you want to record a video.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "durationMs": { "type": "integer", "default": 5000 },
+          "outputPath": { "type": "string" },
+          "audio":      { "type": "boolean", "default": true }
+        }
+      }
+    },
+    {
+      "id": "camera.stream",
+      "taskType": "stream",
+      "description": "Open a live preview stream.",
+      "confirmationReason": "Streaming camera feed can be sensitive. Please confirm that you want to open a live preview.",
+      "permissions": ["camera"],
+      "requireConfirmation": true,
+      "parameters": { "type": "object", "properties": {} }
+    }
+  ]
+}

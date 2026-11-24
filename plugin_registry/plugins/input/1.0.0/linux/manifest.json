@@ -1,0 +1,257 @@
+{
+  "schemaVersion": 1,
+  "id": "input",
+  "name": "Input",
+  "version": "1.0.0",
+  "description": "Type and click on the desktop on the user's behalf (keyboard and mouse), through the desktop's remote-desktop portal.",
+  "author": "PAI",
+  "license": "MIT",
+  "type": "native",
+  "changelog": {
+    "summary": "First release: keyboard and mouse control for agents, with the desktop's own approval dialog.",
+    "features": [
+      "input.start asks the desktop for permission once; the compositor shows its own approval dialog and remote-control indicator",
+      "keyboard.type, keyboard.key (shortcuts such as ctrl+l), mouse.move, mouse.click, mouse.scroll",
+      "Coordinates can be given in screenshot pixels (spaceWidth/spaceHeight) and are mapped onto the shared screens"
+    ],
+    "fixes": [],
+    "breaking": []
+  },
+  "runtime": {
+    "kind": "device",
+    "nativeModule": "pai.input",
+    "minPaiVersion": "0.4.0"
+  },
+  "platforms": {
+    "linux": {
+      "artifact": "linux/libpai_input.so",
+      "entrypoint": "pai_plugin_module_create"
+    }
+  },
+  "architectures": [
+    "x86_64"
+  ],
+  "deviceTypes": [
+    "desktop"
+  ],
+  "permissions": [
+    "input"
+  ],
+  "capabilities": [
+    {
+      "id": "input.start",
+      "taskType": "one_shot",
+      "description": "Ask the desktop for permission to type and click for the user. The desktop shows its own approval dialog; the user must approve (and should share ALL screens if they have several). Must be called once before any keyboard or mouse capability. Returns which devices and screens were granted.",
+      "permissions": [
+        "input"
+      ],
+      "requireConfirmation": true,
+      "risk": "high",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      },
+      "confirmationReason": "PAI wants to control your keyboard and mouse. Your desktop will ask you to approve; you can revoke it at any time.",
+      "timeoutSeconds": 150
+    },
+    {
+      "id": "input.status",
+      "taskType": "one_shot",
+      "description": "Show whether keyboard/mouse control is active and which screens are shared (x, y, w, h in desktop pixels).",
+      "permissions": [],
+      "requireConfirmation": false,
+      "risk": "low",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "id": "input.stop",
+      "taskType": "one_shot",
+      "description": "End keyboard/mouse control immediately (the desktop's approval is released).",
+      "permissions": [],
+      "requireConfirmation": false,
+      "risk": "low",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "id": "keyboard.type",
+      "taskType": "one_shot",
+      "description": "Type text into whatever has keyboard focus. Newline presses Return, tab presses Tab. Up to 500 characters.",
+      "permissions": [
+        "input"
+      ],
+      "requireConfirmation": true,
+      "risk": "high",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "The text to type."
+          },
+          "delayMs": {
+            "type": "integer",
+            "description": "Pause between keys, 0-200 (default 8)."
+          }
+        },
+        "required": [
+          "text"
+        ]
+      },
+      "confirmationReason": "PAI wants to type text on your computer."
+    },
+    {
+      "id": "keyboard.key",
+      "taskType": "one_shot",
+      "description": "Press a key or shortcut, e.g. 'Return', 'Escape', 'Tab', 'Left', 'F5', 'ctrl+l', 'ctrl+shift+t', 'alt+Left'. Modifiers: ctrl, shift, alt, super.",
+      "permissions": [
+        "input"
+      ],
+      "requireConfirmation": true,
+      "risk": "high",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "keys": {
+            "type": "string",
+            "description": "Key or combo joined with '+'. Write the plus key as 'plus'."
+          },
+          "count": {
+            "type": "integer",
+            "description": "Repeat 1-50 times (default 1)."
+          }
+        },
+        "required": [
+          "keys"
+        ]
+      },
+      "confirmationReason": "PAI wants to press keys on your computer."
+    },
+    {
+      "id": "mouse.move",
+      "taskType": "one_shot",
+      "description": "Move the mouse pointer. Give x and y; add spaceWidth/spaceHeight when they are positions in a screenshot.",
+      "permissions": [
+        "input"
+      ],
+      "requireConfirmation": true,
+      "risk": "high",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "x": {
+            "type": "number",
+            "description": "Horizontal position."
+          },
+          "y": {
+            "type": "number",
+            "description": "Vertical position."
+          },
+          "spaceWidth": {
+            "type": "number",
+            "description": "Width of the coordinate space x is in, e.g. the screenshot's width. Omit to use desktop pixels."
+          },
+          "spaceHeight": {
+            "type": "number",
+            "description": "Height of the coordinate space y is in, e.g. the screenshot's height."
+          }
+        },
+        "required": [
+          "x",
+          "y"
+        ]
+      },
+      "confirmationReason": "PAI wants to move your mouse pointer."
+    },
+    {
+      "id": "mouse.click",
+      "taskType": "one_shot",
+      "description": "Click a mouse button, optionally at a position (x, y) first. Add spaceWidth/spaceHeight when x/y are positions in a screenshot. Double click = count 2.",
+      "permissions": [
+        "input"
+      ],
+      "requireConfirmation": true,
+      "risk": "high",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "x": {
+            "type": "number",
+            "description": "Horizontal position."
+          },
+          "y": {
+            "type": "number",
+            "description": "Vertical position."
+          },
+          "spaceWidth": {
+            "type": "number",
+            "description": "Width of the coordinate space x is in, e.g. the screenshot's width. Omit to use desktop pixels."
+          },
+          "spaceHeight": {
+            "type": "number",
+            "description": "Height of the coordinate space y is in, e.g. the screenshot's height."
+          },
+          "button": {
+            "type": "string",
+            "enum": [
+              "left",
+              "right",
+              "middle"
+            ],
+            "default": "left"
+          },
+          "count": {
+            "type": "integer",
+            "description": "1-3 clicks (default 1)."
+          }
+        }
+      },
+      "confirmationReason": "PAI wants to click with your mouse."
+    },
+    {
+      "id": "mouse.scroll",
+      "taskType": "one_shot",
+      "description": "Scroll the wheel by whole steps: dy positive = down, negative = up; dx for sideways. Optionally move to (x, y) first so the scroll lands there.",
+      "permissions": [
+        "input"
+      ],
+      "requireConfirmation": true,
+      "risk": "high",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "x": {
+            "type": "number",
+            "description": "Horizontal position."
+          },
+          "y": {
+            "type": "number",
+            "description": "Vertical position."
+          },
+          "spaceWidth": {
+            "type": "number",
+            "description": "Width of the coordinate space x is in, e.g. the screenshot's width. Omit to use desktop pixels."
+          },
+          "spaceHeight": {
+            "type": "number",
+            "description": "Height of the coordinate space y is in, e.g. the screenshot's height."
+          },
+          "dy": {
+            "type": "integer",
+            "description": "Vertical wheel steps, -50..50 (positive scrolls down)."
+          },
+          "dx": {
+            "type": "integer",
+            "description": "Horizontal wheel steps."
+          }
+        }
+      },
+      "confirmationReason": "PAI wants to scroll with your mouse."
+    }
+  ]
+}

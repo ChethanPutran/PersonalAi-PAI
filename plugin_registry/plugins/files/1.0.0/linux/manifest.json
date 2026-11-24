@@ -1,0 +1,146 @@
+{
+  "schemaVersion": 1,
+  "id": "files",
+  "name": "Files",
+  "type": "native",
+  "version": "1.0.0",
+  "description": "Read, write, and manage files within allowed roots.",
+  "author": "PAI",
+  "license": "MIT",
+  "runtime": {
+    "kind": "device", 
+    "nativeModule": "pai.files",
+    "minPaiVersion": "0.4.0"
+  },
+
+  "platforms": {
+    "linux": {
+      "artifact": "linux/libpai_files.so",
+      "entrypoint": "pai_plugin_module_create"
+    }
+  },
+
+  "architectures": ["x86_64"],
+  "deviceTypes": ["desktop"],
+  "permissions": ["filesystem"],
+
+  "metadata": {
+    "allowedRoots": [
+      "~/Documents", "~/Downloads", "~/Pictures", "~/Videos", "~/Desktop",
+      "/tmp/pai", "/data/pai"
+    ]
+  },
+
+  "capabilities": [
+    {
+      "id": "files.list",
+      "taskType": "one_shot",
+      "timeoutSeconds": 60,
+      "requireConfirmation": true,
+      "description": "List directory contents. Returns one entry per line: path\ttype\tsize.",
+      "permissions": ["filesystem"],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {"type": "string"},
+          "recursive": {"type": "boolean", "default": false},
+          "limit": {"type": "integer", "default": 500}
+        },
+        "required": ["path"]
+      }
+    },
+    {
+      "id": "files.read",
+      "requireConfirmation": true,
+      "description": "Read a file's contents as text. Max 1 MB (10 MB hard cap).",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {"type": "string"},
+          "maxBytes": {"type": "integer", "default": 1048576}
+        },
+        "required": ["path"]
+      }
+    },
+    {
+      "id": "files.write",
+      "description": "Write content to a file. Creates parent dirs.",
+      "requireConfirmation": true,
+      "confirmationReason": "Writing to files can be sensitive. Please confirm that you want to write to a file.",
+      "precondition": {
+        "type": "pathInRoots",
+        "field": "path",
+        "allowedRootsRef": "metadata.allowedRoots"
+      },
+      "permissions": ["filesystem"],
+      "confirmationPreview": {
+          "fields": ["command"],
+          "maxChars": 500
+      },
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {"type": "string"},
+          "content": {"type": "string"},
+          "append": {"type": "boolean", "default": false}
+        },
+        "required": ["path", "content"]
+      }
+    },
+    {
+      "id": "files.stat",
+      "description": "Get file metadata (size, modified time, is_dir, is_file).",
+      "parameters": {
+        "type": "object",
+        "properties": {"path": {"type": "string"}},
+        "required": ["path"]
+      }
+    },
+    {
+      "id": "files.delete",
+      "description": "Delete a file or directory. Use recursive=true for non-empty dirs.",
+      "requireConfirmation": true,
+      "confirmationReason": "Deleting files can be sensitive. Please confirm that you want to delete this file or directory.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {"type": "string"},
+          "recursive": {"type": "boolean", "default": false}
+        },
+        "required": ["path"]
+      }
+    },
+    {
+      "id": "files.copy",
+      "taskType": "one_shot",
+      "timeoutSeconds": 120,
+      "description": "Copy a file or directory. Creates destination dirs.",
+      "requireConfirmation": true,
+      "confirmationReason": "Copying files can be sensitive. Please confirm that you want to copy this file or directory.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "source": {"type": "string"},
+          "destination": {"type": "string"}
+        },
+        "required": ["source", "destination"]
+      }
+    },
+    {
+      "id": "files.move",
+      "taskType": "one_shot",
+      "timeoutSeconds": 120,
+      "description": "Move/rename a file or directory.",
+      "requireConfirmation": true,
+      "confirmationReason": "Moving or renaming files can be sensitive. Please confirm that you want to move or rename this file or directory.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "source": {"type": "string"},
+          "destination": {"type": "string"}
+        },
+        "required": ["source", "destination"]
+      }
+    }
+  ]
+}

@@ -19,7 +19,7 @@ def build_task_capabilities(task_manager) -> list[BuiltinCapability]:
             "tasks": [
                 {
                     "id": t.id,
-                    "title": t.title,
+                    "title": t.name,
                     "status": t.status.value,
                     "capability": t.capability,
                     "created_at": t.created_at.isoformat(),

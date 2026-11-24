@@ -1,65 +1,344 @@
 # Model registry for the PAI system
-models:
-  # Embedding models
-  embeddings:
-    default: "all-MiniLM-L6-v2"
-    alternatives:
-      - name: "BAAI/bge-large-en-v1.5"
-        dimensions: 1024
-      - name: "intfloat/e5-large-v2"
-        dimensions: 1024
+embeddings:
+  - name: "all-MiniLM-L6-v2"
+    context_length: 33K
+    max_output_length: 33K
+    input_per_million: 0.0
+    output_per_million: 0.0
+    cache_read_per_million: 0.0
+    cache_write_per_million: 0.0
 
-  # LLM models
-  llm:
-    chat:
-      - name: "gpt-4"
-        provider: "openai"
-        context_length: 8192
-      - name: "gpt-3.5-turbo"
-        provider: "openai"
-        context_length: 4096
-      - name: "Qwen/Qwen-14B-Chat"
-        provider: "local"
-        context_length: 8192
-        quantization: "int4"
-      - name: "meta-llama/Llama-2-13b-chat-hf"
-        provider: "local"
-        context_length: 4096
-    reasoning:
-      - name: "gpt-4"
-        provider: "openai"
-      - name: "Qwen-72B-Chat"
-        provider: "local"
+  - name: "alibaba/qwen3-embedding-0.6b"
+    context_length: 33K
+    max_output_length: 33K
+    input_per_million: 0.01
+    output_per_million: 0.0
+    cache_read_per_million: 0.0
+    cache_write_per_million: 0.0
 
-  # Vision models
-  vision:
-    object_detection:
-      default: "yolov8n.pt"
-      high_accuracy: "yolov8x.pt"
-    segmentation:
-      default: "sam2_hiera_large"
-    ocr:
-      default: "paddleocr"
-      language: "en"
-    pose_estimation:
-      default: "mediapipe"
-      advanced: "openpose"
+  - name: "alibaba/qwen3-embedding-8b"
+    context_length: 33K
+    max_output_length: 33K
+    input_per_million: 0.01
+    output_per_million: 0.0
+    cache_read_per_million: 0.0
+    cache_write_per_million: 0.0
 
+decision:
+  # Decision models
+  - name: "typesafe-ai/jev-1.14.0"
+    provider: "airouter"
+    context_length: 32K
+    max_output_length: 32K
+    input_per_million: 0.04
+    output_per_million: 0.0
+    cache_read_per_million: 0.0
+    cache_write_per_million: 0.0
+
+speech:
   # Speech models
-  speech:
-    stt:
-      default: "whisper-base"
-      realtime: "faster-whisper"
-    tts:
-      default: "piper"
-      high_quality: "coqui"
+  stt:
+    - name: "whisper-base"
+      provider: "openai"
 
-  # Translation
-  translation:
-    default: "m2m100_418M"
-    high_quality: "seamless_m4t"
+    - name: "openai/gpt-transcribe"
+      provider: "openai"
+      per_minute_cost: 0.0045
+      per_hour_cost: 0.27
 
-  # Learning / personalization
-  learning:
-    user_embedding_dim: 128
-    sequence_model: "lstm"
+    - name: "mistral/voxtral-mini-transcribe-3"
+      provider: "mistral"
+      per_minute_cost: 0.0035
+      per_hour_cost: 0.21
+
+    - name: "openai/whisper-1"
+      provider: "openai"
+      per_minute_cost: 0.0060
+      per_hour_cost: 0.36
+
+
+    - name: "microsoft/mai-transcribe-2"
+      provider: "microsoft"
+      per_minute_cost: 0.0017
+      per_hour_cost: 0.1
+
+
+  # TTS is billed per INPUT CHARACTER (per_1k_chars_cost / per_1m_chars_cost); STT per second of audio (per_minute_cost)
+  tts:
+    - name: "fish-audio/drama-3"
+      provider: "fish-audio"
+      per_1k_chars_cost: 0.01
+      per_1m_chars_cost: 10
+
+    - name: "openai/tts-1"
+      provider: "openai"
+      per_1k_chars_cost: 0.015
+      per_1m_chars_cost: 15
+
+    - name: "coqui" 
+      provider: "local" 
+
+# LLM models
+llm:
+    # OpenAI models
+    - name: "openai/gpt-5-nano"
+      provider: "airouter"
+      tool_use: "enabled"
+      reasoning: "enabled"
+      context_length: 400K
+      max_output_length: 128K
+      input_per_million: 0.05
+      output_per_million: 0.4
+      cache_read_per_million: 0.01
+      
+    - name: "openai/gpt-5.6-luna"
+      provider: "airouter"
+      tool_use: "enabled"
+      reasoning: "enabled"
+      context_length: 1.1M
+      max_output_length: 128K
+      input_per_million: 0.2
+      output_per_million: 1.2
+      cache_read_per_million: 0.02
+      cache_write_per_million: 0.25
+
+
+    - name: "openai/gpt-6-luna-fast"
+      provider: "airouter"
+      tool_use: "enabled"
+      reasoning: "enabled"
+      context_length: 1.1M
+      max_output_length: 128K
+      input_per_million: 0.2
+      output_per_million: 1
+      cache_read_per_million: 0.02
+      cache_write_per_million: 0.25
+
+    - name: "inclusionai/ling-3.0-flash"
+      provider: "airouter"
+      tool_use: "enabled"
+      reasoning: "enabled"
+      context_length: 256K
+      input_per_million: 0.02
+      output_per_million: 0.06
+      cache_read_per_million: 0.0
+      cache_write_per_million: 0.0
+
+    # Alibaba Qwen models
+    - name: "alibaba/qwen3.7-flash"
+      provider: "airouter"
+      tool_use: "enabled"
+      reasoning: "enabled"
+      context_length: 991K
+      max_output_length: 64K
+      input_per_million: 0.03
+      output_per_million: 0.13
+      cache_read_per_million: 0.01
+      cache_write_per_million: 0.04
+
+    - name: "alibaba/qwen3.8-27b"
+      provider: "airouter"
+      tool_use: "enabled"
+      reasoning: "enabled"
+      context_length: 262K
+      max_output_length: 262K
+      input_per_million: 0.06
+      output_per_million: 1.96
+      cache_read_per_million: 0.06
+
+    - name: "alibaba/qwen-3-30b"
+      provider: "airouter"
+      tool_use: "enabled"
+      reasoning: "enabled"
+      context_length: 41K
+      max_output_length: 16K
+      input_per_million: 0.12
+      output_per_million: 0.5
+      cache_read_per_million: 0.0
+      cache_write_per_million: 0.0
+
+
+    - name: "alibaba/qwen-3-14b"
+      provider: "airouter"
+      tool_use: "enabled"
+      reasoning: "enabled"
+      context_length: 41K
+      max_output_length: 16K
+      input_per_million: 0.12
+      output_per_million: 0.24
+      cache_read_per_million: 0.0
+      cache_write_per_million: 0.0
+
+    # GLM models
+    - name: "zai/glm-4.7-flashx"
+      provider: "airouter"
+      tool_use: "enabled"
+      reasoning: "enabled"
+      context_length: 200K
+      max_output_length: 128K
+      input_per_million: 0.06
+      output_per_million: 0.4
+      cache_read_per_million: 0.01
+      cache_write_per_million: 0.0
+
+    # NVIDIA Nemotron models
+    - name: "nvidia/nemotron-3.5-lightning"
+      provider: "airouter"
+      tool_use: "enabled"
+      reasoning: "enabled"
+      context_length: 262K
+      max_output_length: 131K
+      input_per_million: 0.06
+      output_per_million: 0.16
+      cache_read_per_million: 0.03
+      cache_write_per_million: 0.03
+
+
+    # Mistral models
+    - name: "mistral/ministral-3b"
+      provider: "airouter"
+      tool_use: "enabled"
+      reasoning: "enabled"
+      context_length: 131K
+      max_output_length: 4K
+      input_per_million: 0.1
+      output_per_million: 0.1
+      cache_read_per_million: 0.01
+
+    - name: "mistral/mistral-nemo"
+      provider: "airouter"
+      tool_use: "disabled"
+      reasoning: "enabled"
+      context_length: 131K
+      max_output_length: 131K
+      input_per_million: 0.03
+      output_per_million: 0.03
+      cache_read_per_million: 0.0
+      cache_write_per_million: 0.0
+
+    # Anthropic models
+    - name: "anthropic/claude-haiku-5.5"
+      provider: "airouter"
+      tool_use: "enabled"
+      reasoning: "enabled"
+      context_length: 1M
+      max_output_length: 128K
+      input_per_million: 0.1
+      output_per_million: 0.5
+      cache_read_per_million: 0.01
+      cache_write_per_million: 0.13
+
+    - name: "anthropic/claude-sonnet-5"
+      provider: "airouter"
+      tool_use: "enabled"
+      reasoning: "enabled"
+      context_length: 1M
+      max_output_length: 128K
+      input_per_million: 2
+      output_per_million: 10
+      cache_read_per_million: 0.2
+      cache_write_per_million: 2.5
+
+    # Google Gemini models
+    - name: "google/gemini-2.5-flash-lite"
+      provider: "airouter"
+      tool_use: "enabled"
+      reasoning: "enabled"
+      vision: "enabled"
+      context_length: 1M
+      max_output_length: 66K
+      input_per_million: 0.1
+      output_per_million: 0.4
+      cache_read_per_million: 0.01
+      cache_write_per_million: 0.0
+
+    - name: "google/gemma-4-31b-it"
+      provider: "airouter"
+      tool_use: "enabled"
+      reasoning: "enabled"
+      vision: "enabled"
+      context_length: 262K
+      max_output_length: 131K
+      input_per_million: 0.14
+      output_per_million: 0.4
+      cache_read_per_million: 0.0
+      cache_write_per_million: 0.0
+
+    - name: "google/gemini-3.5-flash-lite"
+      provider: "airouter"
+      tool_use: "enabled"
+      reasoning: "enabled"
+      vision: "enabled"
+      context_length: 1M
+      max_output_length: 65K
+      input_per_million: 0.3
+      output_per_million: 2.5
+      cache_read_per_million: 0.03
+      cache_write_per_million: 0.0
+
+    # DeepSeek models
+    - name: "deepseek/deepseek-v4-flash-0731"
+      provider: "airouter"
+      tool_use: "enabled"
+      reasoning: "enabled"
+      context_length: 1M
+      max_output_length: 384K
+      input_per_million: 0.13
+      output_per_million: 0.26
+      cache_read_per_million: 0.03
+      cache_write_per_million: 0.0
+
+    # Minimax models
+    - name: "minimax/minimax-m3.1-flash"
+      provider: "airouter"
+      tool_use: "enabled"
+      reasoning: "enabled"
+      context_length: 1M
+      max_output_length: 524K
+      input_per_million: 0.15
+      output_per_million: 0.6
+      cache_read_per_million: 0.01
+      cache_write_per_million: 0.0
+
+    # LLaMA models
+    - name: "meta/llama-3.1-8b"
+      provider: "airouter"
+      tool_use: "enabled"
+      reasoning: "disabled"
+      context_length: 128K
+      max_output_length: 8K
+      input_per_million: 0.22
+      output_per_million: 0.22
+      cache_read_per_million: 0.0
+      cache_write_per_million: 0.0
+
+    - name: "meta/llama-3.3-70b"
+      provider: "airouter"
+      tool_use: "enabled"
+      reasoning: "disabled"
+      context_length: 128K
+      max_output_length: 8K
+      input_per_million: 0.72
+      output_per_million: 0.72
+      cache_read_per_million: 0.0
+      cache_write_per_million: 0.0
+
+
+# Vision models
+vision:
+  object_detection:
+    default: "yolov8n.pt"
+    high_accuracy: "yolov8x.pt"
+  segmentation:
+    default: "sam2_hiera_large"
+  ocr:
+    default: "paddleocr"
+    language: "en"
+  pose_estimation:
+    default: "mediapipe"
+    advanced: "openpose"
+
+# Learning / personalization
+learning:
+  user_embedding_dim: 128
+  sequence_model: "lstm"

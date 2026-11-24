@@ -8,10 +8,12 @@ task execution interface.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from loguru import logger
 
+from pai.tasks.models import Task, TaskResult
+from pai.executors.models import ExecutionResult
 
 class BaseExecutor(ABC):
     """
@@ -33,7 +35,7 @@ class BaseExecutor(ABC):
     ) -> None:
         self.name = name
         self.executor_id = executor_id or name
-
+        self.queue: List[Task] = []
         self._initialized = False
         self._running = False
 
@@ -76,6 +78,11 @@ class BaseExecutor(ABC):
         self._running = False
         logger.info("Executor stopped: {}", self.name)
 
+    #: True if pause/cancel are acknowledged by a remote peer (device control_ack). In-process
+    #: executors have no ack protocol: for them the task manager treats "the awaiting coroutine
+    #: really unwound" as the acknowledgement.
+    supports_control_ack: bool = False
+
     async def pause_task(self, task_id: str) -> bool:
         """
         Pause a running task. Returns True if paused, False if the
@@ -107,6 +114,13 @@ class BaseExecutor(ABC):
         self._initialized = False
         logger.info("Executor shutdown: {}", self.name)
 
+    def is_available(self) -> bool:
+        """
+        Return True if the executor is available for scheduling tasks.
+        Subclasses should override this if they can track availability.
+        """
+        return self._running
+    
     # ------------------------------------------------------------------
     # Execution
     # ------------------------------------------------------------------
@@ -114,8 +128,8 @@ class BaseExecutor(ABC):
     @abstractmethod
     async def execute_task(
         self,
-        task: Dict[str, Any],
-    ) -> Dict[str, Any]:
+        task: Task,
+    ) -> TaskResult:
         """
         Execute a task.
 
@@ -140,6 +154,15 @@ class BaseExecutor(ABC):
     def running(self) -> bool:
         return self._running
 
+
+    @property
+    def is_idle(self) -> bool:
+        """
+        Return True if the executor is idle (not running any tasks).
+        Subclasses should override this if they can track task execution.
+        """
+        return True
+
     @property
     def initialized(self) -> bool:
         return self._initialized
@@ -148,5 +171,6 @@ class BaseExecutor(ABC):
         return (
             f"{self.__class__.__name__}("
             f"name={self.name!r}, "
+            f"initialized={self.initialized}, "
             f"running={self.running})"
         )

@@ -1,0 +1,278 @@
+{
+  "schemaVersion": 1,
+  "id": "desktop",
+  "name": "Desktop",
+  "version": "1.2.0",
+  "description": "Desktop conveniences: clipboard, audio, volume, media, notifications, and opening, listing and closing apps.",
+  "author": "PAI",
+  "license": "MIT",
+  "type": "native",
+  "runtime": {
+    "kind": "device",
+    "nativeModule": "pai.desktop",
+    "minPaiVersion": "0.4.0"
+  },
+  "platforms": {
+    "linux": {
+      "artifact": "linux/libpai_desktop.so",
+      "entrypoint": "pai_plugin_module_create"
+    }
+  },
+  "architectures": [
+    "x86_64"
+  ],
+  "deviceTypes": [
+    "desktop"
+  ],
+  "permissions": [
+    "clipboard",
+    "notifications",
+    "network"
+  ],
+  "capabilities": [
+    {
+      "id": "clipboard.read",
+      "requireConfirmation": true,
+      "confirmationReason": "Reading clipboard contents can be sensitive. Please confirm that you want to read the clipboard.",
+      "description": "Read the current clipboard contents.",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "id": "clipboard.write",
+      "requireConfirmation": true,
+      "confirmationReason": "Writing to the clipboard can be sensitive. Please confirm that you want to write to the clipboard.",
+      "description": "Write to the clipboard.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "content": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "content"
+        ]
+      }
+    },
+    {
+      "id": "audio.play",
+      "requireConfirmation": false,
+      "description": "Play an audio file or URL in the background.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "id": "audio.speak",
+      "requireConfirmation": false,
+      "description": "Speak text via the system TTS engine.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ]
+      }
+    },
+    {
+      "id": "media.control",
+      "requireConfirmation": false,
+      "description": "Control media playback via playerctl (play/pause/next/previous/stop/status).",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "play",
+              "pause",
+              "play-pause",
+              "stop",
+              "next",
+              "previous",
+              "status"
+            ]
+          }
+        },
+        "required": [
+          "action"
+        ]
+      }
+    },
+    {
+      "id": "notifications.read",
+      "requireConfirmation": true,
+      "confirmationReason": "Reading desktop notifications can be sensitive. Please confirm that you want to read the notifications.",
+      "description": "List recent desktop notifications. Requires the dunst notification daemon; other desktops return 'not_supported'.",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "id": "notifications.dismiss",
+      "requireConfirmation": true,
+      "confirmationReason": "Dismissing desktop notifications can be sensitive. Please confirm that you want to dismiss the notifications.",
+      "description": "Dismiss all desktop notifications. Requires the dunst notification daemon; other desktops return an error.",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "id": "notifications.send",
+      "requireConfirmation": false,
+      "description": "Show a desktop notification.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "urgency": {
+            "type": "string",
+            "enum": [
+              "low",
+              "normal",
+              "critical"
+            ],
+            "default": "normal"
+          },
+          "timeout_ms": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 600000
+          }
+        }
+      }
+    },
+    {
+      "id": "audio.volume",
+      "requireConfirmation": false,
+      "description": "Get, set, mute or unmute the default audio output volume.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "get",
+              "set",
+              "mute",
+              "unmute"
+            ],
+            "default": "get"
+          },
+          "level": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "description": "Volume percent; required when action is 'set'."
+          }
+        }
+      }
+    },
+    {
+      "id": "app.launch",
+      "description": "Launch a desktop app or open a file/URL. To open a local file use url with file:// scheme (e.g. 'file:///home/user/image.jpg'). To launch an app by name use the app field. Fire-and-forget: an app started this way can NOT be closed later. Use app.open if the user may ask to close it.",
+      "requireConfirmation": true,
+      "confirmationReason": "Launching applications or opening URLs can be sensitive. Please confirm that you want to proceed.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "app": {
+            "type": "string",
+            "description": "Application name to launch (e.g., 'firefox', 'eog', 'spotify'). Do NOT include file arguments here \u2014 use the url field for files."
+          },
+          "url": {
+            "type": "string",
+            "description": "URL or local file to open with the default handler. For local files use file:// scheme, e.g. 'file:///home/chethan/Pictures/image.jpg'. For web URLs use https://."
+          }
+        }
+      }
+    },
+    {
+      "id": "app.open",
+      "requireConfirmation": true,
+      "confirmationReason": "Opening an application, file or link can be sensitive. Please confirm that you want to proceed.",
+      "description": "Open an app, a local file (url with file:// or an absolute path) or a web link, in a way PAI keeps track of so it can be closed later with app.close. Pass app (name or id, e.g. 'calculator'), url, or both (open that file in that app). Returns a handle. If the app was already running and just took the request, closable is false and it cannot be closed by PAI.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "app": {
+            "type": "string",
+            "description": "Application name or desktop id, e.g. 'calculator' or 'org.gnome.Calculator'."
+          },
+          "url": {
+            "type": "string",
+            "description": "File (file:// URL or absolute path) or web link to open. With no app, the default application is used."
+          }
+        }
+      }
+    },
+    {
+      "id": "app.close",
+      "requireConfirmation": true,
+      "risk": "high",
+      "confirmationReason": "Closing an application can lose unsaved work. Please confirm that you want to close it.",
+      "description": "Close an app that PAI opened with app.open. Identify it by handle (from app.open / app.list) or by app name; with neither, closes the only open app. Only apps opened with app.open can be closed, never other apps or ones started with app.launch. Graceful first; force=true kills an app that will not exit.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "handle": {
+            "type": "string",
+            "description": "Handle returned by app.open."
+          },
+          "app": {
+            "type": "string",
+            "description": "Name of an app PAI opened, e.g. 'calculator'."
+          },
+          "force": {
+            "type": "boolean",
+            "default": false,
+            "description": "Kill the app if it does not exit gracefully."
+          }
+        }
+      }
+    },
+    {
+      "id": "app.list",
+      "requireConfirmation": false,
+      "description": "List the apps PAI has open (handle, app name, what it was opened with) and can close with app.close.",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    }
+  ],
+  "changelog": {
+    "summary": "Apps can now be opened in a way PAI can close again: new app.open, app.close and app.list.",
+    "features": [
+      "app.open: open an app, file or link as an app PAI tracks, returns a handle",
+      "app.close: close an app that app.open started (graceful, with an optional force)",
+      "app.list: list the apps PAI has open"
+    ],
+    "fixes": [
+      "app.launch results now say closable=false (use app.open when the app may need closing)"
+    ],
+    "breaking": []
+  }
+}

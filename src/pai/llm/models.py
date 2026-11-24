@@ -3,7 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+
+from pai.common.enums.llm import LLMModel, LLMProviderName
 
 
 @dataclass
@@ -39,11 +40,14 @@ class LLMRequest:
 
     messages: List[LLMMessage]
 
-    model: Optional[str] = None
+    model: Optional[LLMModel] = None
     temperature: float = 0.7
     max_tokens: Optional[int] = 1024
 
-    provider: Optional[str] = None
+    provider: Optional[LLMProviderName] = None
+
+    # Estimated tokens per named part of the prompt (see pai.llm.breakdown); None = derive from message roles.
+    breakdown: Optional[Dict[str, int]] = None
 
     # Optional provider-specific parameters.
     extra: Dict[str, Any] = field(default_factory=dict)
@@ -69,6 +73,15 @@ class LLMUsage:
     completion_tokens: int = 0
     total_tokens: int = 0
 
+    # Cost (USD). `provider_cost_usd` is what the gateway itself reported (AIRouter/OpenRouter);
+    # `cost_usd` is the final figure used for accounting and `cost_source` says where it came from
+    # ("configured" = tokens x configured price per million, "provider", or None = unknown).
+    provider_cost_usd: Optional[float] = None
+    cost_usd: Optional[float] = None
+    cost_source: Optional[str] = None
+    breakdown: Optional[Dict[str, int]] = None   # prompt tokens per part (system_prompt, memory, history...); sums to prompt_tokens
+    recorded: bool = False        # set once the call has been added to the cost tracker (never twice)
+
     def __post_init__(self) -> None:
         self.prompt_tokens = max(0, self.prompt_tokens)
         self.completion_tokens = max(0, self.completion_tokens)
@@ -80,14 +93,27 @@ class LLMUsage:
 
 
 @dataclass
+class LLMStreamChunk:
+    """One incremental piece of a streamed completion.
+
+    ``delta`` is new text only (never the accumulated text). The last chunk carries
+    ``finish_reason`` (and ``usage`` when the provider reports it).
+    """
+
+    delta: str = ""
+    finish_reason: Optional[str] = None
+    usage: Optional["LLMUsage"] = None
+
+
+@dataclass
 class LLMResponse:
     """
     Provider-independent LLM response.
     """
 
     content: str
-    provider: str
-    model: str
+    provider: LLMProviderName
+    model: LLMModel
 
     usage: Optional[LLMUsage] = None
 
@@ -100,15 +126,3 @@ class LLMResponse:
         if not isinstance(self.content, str):
             raise TypeError("LLMResponse.content must be a string.")
 
-class LLMProviderConfig(BaseModel):
-    """LLM Provider configuration."""
-    provider: str = Field(default="gemini")  # openai, local
-    model_name: str = Field(default="gemini-3.5-flash")
-    api_key: Optional[str] = Field(default=None)
-    api_url: Optional[str] = Field(default=None)
-    base_url: Optional[str] = Field(default=None)
-    local_model_path: Optional[str] = Field(default=None)
-    temperature: float = Field(default=0.7)
-    max_tokens: int = Field(default=2048)
-    timeout: float = Field(default=30.0)
-    extra: Dict[str, Any] = Field(default_factory=dict)

@@ -4,10 +4,11 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
 from croniter import croniter
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from pai.devices.manager import DeviceManager
@@ -15,10 +16,45 @@ from pai.executors.manager import ExecutorManager
 from pai.notifications.push_service import PushService, PushTokenRepository
 from pai.storage.models import ScheduleModel
 from pai.storage.repositories.schedule import ScheduleRepository
+from pai.common.enums.permission import Origin
+from pai.orchestration.execution_context import ExecutionContext
+from pai.planning.models import TaskSpec
+from pai.scheduler import consent as consent_mod
+from pai.scheduler.validation import (
+    REMINDER_CAPABILITY, ScheduleValidationError, ScheduleValidator,
+)
+from pai.security.audit.models import AuditEventType
 from pai.tasks.manager import TaskManager
+from pai.tasks.models import LastRunStatus, TaskSource, TaskType
 
 
 logger = logging.getLogger(__name__)
+
+# How long a background scheduled run may take (beyond the task's own timeout) before it is
+# abandoned — e.g. a task that fell back to waiting for a human confirmation nobody gives.
+_RUN_GRACE_SECONDS = 120.0
+_AUDIT_FOR_STATUS = {
+    "ok": AuditEventType.SCHEDULE_RUN,
+    "skipped_no_consent": AuditEventType.SCHEDULE_SKIPPED,
+    "device_offline": AuditEventType.SCHEDULE_SKIPPED,
+    "denied": AuditEventType.SCHEDULE_DENIED,
+    "failed": AuditEventType.SCHEDULE_FAILED,
+}
+
+
+class FireJob(BaseModel):
+    """Plain snapshot of a due schedule, safe to hand to a background task (no ORM row)."""
+    schedule_id: str
+    user_id: str
+    title: str
+    kind: str
+    capability: str
+    parameters: dict[str, Any]
+    device_id: str
+    plugin_id: str
+    executor_id: str
+    approved: bool
+    request_id: str
 
 
 class SchedulerService:
@@ -32,8 +68,13 @@ class SchedulerService:
         device_manager: DeviceManager,
         tick_seconds: int = 15,
         device_executor_name: str = "device_executor",
-        push_service: Optional[PushService] = None,     
+        push_service: Optional[PushService] = None,
+        validator: Optional[ScheduleValidator] = None,
+        audit_logger: Optional[Any] = None,
     ) -> None:
+        self.validator = validator
+        self.audit_logger = audit_logger
+        self._bg: set[asyncio.Task] = set()
         self.session_factory = session_factory
         self.task_manager = task_manager
         self.executor = executor
@@ -43,6 +84,7 @@ class SchedulerService:
         self.device_executor_name = device_executor_name
         self._task: Optional[asyncio.Task] = None
         self._stop = asyncio.Event()
+        self._last_undeliverable: dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -64,6 +106,9 @@ class SchedulerService:
             except (asyncio.CancelledError, Exception):
                 pass
             self._task = None
+        for t in list(self._bg):
+            t.cancel()
+        await asyncio.gather(*self._bg, return_exceptions=True)
         logger.info("SchedulerService stopped")
 
     # ------------------------------------------------------------------
@@ -110,6 +155,17 @@ class SchedulerService:
         repo: ScheduleRepository,
         now: datetime,
     ) -> None:
+        if sched.capability == REMINDER_CAPABILITY:
+            await self._fire_reminder(sched, repo, now)      # the classic reminder, as before
+        else:
+            await self._fire_action(sched, repo, now)        # a plugin/server/builtin action
+
+    async def _fire_reminder(
+        self,
+        sched: ScheduleModel,
+        repo: ScheduleRepository,
+        now: datetime,
+    ) -> None:
         target_device = await self._resolve_device(sched)
         if target_device is None:
             await self._handle_undeliverable(sched, repo, now, reason="no_device")
@@ -145,45 +201,48 @@ class SchedulerService:
             sched.id, sched.title, target_device, delivery,
         )
 
-        # 1. Create + initialize in one call. `create_initialized` requires
-        #    capability / device_id / executor_id; create() does not.
+        # 1. Create the task from a TaskSpec (the title is the task's name). submit() below
+        #    moves it from CREATED to INITIALIZED, so nothing else is needed here.
+        spec = TaskSpec(
+            id=f"schedule_{sched.id}",
+            name=sched.title,
+            input=sched.body or sched.title,
+            type=TaskType.ONE_SHOT,
+            capability=sched.capability,
+            parameters={
+                # Merge any preset parameters, then stamp the reminder
+                # text so system.notifications.show picks it up.
+                **(sched.parameters or {}),
+                "title": sched.title,
+                "body": sched.body or "",
+            },
+            timeout=60.0,           # generous for slow devices
+            retry_count=1,
+        )
         try:
-            task = await self.task_manager.create_initialized(
-                input=sched.body or sched.title,
-                task_type=sched.capability,          # becomes Task.type
-                capability=sched.capability,
-                device_id=target_device,
-                executor_id=self.device_executor_name,
-                parameters={
-                    # Merge any preset parameters, then stamp the reminder
-                    # text so system.notifications.show picks it up.
-                    **(sched.parameters or {}),
-                    "title": sched.title,
-                    "body": sched.body or "",
-                },
+            task = await self.task_manager.create_task(
+                spec,
                 user_id=sched.user_id,
-                timeout=60.0,       # generous for slow devices
-                max_retries=1,
+                session_id=f"schedule:{sched.id}",       # ScheduleModel has no session of its own
+                executor_id=self.device_executor_name,
+                device_id=target_device,
+                source=TaskSource.SCHEDULED,
                 metadata={
                     "source": "scheduler",
                     "schedule_id": sched.id,
                     "schedule_kind": sched.kind,
                 },
+                # One key per firing: a device that already showed this reminder
+                # can de-duplicate a retry / recovery re-send.
+                idempotency_key=f"schedule:{sched.id}:{now.isoformat()}",
             )
         except Exception:
             logger.exception(
                 "Schedule %s: task creation failed", sched.id,
             )
+            await self._record(sched, repo, now, "failed", error="could not create the reminder task")
             await self._advance(sched, repo, now)
             return
-
-        # 2. Fix the auto-generated title ("Task for <type>") for the UI.
-        try:
-            await self.task_manager.update_task(task.id, title=sched.title)
-        except Exception:
-            logger.debug(
-                "Schedule %s: title update failed (cosmetic)", sched.id,
-            )
 
         # 3. Queue + run it. wait=False so the scheduler loop doesn't block
         #    on slow devices. Failures flow back as task.failed events.
@@ -195,8 +254,197 @@ class SchedulerService:
             except Exception as exc:
                 logger.warning("Schedule %s: submit failed: %s", sched.id, exc)
 
+        await self._record(sched, repo, now, "ok", task_id=task.id)
         await self._advance(sched, repo, now)
 
+    # ------------------------------------------------------------------
+    # Scheduled ACTIONS (plugin / server / built-in capabilities)
+    # ------------------------------------------------------------------
+
+    async def _fire_action(
+        self, sched: ScheduleModel, repo: ScheduleRepository, now: datetime,
+    ) -> None:
+        """Run a scheduled action — unattended, so every safety check is re-done NOW:
+
+        1. the capability/device are re-resolved against the live index;
+        2. an offline device is never "woken" with a queued action (catch_up policy applies);
+        3. the real authorization pipeline is dry-run as a SCHEDULED run: blocked => denied;
+           needs approval => runs only under a valid standing consent, else it is skipped and
+           the user is told;
+        4. the run goes through TaskManager.run (real task, real authorization + token) with
+           ``Origin.SCHEDULED``; ``pre_approved`` only ever resolves APPROVAL_REQUIRED.
+        """
+        if self.validator is None:
+            await self._record(sched, repo, now, "failed", error="scheduler is not set up for actions")
+            await self._advance(sched, repo, now)
+            return
+        try:
+            ft = await self.validator.resolve_for_fire(sched)
+        except ScheduleValidationError as exc:
+            await self._record(sched, repo, now, "failed", error=str(exc)[:500])
+            await self._advance(sched, repo, now)
+            return
+        except Exception as exc:
+            logger.exception("Schedule %s: could not resolve target", sched.id)
+            await self._record(sched, repo, now, "failed", error=f"{type(exc).__name__}: {exc}"[:500])
+            await self._advance(sched, repo, now)
+            return
+
+        if ft.requires_device and not await self._device_connected(ft.device_id):
+            await self._handle_undeliverable(sched, repo, now, reason="device_offline")
+            return
+
+        pre = ft.preflight
+        # Keep what the Reminders screen shows in step with what the pipeline says today
+        # (older schedules were stored before these flags existed).
+        sched.requires_consent, sched.risk, sched.executor = pre.requires_consent, pre.risk, ft.executor_id
+        if pre.blocked:
+            await self._record(sched, repo, now, "denied", error=pre.blocked_reason)
+            await self._advance(sched, repo, now)
+            return
+
+        approved = False
+        if pre.requires_consent:
+            state = consent_mod.evaluate(sched, now)
+            if not state.active:
+                first_time = sched.last_run_status != "skipped_no_consent"
+                await self._record(sched, repo, now, "skipped_no_consent",
+                                   error=f"needs your approval ({state.reason.value})",
+                                   plugin_id=ft.plugin_id, device_id=ft.device_id)
+                if first_time:                              # tell them once, not on every tick
+                    await self._notify_user(
+                        sched, "Scheduled action needs your approval",
+                        f"Scheduled action '{sched.title}' needs your approval. "
+                        "Open Reminders to approve it.")
+                await self._advance(sched, repo, now)
+                return
+            approved = True
+
+        job = FireJob(
+            schedule_id=sched.id, user_id=sched.user_id, title=sched.title, kind=sched.kind,
+            capability=sched.capability, parameters=dict(sched.parameters or {}),
+            device_id=ft.device_id, plugin_id=ft.plugin_id, executor_id=ft.executor_id,
+            approved=approved, request_id=f"schedule:{sched.id}:{now.isoformat()}")
+        logger.info("Firing scheduled action %s (%s) on %s via %s approved=%s",
+                    sched.id, sched.capability, ft.device_id, ft.executor_id, approved)
+        # Background: a slow device must not stall every other due schedule.
+        t = asyncio.create_task(self._execute_job(job), name=f"schedule-run:{sched.id}")
+        self._bg.add(t)
+        t.add_done_callback(self._bg.discard)
+        await self._advance(sched, repo, now)
+
+    async def _execute_job(self, job: FireJob) -> None:
+        status: LastRunStatus = "ok"
+        error: Optional[str] = None
+        task_id: Optional[str] = None
+        spec = TaskSpec(
+            id=f"schedule_{job.schedule_id}", name=job.title, input=job.title,
+            type=TaskType.ONE_SHOT, capability=job.capability, parameters=job.parameters,
+            preferred_device=job.device_id, timeout=60.0,
+            metadata={"source": "scheduler", "schedule_id": job.schedule_id,
+                      "schedule_kind": job.kind},
+        )
+        ctx = ExecutionContext(
+            user_id=job.user_id, session_id=f"schedule:{job.schedule_id}",
+            request_id=job.request_id, origin=Origin.SCHEDULED,
+            pre_approved=job.approved,       # server-decided, from a valid standing consent
+            metadata={"allowed_devices": [job.device_id]},   # the validated, user-owned target
+        )
+        try:
+            result = await asyncio.wait_for(
+                self.task_manager.run(spec, ctx, wait=True), timeout=spec.timeout + _RUN_GRACE_SECONDS)
+            if result is not None and not result.success:
+                status, error = "failed", (result.error or "the action failed")[:500]
+        except asyncio.CancelledError:
+            raise
+        except PermissionError as exc:
+            status, error = "denied", str(exc)[:500]
+        except asyncio.TimeoutError:
+            status, error = "failed", "timed out"
+        except Exception as exc:
+            logger.exception("Scheduled run %s failed", job.schedule_id)
+            status, error = "failed", f"{type(exc).__name__}: {exc}"[:500]
+        try:
+            existing = await self.task_manager.find_by_idempotency_key(
+                f"{job.request_id}:{spec.id}", user_id=ctx.user_id, session_id=ctx.session_id)
+            task_id = existing.id if existing else None
+        except Exception:
+            task_id = None
+        try:
+            async with self.session_factory() as session:
+                await ScheduleRepository(session).record_run(
+                    job.schedule_id, status=status, at=datetime.now(timezone.utc),
+                    error=error, task_id=task_id)
+                await session.commit()
+        except Exception:
+            logger.exception("Could not record outcome of schedule %s", job.schedule_id)
+        self._audit(job.schedule_id, job.user_id, job.capability, status, error=error,
+                    task_id=task_id, plugin_id=job.plugin_id, device_id=job.device_id)
+
+    async def _device_connected(self, device_id: str) -> bool:
+        try:
+            return bool(await self.device_manager.is_connected(device_id))
+        except Exception:
+            return False
+
+    async def _notify_user(self, sched: ScheduleModel, title: str, body: str) -> None:
+        """Tell the user something about a schedule: push first, else the device over WS
+        (through the normal reminder-task path). Never raises."""
+        try:
+            device = await self._resolve_device(sched)
+            if device is None:
+                return
+            if self.push_service and self.push_service.enabled:
+                async with self.session_factory() as ps:
+                    tokens = await PushTokenRepository(ps).get_for_device(device)
+                if tokens and await self.push_service.send(
+                    tokens=tokens, title=title, body=body,
+                    data={"type": "schedule_needs_approval", "schedule_id": sched.id},
+                ) > 0:
+                    return
+            if await self._device_connected(device):
+                spec = TaskSpec(
+                    id=f"schedule_notice_{sched.id}", name=title, input=body, type=TaskType.ONE_SHOT,
+                    capability=REMINDER_CAPABILITY, parameters={"title": title, "body": body},
+                    timeout=60.0, retry_count=0)
+                task = await self.task_manager.create_task(
+                    spec, user_id=sched.user_id, session_id=f"schedule:{sched.id}",
+                    executor_id=self.device_executor_name, device_id=device,
+                    source=TaskSource.SCHEDULED,
+                    metadata={"source": "scheduler", "schedule_id": sched.id, "notice": True})
+                await self.task_manager.submit(task.id, wait=False)
+        except Exception:
+            logger.exception("Schedule %s: could not notify the user", sched.id)
+
+    # ------------------------------------------------------------------
+    # Recording + audit
+    # ------------------------------------------------------------------
+
+    async def _record(
+        self, sched: ScheduleModel, repo: ScheduleRepository, now: datetime, status: LastRunStatus,
+        *, error: Optional[str] = None, task_id: Optional[str] = None,
+        plugin_id: Optional[str] = None, device_id: Optional[str] = None,
+    ) -> None:
+        await repo.record_run(sched.id, status=status, at=now, error=error, task_id=task_id)
+        self._audit(sched.id, sched.user_id, sched.capability, status, error=error, task_id=task_id,
+                    plugin_id=plugin_id, device_id=device_id or sched.target_device_id)
+
+    def _audit(
+        self, schedule_id: str, user_id: str, capability: str, status: str, *,
+        error: Optional[str], task_id: Optional[str], plugin_id: Optional[str] = None,
+        device_id: Optional[str] = None,
+    ) -> None:
+        """Every firing decision (ran / skipped / denied / failed) goes to the security audit log."""
+        logger.info("schedule %s fired: %s (%s)", schedule_id, status, error or "")
+        if self.audit_logger is None:
+            return
+        try:
+            self.audit_logger.record(
+                _AUDIT_FOR_STATUS[status], user_id=user_id, plugin_id=plugin_id,
+                capability=capability, allowed=status == "ok", reason=error or status,
+                device_id=device_id, task_id=task_id, metadata={"schedule_id": schedule_id})
+        except Exception:
+            logger.exception("audit write failed for schedule %s", schedule_id)
 
     async def _deliver_push(self, sched, task, target_device: str) -> None:
         """Try push, fall back to WS, fail only if both are unavailable."""
@@ -284,38 +532,42 @@ class SchedulerService:
         )
 
     async def _handle_undeliverable(self, sched, repo, now, reason: str):
-        logger.warning(
-            "Schedule %s undeliverable (%s) — catch_up=%s",
-            sched.id, reason, sched.catch_up,
-        )
+        if self._last_undeliverable.get(sched.id) != reason:
+            logger.warning(
+                "Schedule %s undeliverable (%s) — catch_up=%s",
+                sched.id, reason, sched.catch_up,
+            )
+            self._last_undeliverable[sched.id] = reason
+            await self._record(sched, repo, now, "device_offline", error=reason)
+        else:
+            logger.debug(
+                "Schedule %s still undeliverable (%s)", sched.id, reason,
+            )
         if sched.catch_up == "none":
             await self._advance(sched, repo, now)
-        # else: leave due — retry next tick when a device comes back.
 
     async def _advance(self, sched, repo, now):
         next_at = self._next_fire_at(sched, now)
         await repo.mark_fired(sched.id, fired_at=now, next_fire_at=next_at)
 
 
-    async def _resolve_device(self, sched: ScheduleModel) -> Optional[str]:
+    async def _resolve_device(self, sched) -> Optional[str]:
         if sched.target_device_id:
-            try:
-                connected = await self.device_manager.is_connected(
-                    sched.target_device_id,
-                )
-            except Exception:
-                connected = False
-            return sched.target_device_id if connected else None
-
+            return sched.target_device_id          # trust the target, check connectivity later
         try:
             devices = await self.device_manager.list_devices(sched.user_id)
         except Exception:
             return None
+        # prefer a connected device, but fall back to any device the user owns
+        fallback = None
         for d in devices:
             dev_id = getattr(d, "id", None)
-            if dev_id and await self.device_manager.is_connected(dev_id):
+            if not dev_id:
+                continue
+            fallback = fallback or dev_id
+            if await self.device_manager.is_connected(dev_id):
                 return dev_id
-        return None
+        return fallback
 
     # ------------------------------------------------------------------
     # Time math

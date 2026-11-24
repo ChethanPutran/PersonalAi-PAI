@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "id": "screen",
+  "name": "Screen",
+  "version": "1.0.0",
+  "description": "Capture screenshots of the host screen.",
+  "author": "PAI",
+  "license": "MIT",
+  "type": "native",
+  "runtime": {
+    "kind": "device",
+    "nativeModule": "pai.screen",
+    "minPaiVersion": "0.4.0"
+  },
+
+  "platforms": {
+    "linux": {
+      "artifact": "linux/libpai_screen.so",
+      "entrypoint": "pai_plugin_module_create"
+    }
+  },
+
+  "architectures": ["x86_64"],
+  "deviceTypes": ["desktop"],
+  "permissions": ["screen"],
+
+  "metadata": {
+    "requireConsentEnv": "PAI_SCREEN_CONSENT"
+  },
+
+  "capabilities": [
+    {
+      "id": "screen.capture",
+      "taskType": "one_shot",
+      "timeoutSeconds": 30,
+      "description": "Take a screenshot. Uses grim (Wayland) or scrot/import (X11). Requires PAI_SCREEN_CONSENT=1 in the agent env.",
+      "permissions": ["screen"],
+      "requireConfirmation": true,
+      "confirmationReason": "Capturing screenshots can be sensitive. Please confirm that you want to take a screenshot.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "outputPath": {"type": "string", "description": "Absolute path for the PNG. Defaults to ~/Pictures/PAI/screen_<timestamp>.png"}
+        }
+      }
+    }
+  ]
+}

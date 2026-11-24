@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
 from datetime import datetime, timezone
@@ -22,7 +23,6 @@ from pai.planning.models import (
     TaskSpec,
 )
 from pai.planning.plan_verifier import PlanVerifier
-from pai.storage.repositories.chat import ChatRepository
 from pai.storage.repositories.chat import ChatRepository
 
 
@@ -54,6 +54,7 @@ class Planner(Lifecycle):
         )
         self.verifier = PlanVerifier(capability_router=capability_router)
         self.active_plans: Dict[str, Plan] = {}
+        self._plan_lock = asyncio.Lock()
         self._initialized = False
 
     async def initialize(self) -> None:
@@ -164,8 +165,9 @@ class Planner(Lifecycle):
 
             plan.status = PlanStatus.VERIFIED
             plan.updated_at = datetime.now(timezone.utc)
-            self.active_plans[plan.id] = plan
-            
+            async with self._plan_lock:
+                self.active_plans[plan.id] = plan
+
             await self._publish("plan.created", {
                 "plan_id": plan.id,
                 "goal": plan.goal[:500],
@@ -190,7 +192,8 @@ class Planner(Lifecycle):
         plan_id: str,
         feedback: Dict[str, Any],
     ) -> Plan:
-        plan = self.active_plans.get(plan_id)
+        async with self._plan_lock:
+            plan = self.active_plans.get(plan_id)
         if plan is None:
             raise ValueError(f"Plan not found: {plan_id}")
 
@@ -201,7 +204,7 @@ class Planner(Lifecycle):
             feedback_keys=list(feedback.keys()),
         ):
             context = {
-                **plan.context,
+                **(plan.context or {}),
                 "previous_plan_id": plan.id,
                 "feedback": feedback,
             }
@@ -219,14 +222,16 @@ class Planner(Lifecycle):
             return new_plan
 
     async def get_plan(self, plan_id: str) -> Optional[Plan]:
-        return self.active_plans.get(plan_id)
+        async with self._plan_lock:
+            return self.active_plans.get(plan_id)
 
     async def cancel_plan(self, plan_id: str) -> bool:
-        plan = self.active_plans.get(plan_id)
-        if plan is None:
-            return False
-        plan.status = PlanStatus.CANCELLED
-        plan.updated_at = datetime.now(timezone.utc)
+        async with self._plan_lock:
+            plan = self.active_plans.get(plan_id)
+            if plan is None:
+                return False
+            plan.status = PlanStatus.CANCELLED
+            plan.updated_at = datetime.now(timezone.utc)
         return True
 
     @staticmethod

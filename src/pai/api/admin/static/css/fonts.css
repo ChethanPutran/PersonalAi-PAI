@@ -1,0 +1,8 @@
+/* Fonts bundled from frontend/assets/fonts (all SIL OFL — see the OFL-*.txt files next to them).
+   Served from this origin only; the CSP keeps font-src 'self'. */
+@font-face { font-family: "Orbitron"; src: url("../fonts/Orbitron-Variable.ttf") format("truetype"); font-weight: 400 900; font-display: swap; }
+@font-face { font-family: "Rajdhani"; src: url("../fonts/Rajdhani-Medium.ttf") format("truetype"); font-weight: 500; font-display: swap; }
+@font-face { font-family: "Rajdhani"; src: url("../fonts/Rajdhani-SemiBold.ttf") format("truetype"); font-weight: 600; font-display: swap; }
+@font-face { font-family: "Rajdhani"; src: url("../fonts/Rajdhani-Bold.ttf") format("truetype"); font-weight: 700; font-display: swap; }
+@font-face { font-family: "Inter"; src: url("../fonts/Inter-Variable.ttf") format("truetype"); font-weight: 100 900; font-display: swap; }
+@font-face { font-family: "JetBrainsMono"; src: url("../fonts/JetBrainsMono-Variable.ttf") format("truetype"); font-weight: 100 800; font-display: swap; }

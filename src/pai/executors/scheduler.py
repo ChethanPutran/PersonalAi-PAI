@@ -4,15 +4,18 @@ Task scheduler for executors.
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Tuple
 
 from loguru import logger
 
 from pai.executors.device import DeviceExecutor
 from pai.executors.manager import ExecutorManager
 from pai.executors.server import ServerExecutor
+from pai.tasks.models import Task, TaskResult
 from pai.observability.tracer import get_tracer
 
+class SchedulerError(Exception):
+    pass
 
 class ExecutorScheduler:
     """
@@ -37,6 +40,7 @@ class ExecutorScheduler:
         self.device_manager = device_manager
         self._initialized = False
         self._running = False
+        self.queue: List[Tuple[Task,str]] = []  
 
         if register_defaults:
             self._register_default_executors()
@@ -122,104 +126,137 @@ class ExecutorScheduler:
 
     async def schedule_task(
         self,
-        task: Any,                             
-        executor_name: str,
-    ) -> Dict[str, Any]:
+        task: Task,                             
+        executor_id: str,
+    ) -> TaskResult:
         tracer = get_tracer()
 
-        # Normalize input regardless of whether a dict or Task model is passed
-        task_dict = self._as_dict(task)
-        task_id = task_dict.get("id")
-        task_type = task_dict.get("type")
-        capability = task_dict.get("capability") or task_type
+        task_id = task.id
+        task_type = task.type
+        capability = task.capability
 
         async with tracer.span(
             "executor_scheduler.schedule_task",
             task_id=task_id,
             task_type=task_type,
             capability=capability,
-            executor_name=executor_name,
+            executor_id=executor_id,
         ) as span:
 
             if not self._running:
                 span.set_error("scheduler_not_running")
-                return {
-                    "status": "failed",
-                    "error": "ExecutorScheduler is not running",
-                    "task_id": task_id,
-                }
+                raise RuntimeError("ExecutorScheduler is not running")
 
-            if not executor_name:
-                span.set_error("missing_executor_name")
-                return {
-                    "status": "failed",
-                    "error": "executor_name is required",
-                    "task_id": task_id,
-                }
+            if not executor_id:
+                span.set_error("missing_executor_id")
+                raise SchedulerError(f"Missing executor_id for task {task_id} ({task_type})")
 
-            executor = self.manager.get(executor_name)
+            executor = self.manager.get(executor_id)
             if executor is None:
-                span.set_error(f"executor_not_found:{executor_name}")
-                return {
-                    "status": "failed",
-                    "error": f"Executor not found: {executor_name}",
-                    "task_id": task_id,
-                }
+                span.set_error(f"executor_not_found:{executor_id}")
+                raise SchedulerError(
+                    f"Executor not found: {executor_id}"
+                )
 
             if not executor.running:
-                span.set_error(f"executor_not_running:{executor_name}")
-                return {
-                    "status": "failed",
-                    "error": f"Executor is not running: {executor_name}",
-                    "task_id": task_id,
-                }
+                span.set_error(f"executor_not_running:{executor_id}")
+                raise SchedulerError(f"Executor is not running: {executor_id}")
+
+            if not executor.is_available():
+                raise RuntimeError(f"Executor is busy: {executor_id}")
 
             logger.info(
-                "Scheduling task {} ({}) -> {}",
-                task_id, task_type, executor_name,
-            )
+                        "Scheduling task {} ({}) -> {}",
+                        task_id, task_type, executor_id,
+                        )
 
-            t0 = time.perf_counter()
-            try:
-                result = await executor.execute_task(task)
+            # This awaits the actual execution, not just dispatch.
+            result = await executor.execute_task(task)
 
-                # Executors already return a structured result.
-                # Preserve it rather than wrapping it multiple times.
-                duration_ms = (time.perf_counter() - t0) * 1000
+            return self._as_task_result(task, executor_id, result)
 
-                span.set_attribute("duration_ms", round(duration_ms, 1))
-                span.set_attribute(
-                    "status",
-                    (result or {}).get("status", "completed")
-                    if isinstance(result, dict)
-                    else "completed",
-                )
-                return result
+    @staticmethod
+    def _as_task_result(task: Task, executor_id: str, result: Any) -> TaskResult:
+        """Executors historically return either a TaskResult or a status dict
+        ({"status": "success"|"completed"|"failed", "output"/"result", "error"}).
+        TaskManager only understands TaskResult, so normalize at this boundary."""
+        if isinstance(result, TaskResult):
+            return result
+        data = result if isinstance(result, dict) else {"output": result, "status": "success"}
+        ok = str(data.get("status", "success")).lower() in {"success", "completed"}
+        return TaskResult(
+            task_id=task.id,
+            success=ok,
+            output=data.get("output", data.get("result")),
+            error=None if ok else str(data.get("error") or "Execution failed"),
+            retryable=bool(data.get("retryable", True)),
+            executor_id=executor_id,
+            device_id=task.device_id,
+        )
 
-            except Exception as exc:
-                duration_ms = (time.perf_counter() - t0) * 1000
-                logger.exception("Executor failed: {}", executor_name)
-                span.set_error(f"{type(exc).__name__}: {exc}")
-                span.set_attribute("duration_ms", round(duration_ms, 1))
-                return {
-                    "status": "failed",
-                    "executor": executor_name,
-                    "task_id": task_id,
-                    "error": str(exc),
-                }
-
-    async def execute(
-        self,
-        task: Any,
-        executor_name: str,
-    ) -> Dict[str, Any]:
+           
+    def queue_task(self, task: Any, executor_id: str) -> None:
         """
-                Alias for schedule_task.
-        
-                Useful when orchestration code thinks in terms of execution
-                rather than scheduling.
-                """
-        return await self.schedule_task(task, executor_name)
+        Queue a task for later execution.
+        """
+        self.queue.append((task, executor_id))
+        logger.info("Task {} queued for executor {}", task.id, executor_id)
+
+
+    async def run_queued_tasks(self) -> None:
+        """
+        Run all queued tasks.
+        """
+        while True:
+            while self.queue:
+                task, executor_id = self.queue.pop(0)
+                logger.info("Running queued task {} for executor {}", task.id, executor_id)
+                # Here you would typically call schedule_task or execute_task
+                # For simplicity, we just log the action
+                # In a real implementation, you might want to await schedule_task
+
+                # try to check if the executor is available
+                # If executor is available, schedule the task; otherwise, re-queue it
+                executor = self.manager.get(executor_id)
+                if executor and executor.is_available():
+                    async with get_tracer().span(
+                        "executor_scheduler.execute_task",
+                        task_id=task.id,
+                        executor_id=executor_id,
+                    ) as span:
+                        t0 = time.perf_counter()
+                        try:
+                            task.mark_running()
+                            result = await executor.execute_task(task)
+                            task.mark_completed(result=result)
+
+                            logger.info(
+                                "Task {} executed by executor {}: {}",
+                                task.id, executor_id, result
+                            )
+
+                            # Executors already return a structured result.
+                            # Preserve it rather than wrapping it multiple times.
+                            duration_ms = (time.perf_counter() - t0) * 1000
+            
+                            span.set_attribute("duration_ms", round(duration_ms, 1))
+                            span.set_attribute(
+                                "status",
+                                (result or {}).get("status", "completed")
+                                if isinstance(result, dict)
+                                else "completed",
+                            )
+            
+                        except Exception as exc:
+                            duration_ms = (time.perf_counter() - t0) * 1000
+                            logger.exception("Executor failed: {}", executor_id)
+                            span.set_error(f"{type(exc).__name__}: {exc}")
+                            span.set_attribute("duration_ms", round(duration_ms, 1))
+                            task.mark_failed(error=str(exc))  # Mark the task as failed
+                    
+                else:
+                    self.queue.append((task, executor_id))
+                    logger.info("Re-queuing task {} for executor {}", task.id, executor_id)
 
     # ------------------------------------------------------------------
     # Queries
@@ -247,6 +284,8 @@ class ExecutorScheduler:
     async def stop(self) -> None:
         if not self._running:
             return
+
+        # TODO: Consider whether we should wait for in-flight tasks to complete or cancel them.
         tracer = get_tracer()
         async with tracer.span("executor_scheduler.stop"):
             await self.manager.stop_all()
@@ -254,6 +293,7 @@ class ExecutorScheduler:
             logger.info("ExecutorScheduler stopped")
 
     async def shutdown(self) -> None:
+        # TODO: Save state of queued tasks to disk or database for recovery on restart
         tracer = get_tracer()
         async with tracer.span("executor_scheduler.shutdown"):
             await self.manager.shutdown_all()
@@ -261,6 +301,25 @@ class ExecutorScheduler:
             self._initialized = False
             logger.info("ExecutorScheduler shutdown complete")
 
+    async def save_state(self) -> Dict[str, Any]:
+        """
+        Save the state of the scheduler, including queued tasks.
+        """
+        # TODO: Implement actual persistence logic (e.g., save to a database or file)
+        with get_tracer().span("executor_scheduler.save_state") as span:
+            span.set_attribute("queue_length", len(self.queue))
+            return {
+                "initialized": self._initialized,
+                "running": self._running,
+                "queue": [
+                    {
+                        "task": self._as_dict(task),
+                        "executor_id": executor_id,
+                    }
+                    for task, executor_id in self.queue
+                ],
+            }
+    
     @property
     def running(self) -> bool:
         return self._running

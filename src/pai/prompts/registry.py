@@ -10,7 +10,7 @@ from typing import Any, Dict, Optional
 import yaml
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 from jinja2.exceptions import UndefinedError
-
+from pai.config.models.prompts import PromptRegistryConfig
 logger = logging.getLogger(__name__)
 
 
@@ -48,17 +48,14 @@ class PromptRegistry:
 
     def __init__(
         self,
-        root: Path | str,
-        *,
-        frozen: bool = False,
-        override_versions: Optional[Dict[str, str]] = None,
+        config: PromptRegistryConfig,
     ) -> None:
-        self.root = Path(root).resolve()
+        self.root = Path(config.root).resolve()
         if not self.root.is_dir():
             raise FileNotFoundError(f"Prompt root not found: {self.root}")
 
-        self.frozen = frozen
-        self.override_versions = override_versions or {}
+        self.frozen = config.frozen
+        self.override_versions = config.override_versions or {}
 
         self._jinja = Environment(
             loader=FileSystemLoader(str(self.root)),

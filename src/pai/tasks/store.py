@@ -29,6 +29,7 @@ class TaskStoreProtocol(Protocol):
         *, status: Optional[TaskStatus] = None,
     ) -> int: ...
     async def clear(self) -> None: ...
+    async def recover_orphaned(self) -> List[Task]: ...
 
 class TaskStore:
     """
@@ -40,9 +41,19 @@ class TaskStore:
     using pai.storage.repositories.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, max_history: int = 1000) -> None:
         self._tasks: Dict[str, Task] = {}
         self._lock = asyncio.Lock()
+        self.max_history = max_history
+
+    def _evict_terminal(self) -> None:
+        """Keep at most ``max_history`` finished tasks (oldest go first); never touches live ones."""
+        finished = [t for t in self._tasks.values() if t.terminal]
+        excess = len(finished) - self.max_history
+        if excess > 0:
+            finished.sort(key=lambda t: t.completed_at or t.created_at)
+            for t in finished[:excess]:
+                del self._tasks[t.id]
 
     async def create(self, task: Task) -> Task:
         async with self._lock:
@@ -52,6 +63,7 @@ class TaskStore:
                 )
 
             self._tasks[task.id] = task
+            self._evict_terminal()
             return task
 
     async def save(self, task: Task) -> Task:
@@ -60,6 +72,7 @@ class TaskStore:
                 raise TaskNotFoundError(task.id)
 
             self._tasks[task.id] = task
+            self._evict_terminal()
             return task
 
     async def upsert(self, task: Task) -> Task:
@@ -136,3 +149,11 @@ class TaskStore:
     async def clear(self) -> None:
         async with self._lock:
             self._tasks.clear()
+
+    async def recover_orphaned(self) -> List[Task]:
+        """
+        Recover tasks that were left in a RUNNING or QUEUED state by a prior
+        process. This is a no-op for the in-memory store because memory is
+        fresh on restart.
+        """
+        return []

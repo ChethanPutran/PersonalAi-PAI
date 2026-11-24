@@ -1,5 +1,5 @@
 id: planning.goal_decomposition
-current: v1.0.0
+current: v1.1.1
 description: >
   Decomposes a user goal into a JSON array of executable TaskSpecs.
   Expects a pre-fetched capability list, optional memory + history
@@ -17,12 +17,27 @@ variables:
   current_time:       "ISO 8601 UTC timestamp"
   chat_capability_id: "Sentinel id for conversational fallback"
   source_device:      "Originating device id (optional)"
-  context_json:       "Pretty-printed context dict (without user_id)"
 
 versions:
   v1.0.0:
     created_at: "2026-11-10"
     notes: "Initial extraction from GoalDecomposer._build_prompt"
+  v1.0.1:
+    created_at: "2026-11-24"
+    notes: "Changed type to name and now type is one of one_shot, long_running, or stream"
   v1.1.0:
-    created_at: "2026-11-14"
-    notes: "Added timezone context — LLM converts local time to UTC"
+    created_at: "2026-11-24"
+    notes: >
+      Rewrite. Removes "type" (TaskSpec.type/timeout now come from the capability manifest) and
+      the trailing ADDITIONAL CONTEXT JSON dump (context_json variable removed). Adds a content
+      safety preamble and spotlighted boundaries around history, memory and the goal. Adds
+      rules: object/array parameters must be real JSON, independent tasks must not depend on
+      each other, scheduling guidance, and AMBIGUITY - ask the user (chat.reply with
+      intent=clarify, question, options) instead of guessing required/enum parameters, with a
+      follow-up-turn rule. Numbering fixed; retry rule kept.
+  v1.1.1:
+    created_at: "2026-11-24"
+    notes: >
+      Relative delays use `after_seconds` (resolved by the server at execution time) instead of
+      the model computing `when` from a clock that is stale after a slow planning call. Adds the
+      "ASK the user if not specified" exception to the never-ask-about-defaults rule.

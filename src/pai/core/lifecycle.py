@@ -36,13 +36,33 @@ from loguru import logger
 from abc import ABC, abstractmethod
 
 from pai.event_bus.bus import EventBus
+from pai.event_bus.events import EventType
 
 class Lifecycle(ABC):
     """Components that participate in the application's startup/shutdown."""
 
     name: str = "component"
     _event_bus: EventBus
-    _emit_tasks: set[asyncio.Task] = set()
+
+    @property
+    def _emit_tasks(self) -> "set[asyncio.Task]":
+        """In-flight fire-and-forget publishes of THIS component.
+
+        (It used to be one class-level set shared by every component of every app instance:
+        tasks from a stopped event loop were kept alive for the life of the process.)
+        """
+        return self.__dict__.setdefault("_emit_tasks_set", set())
+
+    async def drain_emits(self, timeout: float = 1.0) -> None:
+        """Let pending fire-and-forget publishes finish (they are time-boxed), then cancel."""
+        pending = [t for t in self._emit_tasks if not t.done()]
+        if not pending:
+            return
+        _, still = await asyncio.wait(pending, timeout=timeout)
+        for t in still:
+            t.cancel()
+        if still:
+            await asyncio.gather(*still, return_exceptions=True)
 
     
     @abstractmethod
@@ -83,7 +103,7 @@ class Lifecycle(ABC):
 
     def _emit(
         self,
-        event_type: str,
+        event_type: EventType,
         data: Optional[Dict[str, Any]] = None,
         *,
         distributed: bool = False,
@@ -114,7 +134,7 @@ class Lifecycle(ABC):
 
     async def _do_emit(
         self,
-        event_type: str,
+        event_type: str | EventType,
         data: Optional[Dict[str, Any]],
         *,
         distributed: bool,

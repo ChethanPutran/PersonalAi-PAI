@@ -5,6 +5,7 @@ import time
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -13,6 +14,7 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.orm import DeclarativeBase
 
+from pai.config.models.database import DatabaseBackend, DatabaseConfig
 from pai.observability.tracer import get_tracer
 
 
@@ -41,16 +43,31 @@ class Database:
           await s.close()
     """
 
-    def __init__(self, url: str, *, echo: bool = False) -> None:
-        self.url = url
-        self.echo = echo
+    def __init__(self, config: DatabaseConfig) -> None:
+        self.url = config.url
+        self.echo = config.echo
 
         self.engine: AsyncEngine = create_async_engine(
-            url,
-            echo=echo,
+            self.url,
+            echo=self.echo,
             future=True,
             pool_pre_ping=True,
         )
+
+        if self.url.startswith("sqlite"):
+            # Many writers (DAG nodes, chat, tasks, traces) share one file. SQLite's default
+            # rollback journal serializes them and fails fast with "database is locked".
+            # WAL lets readers and one writer run together; busy_timeout makes a writer wait
+            # (up to 5 s) for its turn instead of failing.
+            @event.listens_for(self.engine.sync_engine, "connect")
+            def _sqlite_pragmas(dbapi_conn, _record) -> None:   # pragma: no cover - trivial
+                cur = dbapi_conn.cursor()
+                try:
+                    cur.execute("PRAGMA journal_mode=WAL")
+                    cur.execute("PRAGMA busy_timeout=5000")
+                    cur.execute("PRAGMA synchronous=NORMAL")
+                finally:
+                    cur.close()
 
         self._session_factory: async_sessionmaker[AsyncSession] = (
             async_sessionmaker(
@@ -84,6 +101,10 @@ class Database:
             t0 = time.perf_counter()
             async with self.engine.begin() as connection:
                 await connection.run_sync(Base.metadata.create_all)
+                if self.url.startswith("sqlite"):
+                    # create_all does not add columns to existing tables.
+                    from pai.storage.migrations import upgrade_sqlite_schema
+                    await upgrade_sqlite_schema(connection)
 
             span.set_attribute(
                 "duration_ms",
@@ -172,3 +193,11 @@ class Database:
         tracer = get_tracer()
         async with tracer.span("db.close"):
             await self.engine.dispose()
+
+
+def create_database(config: DatabaseConfig) -> Database:
+    """Create a Database instance from a config."""
+    if config.backend == DatabaseBackend.SQLITE:
+        return Database(config)
+    else:
+        raise ValueError(f"Unsupported database backend: {config.backend}")

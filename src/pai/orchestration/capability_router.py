@@ -17,6 +17,7 @@ process for server plugins.
 """
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
@@ -29,7 +30,7 @@ from pai.devices.models import DeviceStatus
 from pai.observability.tracer import get_tracer
 from pai.orchestration.builtin_capabilities import BuiltinCapabilityRegistry
 from pai.plugins.manager import PluginManager
-from pai.storage.repositories.device_plugin import DevicePluginRepository
+from pai.storage.repositories.device_plugin import NOT_ALLOWED, DevicePluginRepository
 from pai.storage.repositories.plugin import UserPluginRepository
 from pai.common.manager import Manager
 
@@ -72,6 +73,27 @@ class CapabilityTarget:
     is_preferred: bool = False
     score: float = 0.0
     requires_device: bool = True
+    # Version of the plugin THIS target runs. A device keeps the version it installed, so two
+    # devices can offer different capability sets (and schemas) for the same plugin.
+    plugin_version: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class _DeviceInstall:
+    """A plugin installed AND enabled on a device: its version, and what the user allowed there."""
+    version: str
+    #: device-reported {permission: "granted" | "denied" | "pending"}; empty = never reported (unknown)
+    permissions: Dict[str, str] = field(default_factory=dict)
+
+
+def not_allowed_on_device(manifest: Any, reported: Dict[str, str]) -> List[str]:
+    """The permissions this plugin declares that the device says the user has NOT allowed.
+
+    ADVISORY: the device re-checks before every invoke. A permission the device never reported is unknown
+    and blocks nothing, so older apps and platforms that cannot report behave exactly as before.
+    """
+    declared = [str(getattr(p, "value", p)) for p in (getattr(manifest, "permissions", None) or [])]
+    return [p for p in declared if reported.get(p) in NOT_ALLOWED]
 
 
 @dataclass(frozen=True)
@@ -111,8 +133,10 @@ class CapabilityRouter(Manager):
         self.device_manager = device_manager
         self.builtin_registry = builtin_registry
         self._cache: Dict[str, _CacheEntry] = {}
+        self._cache_lock = asyncio.Lock()
         # user_id → list of async callbacks fired on invalidate
         self._on_change: list = []
+        self._callback_tasks: set = set()
 
     def register_change_listener(self, callback) -> None:
         """
@@ -140,6 +164,11 @@ class CapabilityRouter(Manager):
         return bool(is_initialized()) if callable(is_initialized) else False
 
     async def _on_shutdown(self) -> None:                  
+        pending = list(self._callback_tasks)
+        for t in pending:
+            t.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
         self._cache.clear()
         logger.info("CapabilityRouter shutdown complete")
 
@@ -165,13 +194,16 @@ class CapabilityRouter(Manager):
             return
 
         import asyncio
-        loop = asyncio.get_event_loop_policy().get_event_loop()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return                      # no running loop (e.g. during shutdown): nothing to notify
         for cb in self._on_change:
-            try:
-                loop.create_task(cb(user_id))
-            except RuntimeError:
-                # No running loop (e.g. during shutdown) — skip silently
-                pass
+            task = loop.create_task(cb(user_id))
+            # keep a strong reference until done (an unreferenced task can be garbage-collected
+            # mid-run) and let shutdown find it
+            self._callback_tasks.add(task)
+            task.add_done_callback(self._callback_tasks.discard)
 
     # ------------------------------------------------------------------
     # Public API
@@ -253,6 +285,7 @@ class CapabilityRouter(Manager):
                     "device_id": t.device_id,
                     "executor_id": t.executor_id,
                     "device_type": t.device_type,
+                    "plugin_version": t.plugin_version,
                 }
                 for t in targets
             ]
@@ -287,19 +320,72 @@ class CapabilityRouter(Manager):
                     continue
 
                 # ── Plugin: look up schema in the catalog ──
+                # `catalog` holds PluginInfo (lightweight, no schemas).
+                # Use get_manifest() to get the full PluginManifest which
+                # has capability_schemas with parameter definitions.
                 schema_entry = None
+                plugin = None
                 for target in targets:
-                    plugin = catalog.get(target["plugin_id"])
+                    plugin_id_candidate = target["plugin_id"]
+                    plugin = catalog.get(plugin_id_candidate)
+                    # Try full manifest first (has parameters)
+                    # The schema of the version this target actually runs, not the newest one.
+                    manifest = self.plugin_manager.get_manifest(
+                        plugin_id_candidate, target.get("plugin_version"))
+                    if manifest and cap_id in manifest.capability_schemas:
+                        schema_entry = manifest.capability_schemas[cap_id]
+                        # Also attach requires_confirmation and precondition from manifest
+                        cap_spec = manifest.get_capability(cap_id)
+                        if cap_spec:
+                            schema_entry = dict(schema_entry)
+                            schema_entry.setdefault(
+                                "requires_confirmation",
+                                getattr(cap_spec, "requireConfirmation", False),
+                            )
+                            schema_entry.setdefault(
+                                "retryable",
+                                getattr(cap_spec, "retryable", True),
+                            )
+                            # How it runs: from the MANIFEST, resolved onto the plan by the decomposer.
+                            schema_entry.setdefault(
+                                "task_type",
+                                getattr(getattr(cap_spec, "taskType", None), "value", "one_shot"),
+                            )
+                            schema_entry.setdefault(
+                                "timeout_seconds", getattr(cap_spec, "timeoutSeconds", None))
+                            schema_entry.setdefault(
+                                "confirmation_reason",
+                                getattr(cap_spec, "confirmationReason", ""),
+                            )
+                            schema_entry.setdefault(
+                                "precondition",
+                                getattr(cap_spec, "precondition", None),
+                            )
+                        break
+                    # Fallback: check PluginInfo (no schemas, rarely set)
                     if plugin and cap_id in getattr(plugin, "capability_schemas", {}):
                         schema_entry = plugin.capability_schemas[cap_id]
                         break
+
                 if schema_entry is None:
                     schema_entry = {"description": "", "parameters": {}}
                     missing_schema += 1
 
+                plugin_metadata = getattr(plugin, "metadata", None)
+
                 out[cap_id] = {
                     "id": cap_id,
+                    "requires_confirmation": schema_entry.get("requires_confirmation", False),
+                    "confirmation_reason": schema_entry.get("confirmation_reason", ""),
+                    "retryable": schema_entry.get("retryable", True),
+                    "task_type": schema_entry.get("task_type", "one_shot"),
+                    "timeout_seconds": schema_entry.get("timeout_seconds"),
+                    "precondition": schema_entry.get("precondition"),
                     "description": schema_entry.get("description", ""),
+                    "plugin_metadata": {
+                        k: v for k, v in (plugin_metadata or {}).items()
+                        if k in {"allowed_prefixes"}  # whitelist which keys pass through
+                    },
                     "parameters": schema_entry.get("parameters", {}),
                     "targets": targets,
                 }
@@ -322,12 +408,14 @@ class CapabilityRouter(Manager):
     # ------------------------------------------------------------------
 
     async def _get_index(self, user_id: str) -> Dict[str, List[CapabilityTarget]]:
-        entry = self._cache.get(user_id)
-        if entry and (time.time() - entry.built_at) < _CACHE_TTL_SECONDS:
-            return entry.index
+        async with self._cache_lock:
+            entry = self._cache.get(user_id)
+            if entry and (time.time() - entry.built_at) < _CACHE_TTL_SECONDS:
+                return entry.index
 
         index = await self._build_index(user_id)
-        self._cache[user_id] = _CacheEntry(index=index, built_at=time.time())
+        async with self._cache_lock:
+            self._cache[user_id] = _CacheEntry(index=index, built_at=time.time())
         return index
 
     async def _build_index(self, user_id: str) -> Dict[str, List[CapabilityTarget]]:
@@ -433,7 +521,7 @@ class CapabilityRouter(Manager):
             )
             span.set_attribute(
                 "device_plugin_state",
-                {did: sorted(pids) for did, pids in device_plugins.items()},
+                {did: {pid: i.version for pid, i in sorted(pv.items())} for did, pv in device_plugins.items()},
             )
 
             # ---- 5. Cross-product ----
@@ -460,6 +548,7 @@ class CapabilityRouter(Manager):
                                     executor_id=_EXECUTOR_SERVER,
                                     device_type=getattr(device, "device_type", "") or "",
                                     score=self._score(device, plugin),
+                                    plugin_version=plugin.version,
                                 )
                             )
                     continue
@@ -467,7 +556,7 @@ class CapabilityRouter(Manager):
                 # Device plugins: only add targets for devices that have
                 # the plugin installed AND enabled in `device_plugins`.
                 for device_id, device in online.items():
-                    if plugin_id not in device_plugins.get(device_id, set()):
+                    if plugin_id not in device_plugins.get(device_id, {}):
                         skipped.append({
                             "device": device_id,
                             "plugin": plugin_id,
@@ -475,7 +564,37 @@ class CapabilityRouter(Manager):
                         })
                         continue
 
-                    for cap in plugin.capabilities:
+                    # Offer only what the INSTALLED version exposes (e.g. a device still on
+                    # camera 1.0.0 never gets camera.stream that arrived in 2.0.0).
+                    install = device_plugins[device_id][plugin_id]
+                    installed_version = install.version
+                    manifest = self.plugin_manager.get_manifest(plugin_id, installed_version)
+                    if manifest is None:
+                        skipped.append({
+                            "device": device_id, "plugin": plugin_id,
+                            "reason": f"installed version {installed_version} unknown to server",
+                        })
+                        continue
+                    compat = self.plugin_manager.registry.entry_compatibility(
+                        manifest, getattr(device, "app_version", None))
+                    if not compat.compatible:
+                        skipped.append({
+                            "device": device_id, "plugin": plugin_id,
+                            "reason": f"{installed_version}: {compat.reason}",
+                        })
+                        continue
+
+                    # The user has not allowed this plugin's permission ON THAT DEVICE (as the device reports):
+                    # it would refuse every call, so do not offer its capabilities to the planner or agents.
+                    blocked = not_allowed_on_device(manifest, install.permissions)
+                    if blocked:
+                        skipped.append({
+                            "device": device_id, "plugin": plugin_id,
+                            "reason": f"permission not allowed on the device: {', '.join(blocked)}",
+                        })
+                        continue
+
+                    for cap in manifest.capability_names:
                         index.setdefault(cap, []).append(
                             CapabilityTarget(
                                 capability=cap,
@@ -484,6 +603,7 @@ class CapabilityRouter(Manager):
                                 executor_id=_EXECUTOR_DEVICE,
                                 device_type=getattr(device, "device_type", "") or "",
                                 score=self._score(device, plugin),
+                                plugin_version=installed_version,
                             )
                         )
 
@@ -527,18 +647,19 @@ class CapabilityRouter(Manager):
 
     async def _device_enabled_plugin_ids(
         self, device_ids: List[str],
-    ) -> Dict[str, set[str]]:
+    ) -> Dict[str, Dict[str, "_DeviceInstall"]]:
+        """device_id -> {plugin_id: what is installed + what the user allowed} for installed AND enabled plugins."""
         if self._session_factory is None or not device_ids:
-            return {d: set() for d in device_ids}
+            return {d: {} for d in device_ids}
 
-        out: Dict[str, set[str]] = {d: set() for d in device_ids}
+        out: Dict[str, Dict[str, _DeviceInstall]] = {d: {} for d in device_ids}
         session = self._session_factory()
         try:
             repo = DevicePluginRepository(session)
             for device_id in device_ids:
                 for r in await repo.list_for_device(device_id):
                     if r.is_installed and r.enabled_on_device:
-                        out[device_id].add(r.plugin_id)
+                        out[device_id][r.plugin_id] = _DeviceInstall(r.version, dict(r.permissions or {}))
         finally:
             await session.close()
         return out
@@ -646,10 +767,22 @@ class CapabilityRouter(Manager):
 
             installed_somewhere = False
             compatible_somewhere = False
+            not_allowed: Dict[str, List[str]] = {}       # device -> permissions the user has not allowed there
+            allowed_somewhere = False
             for device_id, plugin_set in state.items():
                 if not any(pid in plugin_set for pid in provider_ids):
                     continue
                 installed_somewhere = True
+                for pid in provider_ids:
+                    inst = plugin_set.get(pid)
+                    if inst is None:
+                        continue
+                    manifest = self.plugin_manager.get_manifest(pid, inst.version)
+                    blocked = not_allowed_on_device(manifest, inst.permissions) if manifest else []
+                    if blocked:
+                        not_allowed.setdefault(device_id, []).extend(blocked)
+                    else:
+                        allowed_somewhere = True
                 device = next(d for d in online if d.id == device_id)
                 for plugin in enabled_providers:
                     if self._plugin_supports_device(plugin, device):
@@ -657,6 +790,24 @@ class CapabilityRouter(Manager):
                         break
                 if compatible_somewhere:
                     break
+
+            if installed_somewhere and not_allowed and not allowed_somewhere:
+                names = sorted({p for perms in not_allowed.values() for p in perms})
+                span.set_attribute("stage", "permission_not_allowed_on_device")
+                return CapabilityError(
+                    capability=capability,
+                    reason=(
+                        f"'{capability}' is installed on your device but you have not allowed "
+                        f"{', '.join(repr(n) for n in names)} access there. Allow it in the PAI app "
+                        f"(Plugins) on that device and try again."
+                    ),
+                    detail={
+                        "stage": "permission_not_allowed_on_device",
+                        "providers": provider_ids,
+                        "permissions": names,
+                        "devices": sorted(not_allowed),
+                    },
+                )
 
             stage = (
                 "not_enabled_on_device" if installed_somewhere
@@ -711,7 +862,17 @@ class CapabilityRouter(Manager):
           2. `plugin.package_url` — the reliable signal on PluginInfo
           3. Default to server_executor
         """
-        # 1. Explicit runtime kind (full manifests)
+        # 1. Explicit runtime kind — PluginInfo uses runtimeKind/runtimeSpec;
+        #    legacy objects may use runtime.kind.
+        runtime_kind = getattr(plugin, "runtimeKind", None)
+        if runtime_kind is not None:
+            kind = str(runtime_kind).lower()
+            if "device" in kind or "native" in kind:
+                return _EXECUTOR_DEVICE
+            if "server" in kind:
+                return _EXECUTOR_SERVER
+
+        # Fallback: legacy objects with a .runtime attribute
         runtime = getattr(plugin, "runtime", None)
         if runtime is not None:
             kind = str(getattr(runtime, "kind", "") or "").lower()
@@ -720,8 +881,8 @@ class CapabilityRouter(Manager):
             if kind == "server":
                 return _EXECUTOR_SERVER
 
-        # 2. Downloadable artifact → device plugin
-        if getattr(plugin, "package_url", None):
+        # 2. Downloadable artifact → device plugin (PluginInfo uses packageUrl)
+        if getattr(plugin, "packageUrl", None) or getattr(plugin, "package_url", None):
             return _EXECUTOR_DEVICE
 
         # 3. Everything else runs in-process

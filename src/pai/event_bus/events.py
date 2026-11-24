@@ -2,26 +2,35 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from enum import Enum
+from enum import Enum, StrEnum
 from typing import Any, Dict, Optional
 from uuid import uuid4
 
 
-class EventType(str, Enum):
+class EventType(StrEnum):
     """Built-in PAI event types."""
 
     # Tasks
     TASK_CREATED = "task.created"
     TASK_UPDATED = "task.updated"
     TASK_STARTED = "task.started"
+    TASK_DISPATCHED = "task.dispatched"
     TASK_COMPLETED = "task.completed"
     TASK_FAILED = "task.failed"
     TASK_CANCELLED = "task.cancelled"
+    TASK_CONFIRMATION_REQUESTED = "task.confirmation_requested"
+    TASK_STREAM = "task.stream"
+    TASK_CONTROL_ACK = "task.control_ack"
+    TASK_RETRYING = "task.retrying"
 
     # Memory
     MEMORY_UPDATED = "memory.updated"
     MEMORY_CREATED = "memory.created"
     MEMORY_DELETED = "memory.deleted"
+    MEMORY_STORED = "memory.stored"
+    MEMORY_CONSOLIDATED = "memory.consolidated"
+    MEMORY_MANAGER_INITIALIZED = "memory.memory_manager_initialized"
+
 
     # Plugins
     PLUGIN_LOADED = "plugin.loaded"
@@ -38,18 +47,49 @@ class EventType(str, Enum):
     # Devices
     DEVICE_CONNECTED = "device.connected"
     DEVICE_DISCONNECTED = "device.disconnected"
+    DEVICE_STATUS = "device.status"
+    DEVICE_REGISTERED = "device.registered"
+    DEVICE_UNREGISTERED = "device.unregistered"
+    DEVICE_METADATA_REFRESHED = "device.metadata_refreshed"
+    DEVICE_OWNERSHIP_ASSIGNED = "device.ownership_assigned"
 
     # Execution
     EXECUTION_STARTED = "execution.started"
     EXECUTION_COMPLETED = "execution.completed"
     EXECUTION_FAILED = "execution.failed"
 
+    # Executor
+    EXECUTOR_REGISTERED = "executor.registered"
+    EXECUTOR_UNREGISTERED = "executor.unregistered"
+    EXECUTOR_STATUS = "executor.status"
+    EXECUTOR_ERROR = "executor.error"
+    EXECUTOR_FAILED = "executor.failed"
+    EXECUTOR_STARTED = "executor.started"
+    EXECUTOR_STOPPED = "executor.stopped"
+
     # Plan
     PLAN_CREATING = "plan.creating"
     PLAN_CREATED = "plan.created"
     PLAN_FAILED = "plan.failed"
 
-    
+    # DAG
+    DAG_STARTED = "dag.started"
+    DAG_COMPLETED = "dag.completed"
+    DAG_FAILED = "dag.failed"
+    DAG_ROUND_COMPLETED = "dag.round_completed"  # legacy; scheduler is no longer round-based
+    DAG_TASK_STARTED = "dag.task_started"
+    DAG_TASK_FINISHED = "dag.task_finished"
+
+    # Registry
+    PLUGIN_MANAGER_INITIALIZED = "plugin.plugin_manager_initialized"
+    PLUGIN_CONFIG_UPDATED = "plugin.config_updated"
+    PLUGIN_ERROR_RECORDED = "plugin.error_recorded"
+    PLUGIN_RECONCILED = "plugin.reconciled"
+
+    # Chat
+    CHAT_DELTA = "chat.delta"
+    CHAT_REPLY_DONE = "chat.reply_done"
+    CHAT_STATUS = "chat.status"
 
 
 @dataclass(slots=True)

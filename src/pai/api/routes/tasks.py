@@ -2,15 +2,34 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import StreamingResponse
 
+
+import asyncio
+from loguru import logger
+import contextlib
+from sqlalchemy import select
+
+from pydantic import BaseModel
+
+from pai.api.routes.task_stream import (
+    SessionEventStream, StreamAccess, check_stream_access, parse_resume_point, sse_events, user_task_sse,
+)
+from pai.event_bus.events import Event
+from pai.planning.dag_models import CancelOutcome
+from pai.security.tokens.auth import decode_access_token
 from pai.api.dependencies import get_current_user
 from pai.api.routes.system import _serialize_task
-from pai.app_context import get_orchestrator
+from pai.app_context import PAIAppContext, get_app_context, get_orchestrator
 from pai.orchestration.orchestrator import TaskOrchestrator
-from pai.tasks.lifecycle import InvalidTaskTransition
+from pai.storage.models import ChatSessionModel
+from pai.security.consent.models import ConsentError, GrantRequest
+from pai.api.routes.consents import GrantOut
+from pai.tasks.lifecycle import InvalidTaskTransition, TaskControlError
+from pai.tasks.store import TaskNotFoundError
 from pai.tasks.models import Task, TaskStatus
 
 logger = logging.getLogger(__name__)
@@ -21,6 +40,20 @@ router = APIRouter(prefix="/tasks", tags=["tasks"])
 # ============================================================
 # Helpers
 # ============================================================
+
+class ControlErrorBody(BaseModel):
+    """Body of a 409 from pause / resume / cancel: ``{"detail": {"code", "message"}}``.
+
+    code: ``invalid_state`` | ``control_not_supported`` | ``control_not_acknowledged``.
+    """
+    code: str
+    message: str
+
+
+def _control_conflict(exc: InvalidTaskTransition) -> HTTPException:
+    code = getattr(exc, "code", "invalid_state")
+    message = getattr(exc, "message", None) or str(exc)
+    return HTTPException(409, detail=ControlErrorBody(code=code, message=message).model_dump())
 
 async def _require_owned_task(
     task_id: str,
@@ -93,6 +126,46 @@ async def list_tasks(
 # Get
 # ============================================================
 
+# ============================================================
+# Per-user live task events (SSE) — MUST stay above "/{task_id}"
+# ============================================================
+
+@router.get("/events")
+async def user_task_events(
+    request: Request,
+    after: Optional[int] = Query(default=None, ge=0, description="Resume after this seq (same as Last-Event-ID)"),
+    last_event_id: Optional[str] = Header(default=None, alias="Last-Event-ID"),
+    user_id: str = Depends(get_current_user),
+    context: PAIAppContext = Depends(get_app_context),
+) -> StreamingResponse:
+    """Every ``task.*`` / ``dag.*`` event of the CALLER's tasks, as ``text/event-stream``.
+
+    Frames: ``ready`` (live; ``seq`` = newest), ``resync`` (events were lost: reload the list
+    once), then the events themselves; ``id:`` is a per-user sequence number, so a reconnect
+    with ``Last-Event-ID`` (or ``?after=``) replays exactly what was missed. A ``: keep-alive``
+    comment is sent every 15 s. Auth: ``Authorization: Bearer`` only (no query token).
+    """
+    if not request.headers.get("authorization", "").startswith("Bearer "):
+        raise HTTPException(401, "Bearer token required")
+    log = getattr(context, "task_events", None)
+    if log is None:
+        raise HTTPException(503, "Task event stream unavailable")
+    resume = parse_resume_point(last_event_id, after)
+
+    async def body():
+        async for chunk in user_task_sse(
+            log, user_id, resume,
+            is_disconnected=request.is_disconnected,
+            should_stop=lambda: _stopping(context),
+        ):
+            yield chunk
+
+    return StreamingResponse(
+        body(), media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
+    )
+
+
 @router.get("/{task_id}")
 async def get_task(
     task_id: str,
@@ -120,10 +193,9 @@ async def pause_task(
     try:
         task = await orchestrator.task_manager.pause(task_id)
     except InvalidTaskTransition as exc:
-        # Wrong state — e.g. trying to pause a completed task.
-        # 409 (conflict) so the client can distinguish this from a
-        # generic 400 validation error.
-        raise HTTPException(409, str(exc)) from exc
+        # Wrong state, or the capability can't pause / the device didn't acknowledge.
+        # 409 with a machine-readable code so the client can say why.
+        raise _control_conflict(exc) from exc
     except Exception as exc:
         logger.exception("pause failed for task %s", task_id)
         raise HTTPException(500, f"Pause failed: {exc}")
@@ -145,7 +217,7 @@ async def resume_task(
     try:
         task = await orchestrator.task_manager.resume(task_id)
     except InvalidTaskTransition as exc:
-        raise HTTPException(409, str(exc)) from exc
+        raise _control_conflict(exc) from exc
     except Exception as exc:
         logger.exception("resume failed for task %s", task_id)
         raise HTTPException(500, f"Resume failed: {exc}")
@@ -174,6 +246,8 @@ async def cancel_task(
 
     try:
         task = await orchestrator.task_manager.cancel(task_id)
+    except InvalidTaskTransition as exc:
+        raise _control_conflict(exc) from exc
     except Exception as exc:
         logger.exception("cancel failed for task %s", task_id)
         raise HTTPException(500, f"Cancel failed: {exc}")
@@ -181,3 +255,266 @@ async def cancel_task(
     if task is None:
         raise HTTPException(404, "Task not found")
     return _serialize_task(task)
+
+
+@router.post("/{task_id}/retry")
+async def retry_task(
+    task_id: str,
+    user_id: str = Depends(get_current_user),
+    orchestrator: TaskOrchestrator = Depends(get_orchestrator),
+) -> Dict[str, Any]:
+    """Retry a FAILED task (grants one more attempt). Only the owner may retry."""
+    await _require_owned_task(task_id, user_id, orchestrator)
+    try:
+        task = await orchestrator.task_manager.retry(task_id)
+    except InvalidTaskTransition as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return _serialize_task(task)
+
+
+# ============================================================
+# Kill ONE task of a running DAG (independent tasks keep running)
+# ============================================================
+
+class DagTaskCancelResponse(BaseModel):
+    request_id: str
+    task_id: str
+    outcome: CancelOutcome
+
+
+@router.post("/dag/{request_id}/tasks/{spec_id}/cancel", response_model=DagTaskCancelResponse)
+async def cancel_dag_task(
+    request_id: str,
+    spec_id: str,
+    user_id: str = Depends(get_current_user),
+    orchestrator: TaskOrchestrator = Depends(get_orchestrator),
+) -> DagTaskCancelResponse:
+    dag = orchestrator.dag_scheduler
+    owner = dag.owner_of(request_id)
+    if owner is None:
+        raise HTTPException(404, "No running plan with that request id")
+    if owner != user_id:
+        raise HTTPException(403, "Not your plan")
+    outcome = await dag.cancel(request_id, spec_id)
+    if outcome == CancelOutcome.NOT_FOUND:
+        raise HTTPException(404, "Task not found in plan")
+    if outcome == CancelOutcome.NOT_CANCELLABLE:
+        raise HTTPException(409, detail=ControlErrorBody(
+            code="control_not_supported",
+            message="This action can't be cancelled once it has started.").model_dump())
+    return DagTaskCancelResponse(request_id=request_id, task_id=spec_id, outcome=outcome)
+
+
+# ============================================================
+# HIL (Confirm / Cancel) — for tasks that require human approval
+# ============================================================
+class ConfirmResponse(BaseModel):
+    """Result of POST /tasks/{id}/confirm: the (now running) task plus the grant it created."""
+    task: Dict[str, Any]
+    confirmed: bool = True
+    grant: Optional[GrantOut] = None
+
+
+@router.post("/{task_id}/confirm")
+async def confirm_task(
+    task_id: str,
+    body: Optional[GrantRequest] = Body(default=None),
+    context: PAIAppContext = Depends(get_app_context),
+    user_id: str = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Approve a task that is waiting for confirmation.
+
+    Body (all optional; empty = approve this run only)::
+
+        {"scope": "once" | "session" | "always",
+         "binding": {"mode": "any" | "exact" | "keys", "keys": [...]},
+         "days": 90}
+
+    ``session`` / ``always`` store a grant so the same action does not ask again. The server
+    decides what may be remembered (risk and the manifest's ``maxGrantScope``): asking for more
+    is a 422. Nothing here is taken on the client's word except the user's own choice.
+    """
+    tm = context.orchestrator.task_manager
+    try:
+        task = await tm.get(task_id)
+    except TaskNotFoundError:
+        task = None
+    if task is None:
+        raise HTTPException(404, "Task not found")
+    if task.user_id != user_id:
+        raise HTTPException(403, "Not your task")
+    if task.status != TaskStatus.PAUSED or task.confirmation is None:
+        raise HTTPException(409, detail=ControlErrorBody(
+            code="invalid_state",
+            message=f"Task is {task.status.value} and is not waiting for confirmation.").model_dump())
+
+    try:
+        grant = await context.orchestrator.security_manager.grant_from_confirmation(
+            task, user_id=user_id, request=body or GrantRequest())
+    except ConsentError as exc:
+        raise HTTPException(exc.status, detail=ControlErrorBody(
+            code=exc.code, message=exc.message).model_dump()) from exc
+    try:
+        task = await tm.resume(task_id)
+    except TaskControlError as exc:
+        raise HTTPException(409, detail=ControlErrorBody(code=exc.code, message=exc.message).model_dump()) from exc
+    return {**ConfirmResponse(
+        task=_serialize_task(task), grant=GrantOut.from_grant(grant) if grant else None,
+    ).model_dump(mode="json"),
+        # kept for older clients that read these two fields
+        "task_id": task_id, "status": "confirmed"}
+
+
+@router.post("/{task_id}/deny")
+async def deny_task(
+    task_id: str,
+    context: PAIAppContext = Depends(get_app_context),
+    user_id: str = Depends(get_current_user),
+) -> Dict[str, Any]:
+    tm = context.orchestrator.task_manager
+    task = await tm.get(task_id)
+    if task is None:
+        raise HTTPException(404, "Task not found")
+    if task.user_id != user_id:
+        raise HTTPException(403, "Not your task")
+    await tm.cancel(task_id, reason="User denied confirmation")
+    return {"task_id": task_id, "status": "denied"}
+
+
+@router.websocket("/{session_id}/stream")
+async def chat_status_stream(websocket: WebSocket, session_id: str) -> None:
+    """Live status updates for an in-flight chat request.
+
+    The client opens this once when the chat screen mounts, and keeps
+    it open across messages. Each `POST /chat` made while the WS is
+    open produces a stream of `chat.status` events on the event bus;
+    this route filters them by session_id and forwards the payload.
+
+    Auth: `?token=<jwt>` on the query string (same pattern as the
+    device WS at `/devices/{id}/ws`).
+
+    Ownership: a not-yet-existing session is allowed — the first POST
+    creates it under the caller. An existing session owned by another
+    user is rejected with 4403.
+    """
+    # ── 1. Auth ──
+    token = websocket.query_params.get("token")
+    user_id: Optional[str] = None
+    if token:
+        try:
+            user_id = decode_access_token(token)
+        except Exception as exc:
+            logger.debug("chat stream token decode failed: %s", exc)
+
+    if user_id is None:
+        await websocket.close(code=4401)
+        return
+
+    context = websocket.app.state.context
+    event_bus = context.orchestrator.event_bus
+
+    # ── 2. Ownership + availability ──
+    access = await check_stream_access(context, session_id, user_id)
+    if access == StreamAccess.FORBIDDEN:
+        await websocket.accept()
+        await websocket.send_json({
+            "type": "error",
+            "message": "Session belongs to another user",
+        })
+        await websocket.close(code=4403)
+        return
+
+    if access == StreamAccess.UNAVAILABLE:
+        await websocket.accept()
+        await websocket.send_json({
+            "type": "error",
+            "message": "Status stream unavailable",
+        })
+        await websocket.close(code=4511)
+        return
+
+    # ── 3. Subscribe (shared with the SSE route) ──
+    stream = SessionEventStream(event_bus, session_id)
+    await stream.__aenter__()
+
+    await websocket.accept()
+    await websocket.send_json({"type": "connected", "session_id": session_id})
+
+    # ── 4. Drain queue → WS, detect disconnect ──
+    async def _forward() -> None:
+        while True:
+            item = await stream.next()
+            await websocket.send_json(item.ws_payload())
+
+    async def _wait_disconnect() -> None:
+        while True:
+            try:
+                await websocket.receive_text()
+            except WebSocketDisconnect:
+                return
+
+    try:
+        forward_task = asyncio.create_task(_forward())
+        disconnect_task = asyncio.create_task(_wait_disconnect())
+        waiters = {forward_task, disconnect_task}
+        flag = getattr(context, "shutting_down", None)
+        if flag is not None:                     # server stopping: end the stream, don't wait for the client
+            waiters.add(asyncio.create_task(flag.wait()))
+        await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+        for t in waiters:
+            t.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await t
+    except Exception:
+        logger.exception("chat status stream error for %s", session_id)
+    finally:
+        await stream.__aexit__(None, None, None)    # best-effort unsubscribe
+        with contextlib.suppress(Exception):
+            await websocket.close()
+
+
+def _stopping(context: Any) -> bool:
+    flag = getattr(context, "shutting_down", None)
+    return flag is not None and flag.is_set()
+
+
+# ============================================================
+# SSE twin of the status WebSocket (same events, same access rule)
+# ============================================================
+
+@router.get("/{session_id}/events")
+async def task_events_sse(
+    session_id: str,
+    request: Request,
+    user_id: str = Depends(get_current_user),
+    context: PAIAppContext = Depends(get_app_context),
+) -> StreamingResponse:
+    """Live ``task.*`` / ``dag.*`` events for a chat session as ``text/event-stream``.
+
+    Auth: ``Authorization: Bearer`` / cookie, or ``?token=`` (for ``EventSource``, which
+    cannot set headers; tokens in URLs end up in logs, so prefer the header).
+    """
+    access = await check_stream_access(context, session_id, user_id)
+    if access == StreamAccess.FORBIDDEN:
+        raise HTTPException(403, "Session belongs to another user")
+    if access == StreamAccess.UNAVAILABLE:
+        raise HTTPException(503, "Status stream unavailable")
+
+    stream = SessionEventStream(context.orchestrator.event_bus, session_id)
+    await stream.__aenter__()
+
+    async def body():
+        try:
+            async for chunk in sse_events(
+                stream, session_id=session_id, is_disconnected=request.is_disconnected,
+                should_stop=lambda: _stopping(context),
+            ):
+                yield chunk
+        finally:
+            await stream.__aexit__(None, None, None)
+
+    return StreamingResponse(
+        body(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
+    )

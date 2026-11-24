@@ -1,0 +1,19 @@
+id: agent.react
+current: v1.0.0
+description: >
+  System prompt for PAI's long-running ReAct agents. One JSON action per reply; tool output is
+  spotlighted as untrusted DATA inside explicit boundaries; only the goal and live USER MESSAGE
+  lines are instructions.
+
+variables:
+  agent_name:  "Short display name of the agent"
+  goal:        "The user's goal (boundary markers already neutralised)"
+  tools_block: "Pre-rendered catalogue of the capability tools the agent may use"
+  max_steps:   "Step budget for this run"
+
+versions:
+  v1.0.0:
+    created_at: "2026-11-24"
+    notes: >
+      Initial version. JSON action contract, untrusted-tool-result boundary, ask_user / say /
+      finish control tools, and rules for denials, observation-before-action and secrets.

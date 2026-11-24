@@ -84,7 +84,11 @@ class ChatRepository:
             async with self._session_factory() as s:
                 yield s
         else:
-            assert self._bound_session is not None
+            if self._bound_session is None:
+                raise RuntimeError(
+                    "ChatRepository: no session available — "
+                    "provide either a bound session or a session_factory"
+                )
             yield self._bound_session
 
     # ---- sessions ----

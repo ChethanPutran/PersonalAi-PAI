@@ -1,0 +1,196 @@
+package com.pai.agent.bridge
+
+import com.pai.agent.permissions.PermissionManager
+import com.pai.agent.plugins.CAbiPluginModule
+import com.pai.agent.plugins.DefaultPluginContext
+import com.pai.agent.plugins.DynamicLoader
+import com.pai.agent.plugins.KotlinPluginLoader
+import com.pai.agent.plugins.NativeModuleRegistry
+import com.pai.agent.plugins.PluginManager
+import io.flutter.plugin.common.MethodCall
+import io.flutter.plugin.common.MethodChannel
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import android.os.Build
+import android.app.Activity
+
+class PluginChannel(
+    private val activity: Activity,
+    private val scope: CoroutineScope,
+    private val permissionManager: PermissionManager,
+) : MethodChannel.MethodCallHandler {
+
+    companion object {
+        const val CHANNEL = "pai/plugin_runtime"
+    }
+
+    private val registry = NativeModuleRegistry()
+    private val manager = PluginManager(registry, permissionManager)
+    private val kotlinLoader = KotlinPluginLoader(activity.applicationContext)
+
+    override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
+        when (call.method) {
+
+            "listModules" -> result.success(registry.list())
+
+            "isModuleAvailable" -> {
+                val name = call.argument<String>("nativeModule")!!
+                result.success(registry.contains(name))
+            }
+
+            // ---- Install: dlopen → read manifest → request perms → register ----
+            // ---- Unified load: native OR kotlin ----
+            "loadNativeModule" -> {
+                val path = call.argument<String>("artifactPath")!!
+                val type = call.argument<String>("type") ?: "native"
+                val entrypoint = call.argument<String>("entrypoint") ?: ""
+                scope.launch(Dispatchers.IO) {
+                    val out = when (type) {
+                        "kotlin" -> installKotlinModule(path, entrypoint)
+                        else -> installNativeModule(path)
+                    }
+                    Dispatchers.Main.run { result.success(out) }
+                }
+            }
+
+            "getAbi" -> {
+                val abi = when {
+                    Build.SUPPORTED_ABIS.isNotEmpty() -> Build.SUPPORTED_ABIS[0]
+                    else -> Build.CPU_ABI ?: "unknown"
+                }
+                result.success(abi)
+            }
+
+            "unloadNativeModule" -> {
+                val name = call.argument<String>("nativeModule")!!
+                val mod = registry.get(name)
+
+                mod?.destroy()
+                registry.unregister(name)
+                result.success(null)
+            }
+
+            "invoke" -> {
+                val module = call.argument<String>("nativeModule")!!
+                val capability = call.argument<String>("capability")!!
+                @Suppress("UNCHECKED_CAST")
+                val params = call.argument<Map<String, Any?>>("parameters") ?: emptyMap()
+                scope.launch {
+                    result.success(manager.invoke(module, capability, params))
+                }
+            }
+
+            // Called from a "Grant permissions" button when the user
+            // denied at install time and wants to retry.
+            "requestPermissions" -> {
+                val name = call.argument<String>("nativeModule")!!
+                val mod = registry.get(name)
+                if (mod == null) {
+                    result.success(mapOf("ok" to false, "error" to "module_not_loaded"))
+                    return
+                }
+                scope.launch {
+                    result.success(permissionManager.request(mod.permissions))
+                }
+            }
+            
+            "debugRegistry" -> {
+                result.success(registry.list().associateWith { "<registered>" })
+            }
+
+            else -> result.notImplemented()
+        }
+    }
+
+    /** Install flow: safe to call from IO; suspends on the permission dialog. */
+    // -------- Native (.so) path — unchanged behavior --------
+    private suspend fun installNativeModule(path: String): Map<String, Any?> {
+        val handle = try {
+            DynamicLoader.nativeCreateModule(path)
+        } catch (t: Throwable) {
+            return mapOf("ok" to false, "error" to (t.message ?: "dlopen_failed"))
+        }
+        if (handle == 0L) {
+            return mapOf("ok" to false, "error" to "dlopen_failed")
+        }
+
+        val module = CAbiPluginModule(handle)
+        val manifestPerms = module.permissions
+
+        // Ask for ONLY what this plugin needs. Dialog runs on Main.
+        val permResult = permissionManager.request(manifestPerms)
+        val granted = permResult["ok"] == true
+
+        if (!granted) {
+            // Rollback: unload, do not register. The Dart installer
+            // shows a message like "Camera plugin needs: Camera, Microphone".
+            module.destroy()
+            return mapOf(
+                "ok" to false,
+                "error" to "permissions_denied",
+                "name" to module.name,
+                "capabilities" to module.capabilities,
+                "permissions" to manifestPerms,
+                "denied" to (permResult["denied"] ?: emptyList<String>()),
+            )
+        }
+
+        registry.register(module)
+        return mapOf(
+            "ok" to true,
+            "name" to module.name,
+            "capabilities" to module.capabilities,
+            "permissions" to manifestPerms,
+        )
+    }
+
+    // -------- Kotlin (.dex) path --------
+    private suspend fun installKotlinModule(
+        dexPath: String,
+        className: String,
+    ): Map<String, Any?> {
+        if (className.isBlank()) {
+            return mapOf("ok" to false, "error" to "missing_entrypoint_class")
+        }
+
+        val loaded = kotlinLoader.load(dexPath, className).getOrElse { t ->
+            return mapOf(
+                "ok" to false,
+                "error" to "kotlin_load_failed: ${t.message ?: t::class.simpleName}",
+            )
+        }
+
+        // Attach context BEFORE reading perms — the plugin may want
+        // to inspect its own storage during the permission phase.
+        val ctx = DefaultPluginContext(
+            activity.applicationContext,
+            pluginId = loaded.name,
+            pluginVersion = "0.0.0",
+        )
+        loaded.attach(ctx)
+
+        val manifestPerms = loaded.permissions
+        val permResult = permissionManager.request(manifestPerms)
+
+        if (permResult["ok"] != true) {
+            loaded.destroy()
+            return mapOf(
+                "ok" to false,
+                "error" to "permissions_denied",
+                "name" to loaded.name,
+                "capabilities" to loaded.capabilities,
+                "permissions" to manifestPerms,
+                "denied" to (permResult["denied"] ?: emptyList<String>()),
+            )
+        }
+
+        registry.register(loaded)
+        return mapOf(
+            "ok" to true,
+            "name" to loaded.name,
+            "capabilities" to loaded.capabilities,
+            "permissions" to manifestPerms,
+        )
+    }
+}

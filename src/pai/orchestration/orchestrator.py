@@ -3,6 +3,7 @@ Top-level AI task orchestrator.
 """
 from __future__ import annotations
 
+import hashlib
 import asyncio
 import time
 from typing import Any, Dict, Optional
@@ -10,14 +11,19 @@ from typing import Any, Dict, Optional
 from loguru import logger
 
 from pai.agents.manager import AgentManager
+from pai.config.models.orchestration import OrchestratorConfig
+from pai.event_bus.events import EventType
+from pai.llm.breakdown import CAPABILITIES, HISTORY, MEMORY, TOOL_DATA, USER_PROMPT, prompt_breakdown
 from pai.llm.models import LLMMessage, LLMRequest
 from pai.notifications.push_service import PushService
 from pai.planning.models import TaskSpec
+from pai.plugins.store import PluginArtifactStore
 from pai.prompts.registry import PromptRegistry
 from pai.prompts.registry import PromptRegistry
 from pai.prompts.tracker import PromptVersionTracker
 from pai.scheduler.scheduler_service import SchedulerService
-from pai.security.llm_guard import PromptGuard
+from pai.security.guards.llm_guard import PromptGuard
+from pai.security.guards.plugin_guard import PluginGuard
 from pai.storage.repositories.chat import ChatRepository
 from pai.tasks.task_tracker import TaskTracker
 from pai.devices.manager import DeviceManager
@@ -25,7 +31,6 @@ from pai.event_bus.bus import EventBus
 from pai.executors.manager import ExecutorManager
 from pai.memory.manager import MemoryManager
 from pai.observability.tracer import get_tracer
-from pai.orchestration.authorization import AuthorizationManager
 from pai.orchestration.capability_resolver import CapabilityResolver
 from pai.orchestration.capability_router import CapabilityRouter
 from pai.orchestration.device_selector import DeviceSelector
@@ -38,10 +43,16 @@ from pai.orchestration.commands import (
     CommandResult,
     default_command_registry,
 )
-from pai.orchestration.task_runner import TaskRunner
+from pai.orchestration.idempotency import IdempotencyPolicy, IdempotencyRegistry
+from pai.orchestration.streaming import ChatDeltaEvent, ChatReplyDoneEvent, ReplySink
+from pai.planning.dag_models import DagResult, DagStatus
+from pai.security.guards.stream_guard import StreamingSanitizer
 from pai.planning.dag_scheduler import DAGScheduler
 from pai.planning.planner import Planner
 from pai.plugins.manager import PluginManager
+from pai.common.enums.permission import Origin
+from pai.security.authorization.context import ScopeContext
+from pai.security.authorization.decision import DecisionEffect
 from pai.security.manager import SecurityManager
 from pai.tasks.manager import TaskManager
 from pai.common.manager import Manager
@@ -68,21 +79,26 @@ _RETRY_PATTERNS = [
 ]
 
 
+def _clip_clarify(value: Any, limit: int) -> str:
+    """Single-line, boundary-escaped, length-clipped text for the clarification block."""
+    from pai.security.guards.llm_guard import BOUNDARY_ESCAPE_RE, BOUNDARY_REPLACEMENT
+    text = " ".join(str(value or "").split())[:limit]
+    return BOUNDARY_ESCAPE_RE.sub(BOUNDARY_REPLACEMENT, text)
+
+
 def _looks_like_retry(text: str) -> bool:
     return any(p.search(text) for p in _RETRY_PATTERNS)
 
 class OrchestrationError(RuntimeError):
     pass
 
-class OrchestratorConfig(BaseModel):
-    """Orchestrator configuration."""
-    goal_tokens_trace_size: int = Field(default=200)
-    memory_recall_limit: int = Field(default=5)
-    memory_block_max_size: int = Field(default=800)
-    tool_summary_block_max_size: int = Field(default=800)
-    prompt_trace_max_size: int = Field(default=800)
-    chat_reply_max_tokens: int = Field(default=800)
-    chat_reply_temperature: float = Field(default=0.7)
+
+def action_idempotency_key(request_id: str, capability: str, params: Dict[str, Any]) -> str:
+    """Stable key for a direct action: same request + capability + canonical params."""
+    canonical = json.dumps(params or {}, sort_keys=True, separators=(",", ":"), default=str)
+    digest = hashlib.sha256(canonical.encode()).hexdigest()[:16]
+    return f"{request_id}:{capability}:{digest}"
+
 
 class TaskOrchestrator(Manager):
     name="TaskOrchestrator"
@@ -93,14 +109,13 @@ class TaskOrchestrator(Manager):
         planning_engine: Planner,
         task_manager: TaskManager,
         device_manager: DeviceManager,
+        plugin_artifact_store:PluginArtifactStore,
         plugin_manager: PluginManager,
         security_manager: SecurityManager,
         executor_manager: ExecutorManager,
         agent_manager: AgentManager,
         capability_resolver: CapabilityResolver,
-        task_runner: TaskRunner,
         capability_router: CapabilityRouter,
-        authorization_manager: AuthorizationManager,
         device_selector: DeviceSelector,
         event_bus: EventBus,
         memory_manager: MemoryManager,
@@ -110,9 +125,11 @@ class TaskOrchestrator(Manager):
         push_service: PushService,
         prompt_registry: PromptRegistry,          
         prompt_tracker: PromptVersionTracker,    
-        command_registry: Optional[CommandRegistry] = None,   
+        plugin_guard: PluginGuard,
+        command_registry: Optional[CommandRegistry] = None,
+        prompt_guard: PromptGuard, 
         orchestrator_config: OrchestratorConfig = OrchestratorConfig(),
-        prompt_guard: Optional[PromptGuard] = None,
+        
 
     ):
         super().__init__(event_bus=event_bus)
@@ -120,6 +137,8 @@ class TaskOrchestrator(Manager):
         self.planner = planning_engine
         self.task_manager = task_manager
         self.agent_manager = agent_manager
+        self.plugin_artifact_store = plugin_artifact_store
+        self.plugin_guard = plugin_guard 
         self.device_manager = device_manager
         self.plugin_manager = plugin_manager
         self.security_manager = security_manager
@@ -127,9 +146,7 @@ class TaskOrchestrator(Manager):
         self.memory_manager = memory_manager
         self.capability_router = capability_router
         self.capability_resolver = capability_resolver
-        self.authorization_manager = authorization_manager
         self.device_selector = device_selector
-        self.task_runner = task_runner
         self.dag_scheduler = dag_scheduler
         self.chat_repo = chat_repo
         self.push_service = push_service
@@ -138,7 +155,6 @@ class TaskOrchestrator(Manager):
         self.command_registry = (                               
             command_registry or default_command_registry()
         )
-        self._tracker = TaskTracker()
         self._initialized = False
         self.goal_tokens_trace_size = orchestrator_config.goal_tokens_trace_size
         self.memory_recall_limit = orchestrator_config.memory_recall_limit
@@ -148,7 +164,10 @@ class TaskOrchestrator(Manager):
         self.chat_reply_max_tokens = orchestrator_config.chat_reply_max_tokens
         self.chat_reply_temperature = orchestrator_config.chat_reply_temperature
         self.scheduler_service = scheduler_service
-        self.prompt_guard = prompt_guard or PromptGuard()
+        self.prompt_guard = prompt_guard
+        self._tracker = TaskTracker()
+        # Goal-level idempotency for POST /chat (Idempotency-Key header).
+        self.idempotency: IdempotencyRegistry = IdempotencyRegistry(IdempotencyPolicy())
     
     async def initialize(self) -> None:
         # ── 3. Sanity: every persisting manager has a session_factory ──
@@ -162,10 +181,8 @@ class TaskOrchestrator(Manager):
             ("executor_manager",      self.executor_manager),
             ("agent_manager",         self.agent_manager),
             ("memory_manager",        self.memory_manager),
-            ("authorization_manager", self.authorization_manager),
             ("capability_router",     self.capability_router),
             ("capability_resolver",   self.capability_resolver),
-            ("task_runner",           self.task_runner),
             ("dag_scheduler",         self.dag_scheduler),
         ]
 
@@ -335,7 +352,14 @@ class TaskOrchestrator(Manager):
         agent_id: Optional[str] = None,
         source_device_id: Optional[str] = None,
         context: Optional[Dict[str, Any]] = None,
+        request_id: Optional[str] = None,
+        reply_sink: Optional[ReplySink] = None,
     ) -> Dict[str, Any]:
+        """``request_id``: pass the client's Idempotency-Key so task-level idempotency
+        (request_id:spec_id) lines up with the goal-level one.
+
+        ``reply_sink``: receives the assistant's reply incrementally (sanitized) while it is
+        generated. ``chat.delta`` events are also published on the bus either way."""
 
         if not self._initialized:
             await self.initialize()
@@ -344,7 +368,7 @@ class TaskOrchestrator(Manager):
             raise ValueError("Goal cannot be empty")
 
     
-        # ---- Built-in slash command? Bypass the whole pipeline. ---- NEW
+        # ---- Built-in slash command? Bypass the whole pipeline. 
         if self.command_registry.is_command(goal):
             return await self._handle_command(
                 raw=goal.strip(),
@@ -362,6 +386,16 @@ class TaskOrchestrator(Manager):
             goal=goal,
             metadata=context or {},
         )
+        if request_id:
+            execution_context.request_id = request_id
+        if execution_context.origin is None:
+            # Who started this: a person typing, a person speaking, or an agent acting alone.
+            if agent_id:
+                execution_context.origin = Origin.AGENT_AUTONOMOUS
+            elif (context or {}).get("mode") == "voice":
+                execution_context.origin = Origin.VOICE
+            else:
+                execution_context.origin = Origin.USER_DIRECT
 
         logger.info(
             "Orchestrating request={} user={} goal={!r}",
@@ -430,7 +464,7 @@ class TaskOrchestrator(Manager):
                         "source_device_id": source_device_id,
                     },
                 )
-                self._emit("chat.status",
+                self._emit(EventType.CHAT_STATUS,
                     {
                     "session_id":execution_context.session_id,
                     "request_id":execution_context.request_id,
@@ -464,7 +498,7 @@ class TaskOrchestrator(Manager):
                 "Created plan={} with {} tasks",
                 plan_id, len(task_specs),
             )
-            self._emit( "chat.status", {
+            self._emit(EventType.CHAT_STATUS, {
                 "session_id":execution_context.session_id,
                 "request_id":execution_context.request_id,
                 "stage":"planned",
@@ -502,6 +536,7 @@ class TaskOrchestrator(Manager):
                     plan=plan,
                     task_specs=task_specs,
                     context=execution_context,
+                    reply_sink=reply_sink,
                 )
                 exec_span.set_attribute(
                     "status", result.get("status", "unknown"),
@@ -565,7 +600,7 @@ class TaskOrchestrator(Manager):
             )
             trace_session.set_status(result.get("status", "completed"))
 
-            self._emit("chat.status",{
+            self._emit(EventType.CHAT_STATUS,{
                 "session_id":execution_context.session_id,
                 "request_id":execution_context.request_id,
                 "stage":result.get("status", "done"),
@@ -584,6 +619,7 @@ class TaskOrchestrator(Manager):
         plan: Any,
         task_specs: list[TaskSpec],
         context: ExecutionContext,
+        reply_sink: Optional[ReplySink] = None,
     ) -> Dict[str, Any]:
 
         tracer = get_tracer()
@@ -603,7 +639,7 @@ class TaskOrchestrator(Manager):
 
         # ---------- Phase 1: tool tasks ----------
         if tool_tasks:
-            self._emit("chat.status",{
+            self._emit(EventType.CHAT_STATUS,{
                 "session_id":context.session_id,
                 "request_id":context.request_id,
                 "stage":"executing",
@@ -616,39 +652,37 @@ class TaskOrchestrator(Manager):
                 plan_id=self._get_id(plan),
                 task_count=len(tool_tasks),
             ) as tools_span:
-                if self.dag_scheduler is None:
-                    logger.warning(
-                        "DAG Scheduler unavailable; running tool tasks sequentially"
+               
+                try:
+                    dag_result = await self.dag_scheduler.execute(
+                        tool_tasks,
+                        context=context,
                     )
-                    tool_result = await self._execute_sequential(tool_tasks, context)
-                else:
-                    try:
-                        tool_result = await self.dag_scheduler.execute(
-                            tool_tasks,
-                            context=context,
-                        )
-                    except Exception as exc:
-                        logger.exception("DAG execution failed: {}", exc)
-                        await self._publish("plan.failed", {
-                            "request_id": context.request_id,
-                            "session_id": context.session_id,               
-                            "plan_id": self._get_id(plan),
-                            "status": "failed",
-                            "error": str(exc),
-                        })
-                        raise OrchestrationError(
-                            f"DAG execution failed: {exc}"
-                        ) from exc
+                except Exception as exc:
+                    logger.exception("DAG execution failed: {}", exc)
+                    await self._publish("plan.failed", {
+                        "request_id": context.request_id,
+                        "session_id": context.session_id,               
+                        "plan_id": self._get_id(plan),
+                        "status": "failed",
+                        "error": str(exc),
+                    })
+                    dag_result = DagResult(
+                        status=DagStatus.FAILED,
+                        failed=[self._get_id(t) for t in tool_tasks],
+                    )
 
-                all_results.extend(tool_result.get("results", []))
-                all_completed.extend(tool_result.get("completed", []))
-                all_failed.extend(tool_result.get("failed", []))
+                # Seam: the plan-level result is still the legacy dict shape
+                # (consumed by chat routes / memory), so convert here once.
+                all_results.extend(r.model_dump(mode="json") for r in dag_result.results)
+                all_completed.extend(dag_result.completed)
+                all_failed.extend(dag_result.failed + dag_result.skipped)
                 tools_span.set_attribute("completed", len(all_completed))
                 tools_span.set_attribute("failed", len(all_failed))
 
         # ---------- Phase 2: chat task (always runs last) ----------
         for chat_task in chat_tasks:
-            self._emit("chat.status",{
+            self._emit(EventType.CHAT_STATUS,{
                 "session_id":context.session_id,
                 "request_id":context.request_id,
                 "stage":"replying",
@@ -662,6 +696,7 @@ class TaskOrchestrator(Manager):
                     task=chat_task,
                     context=context,
                     prior_results=all_results,
+                    reply_sink=reply_sink,
                 )
                 all_results.append({
                     "task_id": chat_id,
@@ -721,8 +756,9 @@ class TaskOrchestrator(Manager):
         task: Any,
         context: ExecutionContext,
         prior_results: list,
+        reply_sink: Optional[ReplySink] = None,
     ) -> str:
-        """Generate a natural-language reply via the LLM.
+        """Generate a natural-language reply via the LLM (streamed).
 
         Injects:
         • Live capabilities   — ground truth about what's installable
@@ -746,11 +782,24 @@ class TaskOrchestrator(Manager):
             task_dict = self._to_dict(task)
             params = task_dict.get("parameters") or {}
             tone = params.get("tone", "friendly")
+            # Clarification turn: the planner (LLM or its code safety net) asked us to put ONE
+            # question to the user. Params are plan output, so they are sanitized and clipped
+            # here and rendered inside a boundary the template treats as data.
+            clarify = str(params.get("intent") or "") == "clarify"
+            clarify_question, clarify_options = "", ""
+            if clarify:
+                clarify_question = _clip_clarify(params.get("question"), 300)
+                opts = params.get("options")
+                if isinstance(opts, (list, tuple)):
+                    clarify_options = ", ".join(
+                        _clip_clarify(o, 60) for o in list(opts)[:10] if o is not None)
 
             # Retry intent: when the user says "try again" / "what happened"
             # / "why did it fail", we surface the previous attempt from
             # *this* session in the memory block. Otherwise it stays excluded.
             is_retry = _looks_like_retry(goal or "")
+            modality = "voice" if (context.metadata or {}).get("mode") == "voice" else "text"
+            span.set_attribute("modality", modality)
             span.set_attribute("tone", tone)
             span.set_attribute("is_retry", is_retry)
 
@@ -857,9 +906,17 @@ class TaskOrchestrator(Manager):
                 prior_results_block=prior_results_block,
                 tone=tone,
                 is_retry=is_retry,
+                modality=modality,
+                intent="clarify" if clarify else "reply",
+                clarify_question=clarify_question,
+                clarify_options=clarify_options,
             )
             span.set_attribute("prompt", prompt[:self.prompt_trace_max_size])
             span.set_attribute("prompt_length", len(prompt))
+            prompt_tokens_by_part = prompt_breakdown(prompt, {
+                CAPABILITIES: capability_block, HISTORY: history_block, MEMORY: memory_block,
+                TOOL_DATA: prior_results_block, USER_PROMPT: goal})
+            span.set_attribute("prompt_tokens_estimate", prompt_tokens_by_part)
 
             # ── 5b. Track version (non-fatal) ──
             await self.prompt_tracker.record(
@@ -877,37 +934,69 @@ class TaskOrchestrator(Manager):
             )
             
 
+            # ── 6. Stream the reply; sanitize incrementally (post-LLM guard) ──
+            sanitizer = StreamingSanitizer(self.prompt_guard)
+            finish_reason: Optional[str] = None
+            usage = None
+            seq = 0
+
+            async def _out(piece: str) -> None:
+                nonlocal seq
+                if not piece:
+                    return
+                seq += 1
+                if reply_sink is not None:
+                    try:
+                        await reply_sink.on_delta(piece)
+                    except Exception as exc:        # a slow/broken consumer must not kill the reply
+                        logger.warning("reply_sink.on_delta failed: {}", exc)
+                await self._publish(EventType.CHAT_DELTA, ChatDeltaEvent(
+                    session_id=context.session_id, request_id=context.request_id,
+                    seq=seq, delta=piece).model_dump(mode="json"))
+
             try:
-                # Use `generate()` instead of `complete()` here because
-                # we want `finish_reason` and `usage` in the trace.
-                # `complete()` returns only the text, hiding truncation.
-                llm_response = await self.planner.llm.generate_request(LLMRequest(
+                async for chunk in self.planner.llm.stream_request(LLMRequest(
                     messages=[LLMMessage(role="user", content=prompt)],
                     temperature=self.chat_reply_temperature,
                     max_tokens=self.chat_reply_max_tokens,
-                ))
+                    breakdown=prompt_tokens_by_part,
+                ), route="chat"):
+                    if chunk.delta:
+                        await _out(sanitizer.feed(chunk.delta))
+                    if chunk.finish_reason:
+                        finish_reason = chunk.finish_reason
+                    if chunk.usage is not None:
+                        usage = chunk.usage
+                await _out(sanitizer.flush())
             except Exception as exc:
                 span.set_error(f"llm_failed: {exc}")
                 raise
 
-            raw_reply = llm_response.content or ""
+            if sanitizer.needs_fallback():
+                await _out(sanitizer.fallback_reply)
+                reply = sanitizer.fallback_reply
+            else:
+                reply = sanitizer.text.strip()
+            span.set_attribute("guard.response.tool_calls_stripped", sanitizer.stats.tool_calls_stripped)
+            span.set_attribute("guard.response.secrets_redacted", sanitizer.stats.secrets_redacted)
+            span.set_attribute("guard.response.jailbreak_success", sanitizer.stats.jailbreak_markers > 0)
 
-            # ── 6b. SANITIZE THE RESPONSE (post-LLM) ──
-            sanitized = self.prompt_guard.sanitize_response(
-                raw_text=raw_reply,
-                span=span,
-                request_id=context.request_id,
-            )
-            reply = sanitized.clean_text
+            if reply_sink is not None:
+                try:
+                    await reply_sink.on_done(reply)
+                except Exception as exc:
+                    logger.warning("reply_sink.on_done failed: {}", exc)
+            await self._publish(EventType.CHAT_REPLY_DONE, ChatReplyDoneEvent(
+                session_id=context.session_id, request_id=context.request_id,
+                text=reply).model_dump(mode="json"))
 
-            finish_reason = llm_response.finish_reason
             span.set_attribute("reply", reply)
             span.set_attribute("reply_length", len(reply))
             span.set_attribute("finish_reason", finish_reason)
-            if llm_response.usage is not None:
-                span.set_attribute("prompt_tokens", llm_response.usage.prompt_tokens)
-                span.set_attribute("completion_tokens", llm_response.usage.completion_tokens)
-                span.set_attribute("total_tokens", llm_response.usage.total_tokens)
+            if usage is not None:
+                span.set_attribute("prompt_tokens", usage.prompt_tokens)
+                span.set_attribute("completion_tokens", usage.completion_tokens)
+                span.set_attribute("total_tokens", usage.total_tokens)
 
             if finish_reason == "length":
                 logger.warning(
@@ -919,85 +1008,10 @@ class TaskOrchestrator(Manager):
                 "Chat reply generated: request={} length={} finish_reason={} "
                 "sanitized=%s",
                 context.request_id, len(reply), finish_reason,
-                sanitized.tool_calls_stripped or sanitized.secrets_redacted,
+                sanitizer.stats.tool_calls_stripped or sanitizer.stats.secrets_redacted,
             )
             return reply
          
-    async def _execute_sequential(
-        self,
-        task_specs: list[Any],
-        context: ExecutionContext,
-    ) -> Dict[str, Any]:
-
-        tracer = get_tracer()
-
-        async with tracer.span(
-            "orchestrator.execute_sequential",
-            task_count=len(task_specs),
-        ) as seq_span:
-
-            results = []
-            completed = []
-            failed = []
-
-            remaining = {
-                self._get_id(task): task
-                for task in task_specs
-            }
-
-            while remaining:
-                progress = False
-
-                for task_id, task in list(remaining.items()):
-                    task_dict = self._to_dict(task)
-                    dependencies = task_dict.get("depends_on", []) or []
-
-                    if not all(dependency in completed for dependency in dependencies):
-                        continue
-
-                    progress = True
-                    capability = task_dict.get("capability") or task_dict.get("type")
-
-                    async with tracer.span(
-                        f"seq.task:{capability}",
-                        task_id=task_id,
-                        capability=capability,
-                    ) as task_span:
-                        try:
-                            result = await self.task_runner.run(
-                                task, context=context,
-                            )
-                            results.append(result)
-                            completed.append(task_id)
-                            task_span.set_attribute("status", "completed")
-                        except Exception as exc:
-                            logger.exception("Task {} failed", task_id)
-                            failed.append(task_id)
-                            task_span.set_error(f"{type(exc).__name__}: {exc}")
-                            results.append({
-                                "task_id": task_id,
-                                "status": "failed",
-                                "error": str(exc),
-                            })
-
-                    del remaining[task_id]
-
-                if not progress:
-                    seq_span.set_error("deadlock")
-                    raise OrchestrationError(
-                        "Unable to make progress executing task DAG"
-                    )
-
-            status = "failed" if failed else "completed"
-            seq_span.set_attribute("status", status)
-
-            return {
-                "request_id": context.request_id,
-                "status": status,
-                "results": results,
-                "completed": completed,
-                "failed": failed,
-            }
 
     # =============================================================
     # DIRECT CAPABILITY API
@@ -1012,6 +1026,8 @@ class TaskOrchestrator(Manager):
         device_id: Optional[str] = None,
         session_id: Optional[str] = None,
         source_device_id: Optional[str] = None,
+        request_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
     ) -> Dict[str, Any]:
 
         params = params or {}
@@ -1019,9 +1035,31 @@ class TaskOrchestrator(Manager):
         context = await self.context_manager.create_context(
             user_id=user_id,
             session_id=session_id,
+            agent_id=agent_id,          # set when an agent is acting: authorization + audit attribute it
             source_device_id=source_device_id,
             goal=capability,
         )
+        if request_id:
+            context.request_id = request_id
+
+        # One (request, capability, params) -> one task. A repeated call joins the
+        # existing task instead of executing the action a second time.
+        action_key = action_idempotency_key(context.request_id, capability, params)
+        existing = await self.task_manager.find_by_idempotency_key(
+            action_key, user_id=context.user_id, session_id=context.session_id)
+        if existing is not None:
+            logger.info("execute_action: joining existing task {} (key={})", existing.id, action_key)
+            joined = await self.task_manager.join_existing(existing, wait=True)
+            return {
+                "status": "completed" if existing.status.value == "completed" else existing.status.value,
+                "task_id": existing.id,
+                "capability": capability,
+                "plugin_id": existing.plugin,
+                "device_id": existing.device_id,
+                "executor_id": existing.executor_id,
+                "result": joined,
+                "idempotent_replay": True,
+            }
 
         tracer = get_tracer()
 
@@ -1050,8 +1088,20 @@ class TaskOrchestrator(Manager):
                     user_id=user_id,
                 )
                 res_span.set_attribute(
-                    "plugin", plugin_resolution.plugin_name,
+                    "plugin", plugin_resolution.plugin_id,
                 )
+
+            # Create task specification
+            task_spec = TaskSpec(
+                name=f"execute_{capability}",
+                input="Task input for capability execution",
+                capability=capability,
+                parameters=params
+            )
+            task_spec.retryable = self.task_manager.manifest_retryable(plugin_resolution, task_spec)
+            for attr, value in self.task_manager.manifest_execution(plugin_resolution).items():
+                setattr(task_spec, attr, value)
+
 
             # ---- Select device ----
             async with tracer.span(
@@ -1062,58 +1112,68 @@ class TaskOrchestrator(Manager):
                 target = await self.device_selector.select(
                     user_id=user_id,
                     capability=capability,
-                    task={
-                        "type": capability,
-                        "capability": capability,
-                        "parameters": params,
-                        "device_id": device_id,
-                    },
+                    task_spec=task_spec,
                     preferred_device=device_id,
+                    targets=plugin_resolution.targets,
                 )
                 sel_span.set_attribute("device_id", target.device_id)
                 sel_span.set_attribute("executor_id", target.executor_id)
 
             # ---- Authorize ----
+            # Same rule as TaskRunner: only plugin capabilities (target.requires_device) go through
+            # device+plugin authorization. Built-ins are system-provided (no installable plugin to
+            # be "enabled"), so they skip it exactly as they do on the planner path.
+            authorization = None
             async with tracer.span(
                 "action.authorize",
                 capability=capability,
                 device_id=target.device_id,
+                builtin=not target.requires_device,
             ):
-                await self.authorization_manager.authorize(
-                    user_id=user_id,
-                    capability=capability,
-                    device_id=target.device_id,
-                    plugin_name=plugin_resolution.plugin_name,
-                    task={
-                        "type": capability,
-                        "parameters": params,
-                    },
-                )
+                if target.requires_device:
+                    authorization = await self.security_manager.authorize(
+                        user_id=user_id,
+                        plugin_id=plugin_resolution.plugin_id,
+                        capability=capability,
+                        device_id=target.device_id,
+                        plugin_manifest=plugin_resolution.plugin_manifest,
+                        parameters=params,
+                        scope=ScopeContext.from_execution_context(context).with_device(target.device_id),
+                        task_id=None,
+                        source_device_id=source_device_id,
+                        agent_id=context.agent_id,
+                        session_id=context.session_id,
+                        origin=context.origin or Origin.AGENT_AUTONOMOUS,
+                        trace_id=context.request_id
+                    )
+                    if authorization.effect == DecisionEffect.DENY:
+                        raise PermissionError(f"Authorization denied: {authorization.reason}")
 
             # ---- Create + submit task ----
             async with tracer.span(
                 "action.create_task",
                 capability=capability,
             ):
-                runtime_task = await self.task_manager.create_initialized(
-                    input="Task input for capability execution",
-                    task_type=capability,
-                    capability=capability,
-                    device_id=target.device_id,
-                    executor_id=target.executor_id,
-                    parameters=params,
-                    user_id=user_id,
+                runtime_task = await self.task_manager.create_task(
+                    task_spec,
+                    user_id=context.user_id,
                     session_id=context.session_id,
-                    timeout=context.timeout,
-                    max_retries=context.max_retries,
+                    executor_id=target.executor_id,
+                    device_id=target.device_id,
+                    idempotency_key=action_key,
+                    controls=self.task_manager.controls_for(
+                        task_spec.capability, plugin_resolution.plugin_manifest),
                     metadata={
-                        "plugin": plugin_resolution.plugin_name,
+                        "plugin_id": plugin_resolution.plugin_id,
                         "request_id": context.request_id,
                         "session_id": context.session_id,
                         "user_id": context.user_id,
                         "source_device_id": context.source_device_id,
                     },
                 )
+                runtime_task.plugin = runtime_task.plugin or plugin_resolution.plugin_id
+                if authorization is not None:             # built-ins have none (see above)
+                    await self.task_manager.apply_authorization(runtime_task, authorization, context)
 
             async with tracer.span(
                 "action.submit_task",
@@ -1134,7 +1194,7 @@ class TaskOrchestrator(Manager):
                 "status": "completed",
                 "task_id": self._get_id(runtime_task),
                 "capability": capability,
-                "plugin": plugin_resolution.plugin_name,
+                "plugin_id": plugin_resolution.plugin_id,
                 "device_id": target.device_id,
                 "executor_id": target.executor_id,
                 "result": result,
@@ -1171,6 +1231,7 @@ class TaskOrchestrator(Manager):
                         user_id=user_id,
                         session_id=session_id,
                         request_id=request_id,
+                        success=success,
                         capabilities=capabilities,
                     )
             except Exception as exc:
@@ -1266,7 +1327,7 @@ class TaskOrchestrator(Manager):
             "plugin_manager": await self.plugin_manager.get_status(user_id=user_id),
             "executor_manager": await self.executor_manager.get_status(user_id=user_id),
             "capability_resolver": await self.capability_resolver.get_status(user_id=user_id),
-            "authorization_manager": await self.authorization_manager.get_status(user_id=user_id),
+            "security_manager": await self.security_manager.get_status(user_id=user_id),
             "device_selector": await self.device_selector.get_status(user_id=user_id),
         }
 
@@ -1304,41 +1365,51 @@ class TaskOrchestrator(Manager):
         # 2. Shut down components in reverse initialization order.
         #    Dependents go before dependencies so nothing is still
         #    reading a closed backend.
+        # task_manager BEFORE executor_manager: stopping the executors first would cancel the
+        # in-flight device calls while the TaskManager is not yet "shutting down", and those
+        # tasks would be recorded as user-cancelled instead of staying recoverable.
         ordered = [
             "dag_scheduler",
-            "task_runner",
+            "task_manager",
             "capability_resolver",
             "capability_router",
-            "authorization_manager",
             "memory_manager",
             "agent_manager",
             "executor_manager",
-            "task_manager",
             "security_manager",
             "plugin_manager",
             "device_manager",
-            "event_bus", 
+            "context_manager",
+            "llm",              # closes provider HTTP / SDK clients (see _shutdown_managers)
+            "event_bus",
         ]
         await self._shutdown_managers(ordered)
 
         logger.info("TaskOrchestrator shutdown complete")
 
+    _SHUTDOWN_STEP_TIMEOUT = 8.0
+
     async def _shutdown_managers(self, names: list[str]) -> None:
         """Best-effort shutdown of named components. Never raises."""
         for name in names:
-            mgr = getattr(self, name, None)
+            mgr = self.planner.llm if name == "llm" else getattr(self, name, None)
             if mgr is None:
                 continue
             try:
                 if name == "executor_manager":
-                    await mgr.shutdown_all()
+                    call = mgr.shutdown_all()
+                elif name == "llm":
+                    call = mgr.aclose()
                 else:
                     shutdown = getattr(mgr, "shutdown", None)
                     if shutdown is None:
                         continue
-                    result = shutdown()
-                    if asyncio.iscoroutine(result):
-                        await result
+                    call = shutdown()
+                if asyncio.iscoroutine(call):
+                    # Bounded: one stuck component must not hold the whole shutdown hostage.
+                    await asyncio.wait_for(call, timeout=self._SHUTDOWN_STEP_TIMEOUT)
+            except asyncio.TimeoutError:
+                logger.error("shutdown of {} timed out after {}s", name, self._SHUTDOWN_STEP_TIMEOUT)
             except Exception as exc:
                 logger.warning(
                     "Failed to shut down {}: {}: {}",

@@ -8,18 +8,23 @@ from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
 from uuid import uuid4
 
+from pai.common.enums.device import DeviceArchitecture
+from pai.config.models.devices import DeviceConfig
 from pai.devices.connection import DeviceConnection
 from pai.devices.models import (
     DeviceFilter,
     DeviceInfo,
+    DeviceMessage,
     DevicePlatform,
     DeviceRegistration,
+    DeviceRegistrationInfo,
     DeviceStatus,
     DeviceType,
 )
 from pai.devices.registry import DeviceRegistry
 from pai.devices.utils import _normalize_status, _device_summary
 from pai.event_bus.bus import EventBus
+from pai.event_bus.events import EventType
 from pai.observability.tracer import get_tracer
 from pai.storage.repositories.device import DeviceRepository
 from pai.common.manager import Manager
@@ -27,8 +32,6 @@ from pai.common.manager import Manager
 # ============================================================================
 # Helpers
 # ============================================================================
-
-
 
 
 # ============================================================================
@@ -48,7 +51,8 @@ class DeviceManager(Manager):
     def __init__(
         self,
         session_factory: Optional[Callable[[], AsyncSession]],
-        event_bus:EventBus
+        event_bus: EventBus,
+        config: Optional[DeviceConfig] = None,
     ) -> None:
         super().__init__(session_factory=session_factory, event_bus=event_bus)
         self.registry = DeviceRegistry()
@@ -72,7 +76,6 @@ class DeviceManager(Manager):
             self._capability_router.invalidate(user_id)
         except Exception as exc:
             logger.warning("Router invalidation failed: {}", exc)
-
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -145,14 +148,17 @@ class DeviceManager(Manager):
                         id=r.id,
                         name=r.name or "",
                         user_id=r.user_id,
-                        device_type= DeviceType(r.device_type) if r.device_type else DeviceType.UNKNOWN,
+                        device_type=DeviceType(
+                            r.device_type) if r.device_type else DeviceType.UNKNOWN,
                         status=_normalize_status(r.status),
                         app_version=r.app_version or "",
                         runtime_version=r.runtime_version or "",
-                        platform= DevicePlatform(r.platform) if r.platform else DevicePlatform.UNKNOWN,
+                        platform=DevicePlatform(
+                            r.platform) if r.platform else DevicePlatform.UNKNOWN,
                         platform_version=r.platform_version or "",
                         os_version=r.os_version or "",
-                        architecture=r.architecture or "",
+                        architecture=DeviceArchitecture(
+                            r.architecture) if r.architecture else DeviceArchitecture.UNKNOWN,
                         hostname=r.hostname or "",
                         capabilities=r.capabilities or [],
                     )
@@ -180,6 +186,10 @@ class DeviceManager(Manager):
                 "Loaded {} of {} devices from DB ({} skipped)",
                 len(loaded), len(records), len(failed),
             )
+
+    async def mark_seen(self, device_id: str) -> None:
+        """Persist last_seen without touching status or metadata."""
+        await self._touch_device(device_id)
 
     async def get_status(self, *, user_id: Optional[str] = None) -> Dict[str, Any]:
         """
@@ -210,21 +220,71 @@ class DeviceManager(Manager):
 
     async def register(
         self,
-        registration: DeviceRegistration | DeviceInfo,
-        *,
+        registration: DeviceRegistration,
         user_id: str,
-        connection_type: Optional[str] = None,
-        connection_config: Optional[Dict[str, Any]] = None,
     ) -> DeviceInfo:
         """
         Register a device. Does NOT establish a network connection —
         the WebSocket endpoint does that later via `attach_connection`.
         """
+
+        # ---------- Reuse existing (in-memory) device ----------
+        if registration.device_id:
+            existing = await self.get(registration.device_id)
+
+            if existing is not None:
+                try:
+                    await self.refresh_metadata(
+                        registration.device_id, registration.device, user_id=user_id,
+                    )
+                except AttributeError:
+                    logger.debug(
+                        "device_manager.refresh_metadata not available; "
+                        "skipping refresh"
+                    )
+
+                logger.info(
+                    "Device re-registered: %s (%s)",
+                    registration.device_id, existing.name,
+                )
+                return existing
+
+            # ---------- Not in memory — restore into memory with the caller's id ----------
+            logger.info(
+                "Existing device id %s not in memory — restoring with caller's id",
+                registration.device_id,
+            )
+
+            device = await self._register_new_device(registration, user_id=user_id)
+
+            logger.info("Device restored: %s (%s)", device.id, device.name)
+
+            return device
+
+        # ---------- Mint a new device ----------
+        device = await self._register_new_device(registration, user_id=user_id)
+
+        logger.info("Device registered: %s (%s)", device.id, device.name)
+
+        # Best-effort ownership attach (in case register() didn't persist it).
+        await self.assign_user(device.id, user_id)
+
+        return device
+
+
+    async def _register_new_device(
+            self,
+            registration: DeviceRegistration,
+            user_id: str,):
+
+        connection_type = registration.connection_type
+        connection_config = registration.connection_config
         tracer = get_tracer()
         async with tracer.span(
             "device_manager.register",
             user_id=user_id,
             connection_type=connection_type,
+            connection_config=connection_config,
         ) as span:
 
             if isinstance(registration, DeviceRegistration):
@@ -234,17 +294,13 @@ class DeviceManager(Manager):
                     user_id=user_id,
                     **data,
                 )
-                connection_type = registration.connection_type or connection_type
-                connection_config = (
-                    registration.connection_config or connection_config
-                )
             else:
                 device = registration
                 if not device.id:
                     device.id = str(uuid4())
                 device.user_id = user_id
 
-            device.status = _normalize_status(getattr(device, "status", None))
+            device.status = DeviceStatus.ONLINE
 
             span.set_attribute("device_id", device.id)
             span.set_attribute("device_type", device.device_type)
@@ -263,7 +319,7 @@ class DeviceManager(Manager):
             # 2. Mirror in memory
             await self.registry.register(device)
 
-            await self._publish("device.registered", {
+            await self._publish(EventType.DEVICE_REGISTERED, {
                 "device_id": device.id,
                 "user_id": user_id,
                 "platform": str(device.platform),
@@ -276,7 +332,7 @@ class DeviceManager(Manager):
 
             logger.info("Device registered: {} ({})", device.id, device.name)
             return device
-
+        
     async def _persist_upsert(self, device) -> None:
         async def _do(session):
             repo = DeviceRepository(session)
@@ -284,7 +340,8 @@ class DeviceManager(Manager):
                 device_id=device.id,
                 name=getattr(device, "name", "") or "",
                 user_id=getattr(device, "user_id", None),
-                device_type=getattr(device, "device_type", "unknown") or "unknown",
+                device_type=getattr(device, "device_type",
+                                    "unknown") or "unknown",
                 platform=getattr(device, "platform", "unknown") or "unknown",
                 platform_version=getattr(device, "platform_version", "") or "",
                 os_version=getattr(device, "os_version", "") or "",
@@ -319,10 +376,10 @@ class DeviceManager(Manager):
                 span.set_attribute("db_delete_failed", True)
 
             removed = await self.registry.unregister(device_id)
-            await self._publish("device.unregistered", {
+            await self._publish(EventType.DEVICE_UNREGISTERED, {
                 "device_id": device_id,
                 "user_id": user_id,
-                })
+            })
             span.set_attribute("removed", removed)
             self._invalidate_router(user_id)
             return removed
@@ -463,10 +520,16 @@ class DeviceManager(Manager):
             self._connections[device_id] = connection
 
             status_value = DeviceStatus.ONLINE.value
+
             await self.registry.update_status(device_id, status_value)
             await self.registry.heartbeat(device_id)
 
-            await self._publish("device.connected", {
+            await self._publish(EventType.DEVICE_STATUS, {
+                "device_id": device_id,
+                "status": "online",
+                "user_id": getattr(device, "user_id", None),
+            })
+            await self._publish(EventType.DEVICE_CONNECTED, {
                 "device_id": device_id,
                 "user_id": getattr(device, "user_id", None),
                 "device_type": getattr(device, "device_type", None),
@@ -516,17 +579,21 @@ class DeviceManager(Manager):
         if (row.user_id is None):
             span.set_error("device_not_owned")
             raise KeyError(f"Device {device_id} not owned by any user")
-        
+
         info = DeviceInfo(
             id=row.id,
             name=row.name or "",
             user_id=row.user_id,
-            device_type=DeviceType(row.device_type) if row.device_type else DeviceType.UNKNOWN,
-            status=DeviceStatus(row.status) if row.status else DeviceStatus.UNKNOWN,
-            platform= DevicePlatform(row.platform) if row.platform else DevicePlatform.UNKNOWN,
+            device_type=DeviceType(
+                row.device_type) if row.device_type else DeviceType.UNKNOWN,
+            status=DeviceStatus(
+                row.status) if row.status else DeviceStatus.UNKNOWN,
+            platform=DevicePlatform(
+                row.platform) if row.platform else DevicePlatform.UNKNOWN,
             platform_version=row.platform_version or "",
             os_version=row.os_version or "",
-            architecture=row.architecture or "",
+            architecture=DeviceArchitecture(
+                row.architecture) if row.architecture else DeviceArchitecture.UNKNOWN,
             hostname=row.hostname or "",
             app_version=row.app_version or "",
             runtime_version=row.runtime_version or "",
@@ -561,9 +628,14 @@ class DeviceManager(Manager):
 
             try:
                 await self.registry.update_status(device_id, status_value)
-                await self._publish("device.disconnected", {
+                await self._publish(EventType.DEVICE_DISCONNECTED, {
                     "device_id": device_id,
                     "user_id": user_id,
+                })
+                await self._publish(EventType.DEVICE_STATUS, {
+                    "device_id": device_id,
+                    "status": "offline",
+                    "user_id": getattr(device, "user_id", None),
                 })
             except Exception as exc:
                 logger.warning(
@@ -630,7 +702,7 @@ class DeviceManager(Manager):
     # ------------------------------------------------------------------
 
     async def send(
-        self, device_id: str, payload: Dict[str, Any],
+        self, device_id: str, payload: DeviceMessage,
     ) -> Dict[str, Any]:
         tracer = get_tracer()
 
@@ -638,10 +710,12 @@ class DeviceManager(Manager):
         if connection is None or not connection.connected:
             raise RuntimeError(f"Device {device_id} is not connected")
 
-        capability = payload.get("capability") or payload.get("type", "unknown")
-        plugin = (
-            payload.get("plugin") or payload.get("plugin_id") or "unknown"
-        )
+        # Callers pass DeviceMessage models; the transport and tracing want plain JSON.
+        if hasattr(payload, "model_dump"):
+            payload = payload.model_dump(mode="json")
+
+        capability = payload.get("capability") or "unknown"
+        plugin = payload.get("plugin") or payload.get("plugin_id") or "unknown"
 
         tracer.log_tool_call(
             capability=capability,
@@ -706,53 +780,61 @@ class DeviceManager(Manager):
             logger.info("Device manager stopped")
 
     async def refresh_metadata(
-        self, device_id: str, update: dict, user_id: str | None = None,
+        self,
+        device_id: str,
+        update: DeviceRegistrationInfo,
+        user_id: str | None = None,
     ) -> None:
         tracer = get_tracer()
+
         async with tracer.span(
             "device_manager.refresh_metadata",
             device_id=device_id,
-            updated_keys=list(update.keys()),
+            updated_keys=list(update.model_fields_set),
         ):
             device = await self.registry.get(device_id)
             if device is None:
                 return
 
-            if "status" in update:
-                update["status"] = _normalize_status(update["status"])
+            updates = update.model_dump(exclude_none=True)
 
-            for k, v in update.items():
-                if hasattr(device, k) and v is not None:
-                    setattr(device, k, v)
+            changed = {
+                key: value
+                for key, value in updates.items()
+                if getattr(device, key, None) != value
+            }
+
+            if not changed and user_id is None:
+                return
+
+            for key, value in changed.items():
+                if hasattr(device, key):
+                    setattr(device, key, value)
 
             if self._session_factory is not None:
+
                 async def _do(session):
                     repo = DeviceRepository(session)
-                    # Only overwrite user_id when one is explicitly supplied.
-                    # Previously this passed user_id=None on every refresh, which
-                    # nulled the owner column and broke WS ownership checks.
-                    kwargs = dict(
-                        device_id=device_id,
-                        name=update.get("name") or getattr(device, "name", ""),
-                        device_type=update.get("device_type") or getattr(device, "device_type", "unknown"),
-                        platform=update.get("platform") or getattr(device, "platform", "unknown"),
-                        platform_version=update.get("platform_version") or getattr(device, "platform_version", ""),
-                        os_version=update.get("os_version") or getattr(device, "os_version", ""),
-                        architecture=update.get("architecture") or getattr(device, "architecture", ""),
-                        hostname=update.get("hostname") or getattr(device, "hostname", ""),
-                        app_version=update.get("app_version") or getattr(device, "app_version", ""),
-                        runtime_version=update.get("runtime_version") or getattr(device, "runtime_version", ""),
-                    )
+
+                    kwargs = {
+                        field: getattr(device, field)
+                        for field in DeviceRegistrationInfo.model_fields
+                    }
+
+                    kwargs["device_id"] = device_id
+
                     if user_id is not None:
                         kwargs["user_id"] = user_id
+
                     await repo.upsert(**kwargs)
-                    
+
                 await self._with_session(_do)
-                self._emit("device.metadata_refreshed", {
-                    "device_id": device_id,
-                    "user_id": user_id,
-                    "updated_keys": list(update.keys()),    
-                })
+
+            self._emit(EventType.DEVICE_METADATA_REFRESHED, {
+                "device_id": device_id,
+                "user_id": user_id,
+                "updated_keys": list(changed.keys()),
+            })
 
             self._invalidate_router(user_id)
 
@@ -791,7 +873,7 @@ class DeviceManager(Manager):
                     "assign_user: device {} not in registry — DB only",
                     device_id,
                 )
-            self._emit("device.ownership_assigned", {
+            self._emit(EventType.DEVICE_OWNERSHIP_ASSIGNED, {
                 "device_id": device_id,
                 "user_id": user_id
             })

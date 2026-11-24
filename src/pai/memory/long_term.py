@@ -4,14 +4,22 @@ import json
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+from pai.utils.sqlite_path import sqlite_path
 from typing import Any, Dict, List, Optional, Tuple
 
 import aiosqlite
 from loguru import logger
 
+from pai.config.models.memory import LongTermBackend, LongTermMemoryConfig
 from pai.memory.models import MemoryRecord
-from pai.memory.utils import _json_default
+from pai.memory.utils import _json_default, keyword_tokens, like_pattern
 from pai.observability.tracer import get_tracer
+
+
+def _require_user(user_id: Optional[str]) -> None:
+    if not user_id:
+        raise ValueError("user_id is required: memory reads are always scoped to one user")
 
 
 class LongTermMemory:
@@ -19,8 +27,8 @@ class LongTermMemory:
     Persistent structured memory for user preferences and stable facts.
     """
 
-    def __init__(self, db_path: str = "./data/long_term.db"):
-        self.db_path = Path(db_path)
+    def __init__(self, config: LongTermMemoryConfig):
+        self.db_path = sqlite_path(config.db_url)
         self._conn: Optional[aiosqlite.Connection] = None
 
     async def _check_connection(self) -> aiosqlite.Connection:
@@ -203,18 +211,12 @@ class LongTermMemory:
             key=key,
             user_id=user_id,
         ) as span:
+            _require_user(user_id)
             conn = await self._check_connection()
-
-            if user_id is None:
-                cursor = await conn.execute(
-                    "SELECT * FROM memories WHERE key = ?",
-                    (key,),
-                )
-            else:
-                cursor = await conn.execute(
-                    "SELECT * FROM memories WHERE key = ? AND user_id = ?",
-                    (key, user_id),
-                )
+            cursor = await conn.execute(
+                "SELECT * FROM memories WHERE key = ? AND user_id = ?",
+                (key, user_id),
+            )
 
             row = await cursor.fetchone()
             span.set_attribute("found", row is not None)
@@ -225,8 +227,11 @@ class LongTermMemory:
         query: str,
         limit: int = 10,
         *,
-        user_id: Optional[str] = None,
+        user_id: Optional[str],
     ) -> List[MemoryRecord]:
+        """One user's preferences whose key or value mentions any keyword of ``query``;
+        falls back to their most important ones when the query has no keywords."""
+        _require_user(user_id)
         tracer = get_tracer()
         async with tracer.span(
             "long_term.get_relevant",
@@ -235,36 +240,45 @@ class LongTermMemory:
             limit=limit,
         ) as span:
             conn = await self._check_connection()
-            pattern = f"%{query}%"
-
+            tokens = keyword_tokens(query)
             t0 = time.perf_counter()
-            if user_id is None:
+            if tokens:
+                clause = " OR ".join(
+                    "key LIKE ? ESCAPE '\\' OR value LIKE ? ESCAPE '\\'" for _ in tokens)
+                params: list = []
+                for t in tokens:
+                    params += [like_pattern(t), like_pattern(t)]
                 cursor = await conn.execute(
-                    """
+                    f"""
                     SELECT * FROM memories
-                    WHERE key LIKE ?
+                    WHERE user_id = ? AND ({clause})
                     ORDER BY importance DESC, updated_at DESC
                     LIMIT ?
                     """,
-                    (pattern, limit),
+                    (user_id, *params, limit * 3),
                 )
             else:
                 cursor = await conn.execute(
                     """
-                    SELECT * FROM memories
-                    WHERE user_id = ? AND key LIKE ?
-                    ORDER BY importance DESC, updated_at DESC
-                    LIMIT ?
+                    SELECT * FROM memories WHERE user_id = ?
+                    ORDER BY importance DESC, updated_at DESC LIMIT ?
                     """,
-                    (user_id, pattern, limit),
+                    (user_id, limit * 3),
                 )
-
             rows = list(await cursor.fetchall())
-            span.set_attribute("result_count", len(rows))
+            records = [r for r in map(self._row_to_record, rows)
+                       if not r.metadata.get("quarantined")][:limit]
+            span.set_attribute("result_count", len(records))
             span.set_attribute(
                 "query_ms", round((time.perf_counter() - t0) * 1000, 1),
             )
-            return [self._row_to_record(row) for row in rows]
+            return records
+
+    async def count_preferences(self, user_id: str) -> int:
+        _require_user(user_id)
+        conn = await self._check_connection()
+        cursor = await conn.execute("SELECT COUNT(*) FROM memories WHERE user_id = ?", (user_id,))
+        return int((await cursor.fetchone())[0])
 
     async def store(
         self,
@@ -408,6 +422,7 @@ class LongTermMemory:
         return MemoryRecord(
             id=row[0],
             memory_type="long_term",
+            key=row[1],
             content=json.loads(row[2]),
             user_id=row[3],
             importance=row[4],
@@ -421,3 +436,13 @@ class LongTermMemory:
             await self._conn.close()
             self._conn = None
         logger.info("LongTermMemory shutdown")
+
+def create_long_term_memory(config: LongTermMemoryConfig) -> LongTermMemory:
+    """Factory function to create a LongTermMemory instance."""
+
+    if config.backend == LongTermBackend.SQLITE:
+        return LongTermMemory(config)
+    else:
+        raise NotImplementedError(
+            f"Long-term memory backend '{config.backend.value}' is not supported yet."
+        )

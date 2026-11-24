@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
+from pai.common.enums.permission import Origin
 from pai.common.manager import Manager
 
 def utcnow() -> datetime:
@@ -31,6 +32,11 @@ class ExecutionContext:
 
     agent_id: Optional[str] = None
     source_device_id: Optional[str] = None
+    origin: Optional[Origin] = None
+    # Set ONLY by trusted server code (never from user/LLM input): this run is already
+    # approved (e.g. a scheduled action under a valid standing consent). It resolves
+    # APPROVAL_REQUIRED, never DENY.
+    pre_approved: bool = False
 
     goal: Optional[str] = None
 
@@ -115,10 +121,21 @@ class ContextManager(Manager):
     """
     name = "context_manager"
 
-    def __init__(self, max_history: int = 50):
+    def __init__(
+        self,
+        max_history: int = 50,
+        *,
+        max_sessions_per_user: int = 200,
+        max_sessions_total: int = 5000,
+    ):
         super().__init__(event_bus=None)
 
         self.max_history = max_history
+        # In-memory session records are a cache (chat history is persisted in the database and a
+        # session id seen again is simply re-created), so they are capped: without a cap a client
+        # that opens a new session per request grows this forever.
+        self.max_sessions_per_user = max_sessions_per_user
+        self.max_sessions_total = max_sessions_total
 
         # Per-user preferences (unchanged from the original implementation)
         self._preferences: Dict[str, Dict[str, Any]] = {}
@@ -164,6 +181,35 @@ class ContextManager(Manager):
             "history": [],
         }
 
+    def _drop_session_locked(self, sid: str) -> None:
+        record = self._session_registry.pop(sid, None)
+        if record is None:
+            return
+        uid = record.get("user_id")
+        sessions = self._user_sessions.get(uid, [])
+        if sid in sessions:
+            sessions.remove(sid)
+        if not sessions:
+            self._user_sessions.pop(uid, None)
+        if self._current_session.get(uid) == sid:
+            if sessions:
+                self._current_session[uid] = sessions[-1]
+            else:
+                self._current_session.pop(uid, None)
+
+    def _evict_sessions_locked(self, user_id: str, keep: str) -> None:
+        """Drop the least-recently-updated sessions beyond the caps (never ``keep``)."""
+        def oldest(ids):
+            return sorted((i for i in ids if i != keep),
+                          key=lambda i: self._session_registry[i].get("updated_at") or "")
+        mine = list(self._user_sessions.get(user_id, []))
+        for sid in oldest(mine)[: max(0, len(mine) - self.max_sessions_per_user)]:
+            self._drop_session_locked(sid)
+        over = len(self._session_registry) - self.max_sessions_total
+        if over > 0:
+            for sid in oldest(list(self._session_registry))[:over]:
+                self._drop_session_locked(sid)
+
     def _ensure_session_locked(
         self,
         user_id: str,
@@ -190,6 +236,7 @@ class ContextManager(Manager):
             self._session_registry[sid] = record
             self._user_sessions.setdefault(user_id, []).append(sid)
             self._current_session[user_id] = sid
+            self._evict_sessions_locked(user_id, keep=sid)
             return sid
 
         record = self._session_registry.get(session_id)
@@ -199,6 +246,7 @@ class ContextManager(Manager):
             self._session_registry[session_id] = record
             self._user_sessions.setdefault(user_id, []).append(session_id)
             self._current_session[user_id] = session_id
+            self._evict_sessions_locked(user_id, keep=session_id)
             return session_id
 
         if record["user_id"] != user_id:
