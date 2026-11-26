@@ -111,3 +111,20 @@ async def test_pushed_operation_updates_are_ignored_quietly(agent, caplog):
     with caplog.at_level(logging.WARNING):
         await agent._handle_ws_message({"type": "plugin.operation", "operation": {"id": "op1", "status": "installing"}})
     assert not [r for r in caplog.records if "Unhandled" in r.getMessage()]
+
+
+@pytest.mark.asyncio
+async def test_backend_task_events_are_never_run_as_invocations(agent):
+    """A `task.completed` event broadcast to every device carries a capability; the device ran it
+    ('No plugin provides schedule.create'). Only type=invoke may execute."""
+    ran = []
+
+    async def fake_task(message):
+        ran.append(message)
+    agent._handle_task = fake_task
+    for t in ("task.completed", "task.started", "task.created"):
+        await agent._handle_ws_message({"type": t, "request_id": "r9", "capability": "schedule.create"})
+    await agent._handle_ws_message({"type": "task.completed", "id": "x", "capability": "schedule.create"})
+    assert ran == []
+    await agent._handle_ws_message({"type": "invoke", "request_id": "r1", "capability": "x"})
+    assert len(ran) == 1

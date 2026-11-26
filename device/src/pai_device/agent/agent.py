@@ -419,13 +419,15 @@ class DeviceAgent:
             await self.ws.send({"type": "pong", "device_id": self.device_id})
             return
 
-        # Task dispatch: either the capability-shaped message or the legacy
-        # ``type=task`` envelope.
-        if message.get("request_id") and message.get("capability"):
-            await self._handle_task(message)
+        # Backend task EVENTS (task.created / started / completed ...) are broadcast to every device of the
+        # user. They describe work running ANYWHERE and carry a capability (and sometimes a request_id), so
+        # they must never be mistaken for an instruction to run it here.
+        if isinstance(msg_type, str) and msg_type.startswith(("task.", "plan.", "schedule.", "agent.")):
+            logger.debug("Ignoring backend event %s", msg_type)
             return
 
-        if msg_type == "task" and message.get("request_id"):
+        # Only an explicit invoke (or the legacy ``task`` envelope) runs a capability on this device.
+        if msg_type in ("invoke", "task") and message.get("request_id") and message.get("capability"):
             await self._handle_task(message)
             return
 
