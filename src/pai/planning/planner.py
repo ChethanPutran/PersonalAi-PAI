@@ -77,6 +77,18 @@ class Planner(Lifecycle):
             "active_plans": len(self.active_plans),
         }
 
+    def chat_only_plan(self, goal: str, context: Optional[Dict[str, Any]] = None) -> Plan:
+        """A one-task plan (``chat.reply``) without calling the planner LLM: for turns the fast router
+        decided are plain conversation. It is exactly the plan the planner would have returned."""
+        from pai.planning.goal_decomposer import CHAT_CAPABILITY_ID, _CHAT_CAPABILITY_SPEC, GoalDecomposer
+        task = TaskSpec(
+            id="task_1", type=GoalDecomposer._manifest_task_type(dict(_CHAT_CAPABILITY_SPEC)),
+            capability=CHAT_CAPABILITY_ID, parameters={"tone": "friendly"})
+        plan = Plan(id=f"plan_{uuid.uuid4().hex[:12]}", goal=goal, tasks=[task], context=context or {},
+                    metadata={"planner": "fast_chat"})
+        plan.status = PlanStatus.VERIFIED
+        return plan
+
     async def create_plan(
         self,
         goal: str,

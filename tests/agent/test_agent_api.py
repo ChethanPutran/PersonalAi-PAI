@@ -24,7 +24,14 @@ def build(llm, source=None, limits=None):
         return await call_next(request)
 
     app.include_router(agents_routes.router, prefix="/api/v1")
-    app.state.context = SimpleNamespace(agents=runtime, shutting_down=asyncio.Event())
+    enabled = {"agent": True}                          # the built-in agent plugin; tests flip it per case
+
+    async def is_enabled_for_user(user_id, plugin_id):
+        return enabled.get(plugin_id, False)
+
+    orchestrator = SimpleNamespace(plugin_manager=SimpleNamespace(is_enabled_for_user=is_enabled_for_user))
+    app.state.context = SimpleNamespace(agents=runtime, shutting_down=asyncio.Event(), orchestrator=orchestrator)
+    app.state.agent_plugin_enabled = enabled
     return app, runtime
 
 
@@ -216,3 +223,12 @@ def test_websocket_reconnect_replays_only_what_was_missed():
             while (ev := ws.receive_json())["kind"] != "closed":
                 again.append(ev["seq"])
         assert again == [s for s in first if s > cut]
+
+
+def test_starting_an_agent_needs_the_agent_plugin_enabled():
+    llm = None
+    app, _ = build(llm)
+    app.state.agent_plugin_enabled["agent"] = False
+    with TestClient(app) as client:
+        r = client.post("/api/v1/agents", json={"goal": "x", "tools": ["browser.*"]}, headers=H())
+    assert r.status_code == 403 and r.json()["detail"]["code"] == "agent_plugin_disabled"

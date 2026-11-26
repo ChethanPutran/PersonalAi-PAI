@@ -19,7 +19,7 @@ def _template():
 def test_declares_and_uses_exactly_its_variables():
     from jinja2 import Environment, meta
     t = _template()
-    assert t.id == "agent.react" and t.version == "v1.0.0"
+    assert t.id == "agent.react" and t.version == "v1.1.0"
     declared = set(_registry()._load_meta("agent.react")["variables"])     # same source GoalDecomposer checks
     used = meta.find_undeclared_variables(Environment().parse(t.source))
     assert declared == used == set(VARS)
@@ -45,3 +45,9 @@ def test_contract_and_trust_rules_are_present():
     # denial / secrets / loop rules
     assert "denied" in out.lower() and "do not look for a way around it" in out
     assert "passwords" in out and "Do not loop" in out
+
+
+def test_computer_control_rules_are_in_the_prompt():
+    out = _template().render(**VARS)
+    for rule in ("COMPUTER CONTROL", "computer.observe", "element_id", "observe again", "Verify, do not assume", "ask_user"):
+        assert rule in out

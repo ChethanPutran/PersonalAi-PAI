@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import asyncio
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from loguru import logger
@@ -34,6 +35,7 @@ from pai.observability.tracer import get_tracer
 from pai.orchestration.capability_resolver import CapabilityResolver
 from pai.orchestration.capability_router import CapabilityRouter
 from pai.orchestration.device_selector import DeviceSelector
+from pai.orchestration.fast_route import FastRouter, TurnRoute
 from pai.orchestration.execution_context import (
     ContextManager,
     ExecutionContext,
@@ -164,6 +166,10 @@ class TaskOrchestrator(Manager):
         self.prompt_trace_max_size = orchestrator_config.prompt_trace_max_size
         self.chat_reply_max_tokens = orchestrator_config.chat_reply_max_tokens
         self.chat_reply_temperature = orchestrator_config.chat_reply_temperature
+        # Plain conversation skips the planner LLM call (see orchestration/fast_route.py).
+        self.fast_router = FastRouter(
+            getattr(self.planner, "llm", None), enabled=orchestrator_config.fast_chat_path,
+            timeout_seconds=orchestrator_config.fast_route_timeout_seconds)
         self.scheduler_service = scheduler_service
         self.prompt_guard = prompt_guard
         self._tracker = TaskTracker()
@@ -481,15 +487,25 @@ class TaskOrchestrator(Manager):
             planning_context["user_id"] = user_id
             planning_context["source_device_id"] = source_device_id
 
+            # ---- Route: plain conversation skips the planner LLM call ----
+            async with tracer.span("orchestrator.route") as route_span:
+                route, route_how = await self.fast_router.decide(goal)
+                route_span.set_attribute("route", route.value)
+                route_span.set_attribute("how", route_how)
+
             # ---- Planner (span covers full planner work) ----
             async with tracer.span(
                 "orchestrator.planner",
                 goal=goal[:200],
             ) as planner_span:
-                plan = await self.planner.create_plan(
-                    goal,
-                    planning_context,
-                )
+                if route is TurnRoute.CHAT:
+                    plan = self.planner.chat_only_plan(goal, planning_context)
+                    planner_span.set_attribute("fast_chat_path", True)
+                else:
+                    plan = await self.planner.create_plan(
+                        goal,
+                        planning_context,
+                    )
                 plan_id = plan.id
                 task_specs = plan.tasks
 
@@ -982,6 +998,10 @@ class TaskOrchestrator(Manager):
                 if not piece:
                     return
                 seq += 1
+                if seq == 1:
+                    # What the user feels: request start -> first streamed token (route, planning, recall, LLM).
+                    span.set_attribute("first_token_ms_since_request", round(
+                        (datetime.now(timezone.utc) - context.created_at).total_seconds() * 1000))
                 if reply_sink is not None:
                     try:
                         await reply_sink.on_delta(piece)

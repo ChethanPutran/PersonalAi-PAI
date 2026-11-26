@@ -30,10 +30,29 @@ class PiperTTS:
             raise VoiceConfigurationError(
                 "Piper is not installed. Install the free local voice extras: "
                 "pip install 'ai-personal-agent[voice-local]' (or: pip install piper-tts)") from exc
-        logger.info("Loading Piper voice from {}", voice_path)
-        self._voice = PiperVoice.load(str(voice_path))
         self.sample_rate = sample_rate
         self._pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="piper")
+        # Loading the model takes seconds (20 s on a busy machine) and the first synthesis is cold (~3 s,
+        # then ~0.4 s): do both in the background so the server starts at once and the first spoken reply
+        # is already warm. synthesize() waits for it if a request arrives earlier.
+        self._voice = None
+        self._load_error: Optional[BaseException] = None
+        self._ready = threading.Event()
+        threading.Thread(target=self._load_and_warm, args=(PiperVoice, voice_path), daemon=True,
+                         name="piper-load").start()
+
+    def _load_and_warm(self, piper_voice_cls, voice_path: Path) -> None:
+        try:
+            logger.info("Loading Piper voice from {}", voice_path)
+            self._voice = piper_voice_cls.load(str(voice_path))
+            for _ in self._voice.synthesize("Hello."):          # warm the runtime
+                pass
+            logger.info("Piper voice ready")
+        except BaseException as exc:                           # reported on first use
+            self._load_error = exc
+            logger.warning("Piper voice failed to load: {}", exc)
+        finally:
+            self._ready.set()
 
     async def synthesize(
         self, text: str, *, voice: Optional[str] = None, language: Optional[str] = None,
@@ -42,6 +61,10 @@ class PiperTTS:
         if not text:
             return
         loop = asyncio.get_running_loop()
+        if not self._ready.is_set():
+            await asyncio.to_thread(self._ready.wait)
+        if self._voice is None:
+            raise VoiceProviderError(f"Piper voice is not available: {self._load_error}")
         queue: "asyncio.Queue[object]" = asyncio.Queue(maxsize=8)     # backpressure on the worker
         stop = threading.Event()
         END = object()

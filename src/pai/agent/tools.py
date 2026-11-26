@@ -13,6 +13,7 @@ from typing import Any, Dict, Iterable, List, Optional, Protocol, Sequence
 
 import jsonschema
 
+from pai.agent.computer import OBSERVE_CAPABILITY, format_observation
 from pai.agent.errors import AgentSpawnError
 
 #: Never offered to an agent: no agents spawning agents yet, and chat.reply is not an action.
@@ -82,6 +83,8 @@ class CapabilityTool:
         out = await self._source.execute(
             user_id=ctx.user_id, capability=self.spec.name, params=args, call_id=ctx.call_id,
             session_id=ctx.session_id, agent_id=ctx.agent_id, device_id=ctx.device_id)
+        if self.spec.name == OBSERVE_CAPABILITY:       # a screen tree: compact text, never raw JSON + base64
+            return format_observation(out)
         if isinstance(out, dict) and "result" in out:
             slim = {"status": out.get("status"), "result": out["result"]}
             if out.get("device_id"):

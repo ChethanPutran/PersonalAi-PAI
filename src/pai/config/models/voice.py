@@ -98,3 +98,6 @@ class VoiceConfig(BaseModel):
     thinking_filler_after_seconds: float = 2.5
     # First speakable chunk is released early (low latency) once it has this many characters.
     first_chunk_min_chars: int = Field(default=24, ge=8)
+    # Segments synthesized at the same time while an earlier one is playing (playback stays in order).
+    # A remote TTS takes seconds per request, so 1 means an audible gap at every sentence.
+    tts_prefetch: int = Field(default=2, ge=1, le=4)

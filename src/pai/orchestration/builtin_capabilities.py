@@ -22,6 +22,10 @@ class BuiltinCapability:
     # How it runs (same meaning as the manifest `taskType`). Declared by the capability, never by the LLM.
     task_type: TaskType = TaskType.ONE_SHOT
     timeout_seconds: Optional[float] = None
+    # Belongs to a built-in PLUGIN (e.g. "agent") the user has to enable before the capability is offered to
+    # them. Plain built-ins (chat, tasks, schedules) stay always available.
+    plugin_id: str = "builtin"
+    requires_user_enable: bool = False
 
 
 class BuiltinCapabilityRegistry:
@@ -52,9 +56,10 @@ class BuiltinCapabilityRegistry:
                 "parameters": c.parameters,
                 "task_type": c.task_type.value,
                 "timeout_seconds": c.timeout_seconds,
+                "requires_user_enable": c.requires_user_enable,
                 "targets": [
                     {
-                        "plugin_id": "builtin",
+                        "plugin_id": c.plugin_id,
                         "device_id": "self",       # sentinel — no real device
                         "executor_id": "builtin_executor",
                         "device_type": "server",

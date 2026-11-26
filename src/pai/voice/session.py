@@ -72,6 +72,8 @@ class _Turn:
         self.spoken: List[str] = []          # segments whose audio has started going out
         self.audio_started = False
         self.finished = False
+        self.speech_ended_at: Optional[float] = None    # when the user stopped talking (VAD)
+        self.stt_ms: Optional[float] = None             # end of speech -> final transcript
 
 
 class _Utterance:
@@ -81,7 +83,18 @@ class _Utterance:
         self.started_in = started_in          # state when the user began (SPEAKING => maybe echo)
         self.barged = False
         self.started_at = time.time()        # for the STT span in the turn's trace
+        self.ended_at: Optional[float] = None  # end of speech: where the user-felt latency starts
         self.partials_task: Optional[asyncio.Task] = None
+
+
+class _SegAudio:
+    """One speakable segment being synthesized: its PCM chunks arrive on ``chunks`` (None = done)."""
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.chunks: "asyncio.Queue[Optional[bytes]]" = asyncio.Queue()
+        self.failed = False
+        self.task: Optional[asyncio.Task] = None
 
 
 class _TurnSink:
@@ -264,6 +277,7 @@ class VoiceSession:
             return
         if forced:
             self.vad.reset()
+        utt.ended_at = time.time()
         await self._emit(SpeechStopped(turn_id=utt.turn_id))
         # Finalize off the audio path so the next frames are not blocked behind the STT.
         self._spawn(self._finalize(utt), "voice.finalize")
@@ -289,10 +303,14 @@ class VoiceSession:
             if self.state == VoiceState.LISTENING:
                 await self._set_state(VoiceState.IDLE)
             return
+        stt_ms = None if utt.ended_at is None else (time.time() - utt.ended_at) * 1000
+        # `start` is when the user began talking, so this span includes the speech itself: the time
+        # the user waits for the transcript is `finalize_ms` (end of speech -> final text).
         self._trace_span(utt.turn_id, "voice.stt", start=utt.started_at, provider=getattr(self.stt, "name", type(self.stt).__name__),
-                         chars=len(text), **stt_usage)
+                         chars=len(text), finalize_ms=None if stt_ms is None else round(stt_ms), **stt_usage)
         await self._emit(TranscriptFinal(turn_id=utt.turn_id, text=text))
-        await self._start_turn(text, reason=InterruptReason.NEW_INPUT, turn_id=utt.turn_id)
+        await self._start_turn(text, reason=InterruptReason.NEW_INPUT, turn_id=utt.turn_id,
+                               speech_ended_at=utt.ended_at, stt_ms=stt_ms)
 
     async def _drop_utterance(self) -> None:
         utt, self._utt = self._utt, None
@@ -305,11 +323,13 @@ class VoiceSession:
 
     # ------------------------------------------------------------- turn (assistant)
 
-    async def _start_turn(self, text: str, *, reason: InterruptReason, turn_id: Optional[str] = None) -> None:
+    async def _start_turn(self, text: str, *, reason: InterruptReason, turn_id: Optional[str] = None,
+                          speech_ended_at: Optional[float] = None, stt_ms: Optional[float] = None) -> None:
         if not text:
             return
         await self.interrupt(reason)                     # a new request replaces a running one
         turn = _Turn(text)
+        turn.speech_ended_at, turn.stt_ms = speech_ended_at, stt_ms
         if turn_id:
             turn.turn_id = turn_id
         self._turn = turn
@@ -366,49 +386,92 @@ class VoiceSession:
             logger.debug("voice trace span failed: {}", exc)
 
     async def _speak(self, turn: _Turn, segments: "asyncio.Queue[Optional[str]]") -> None:
+        """Turn segments into audio, in order, with the NEXT segments already being synthesized.
+
+        A remote TTS answers one request per segment in seconds. Synthesizing a segment only after the
+        previous one was sent leaves an audible gap at every sentence; here up to ``tts_prefetch``
+        segments are synthesized at once while playback stays strictly in order."""
         started = False
-        try:
-            while True:
-                seg = await segments.get()
-                if seg is None:
-                    break
-                text = speakable(seg)
-                if not text:
-                    continue
+        order: "asyncio.Queue[Optional[_SegAudio]]" = asyncio.Queue()     # playback order
+        gate = asyncio.Semaphore(max(1, self.config.tts_prefetch))        # syntheses in flight (FIFO)
+        synth_tasks: List[asyncio.Task] = []
+
+        async def synth(seg: _SegAudio) -> None:
+            async with gate:
                 t0 = time.time(); nbytes = 0; first_ms: Optional[float] = None; err: Optional[str] = None
                 used_cm = voice_usage.collect(); used = used_cm.__enter__()
                 try:
                     # aclosing: cancelling between chunks must still close the upstream stream
                     async with contextlib.aclosing(
-                        self.tts.synthesize(text, voice=self.voice, language=self.language)
+                        self.tts.synthesize(seg.text, voice=self.voice, language=self.language)
                     ) as audio:
                         async for pcm in audio:
-                            if not started:
-                                started = turn.audio_started = True
-                                await self._emit(AssistantAudioStart(
-                                    response_id=turn.response_id, sample_rate=self.tts.sample_rate))
-                                await self._set_state(VoiceState.SPEAKING, turn.turn_id)
-                            if text not in turn.spoken:
-                                turn.spoken.append(text)
                             if first_ms is None:
                                 first_ms = (time.time() - t0) * 1000
                             nbytes += len(pcm)
-                            await self._send_audio(pcm)
+                            seg.chunks.put_nowait(pcm)
                 except asyncio.CancelledError:
                     err = "interrupted (barge-in or cancel)"
                     raise
                 except Exception as exc:
                     err = f"{type(exc).__name__}: {exc}"
+                    seg.failed = True
                     logger.warning("TTS failed for a segment: {}", exc)
-                    await self._emit(ErrorEvent(code="tts_failed", message="could not speak part of the reply"))
                 finally:
                     used_cm.__exit__(None, None, None)
+                    seg.chunks.put_nowait(None)
                     self._trace_span(turn.turn_id, "voice.tts", start=t0, error=err,
-                                     provider=getattr(self.tts, "name", type(self.tts).__name__), chars=len(text),
+                                     provider=getattr(self.tts, "name", type(self.tts).__name__), chars=len(seg.text),
                                      audio_ms=round(pcm_duration_ms(nbytes, self.tts.sample_rate)),
                                      first_audio_ms=None if first_ms is None else round(first_ms),
                                      **voice_usage.summarize(used))
+
+        async def feed() -> None:
+            try:
+                while True:
+                    seg = await segments.get()
+                    if seg is None:
+                        break
+                    text = speakable(seg)
+                    if not text:
+                        continue
+                    item = _SegAudio(text)
+                    item.task = asyncio.create_task(synth(item), name="voice.tts.synth")
+                    synth_tasks.append(item.task)
+                    order.put_nowait(item)
+            finally:
+                order.put_nowait(None)
+
+        feeder = asyncio.create_task(feed(), name="voice.tts.feed")
+        try:
+            while True:
+                item = await order.get()
+                if item is None:
+                    break
+                while True:
+                    pcm = await item.chunks.get()
+                    if pcm is None:
+                        break
+                    if not started:
+                        started = turn.audio_started = True
+                        await self._emit(AssistantAudioStart(
+                            response_id=turn.response_id, sample_rate=self.tts.sample_rate))
+                        await self._set_state(VoiceState.SPEAKING, turn.turn_id)
+                        if turn.speech_ended_at is not None:        # what the user actually waited
+                            self._trace_span(turn.turn_id, "voice.latency", start=turn.speech_ended_at,
+                                             stt_finalize_ms=None if turn.stt_ms is None else round(turn.stt_ms),
+                                             first_audio_after_speech_end_ms=round((time.time() - turn.speech_ended_at) * 1000))
+                    if item.text not in turn.spoken:
+                        turn.spoken.append(item.text)
+                    await self._send_audio(pcm)
+                if item.failed:
+                    await self._emit(ErrorEvent(code="tts_failed", message="could not speak part of the reply"))
         finally:
+            feeder.cancel()
+            for t in synth_tasks:                  # barge-in / cancel: stop segments still being synthesized
+                if not t.done():
+                    t.cancel()
+            await asyncio.gather(feeder, *synth_tasks, return_exceptions=True)
             if started:
                 with contextlib.suppress(Exception):
                     await self._emit(AssistantAudioEnd(response_id=turn.response_id))

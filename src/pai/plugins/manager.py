@@ -40,6 +40,8 @@ class PluginManager(Manager):
         self._capability_router: Any = None
         # Tracked remote install/uninstall operations; attached once the device manager exists.
         self.operations: Optional[PluginOperations] = None
+        # Provided by the backend itself (see pai.agent.plugin): catalog entries only, nothing to install.
+        self._builtin_plugins: Dict[str, PluginInfo] = {}
 
         if isinstance(plugin_registry_dir, str):
             plugin_registry_dir = Path(plugin_registry_dir)
@@ -105,8 +107,13 @@ class PluginManager(Manager):
     # Catalog
     # ------------------------------------------------------------------
 
+    def register_builtin_plugin(self, info: PluginInfo) -> None:
+        """A plugin the backend provides itself: shown in the catalog and enabled per user like any
+        other, but never installed on a device."""
+        self._builtin_plugins[info.id] = info
+
     def get_catalog(self) -> List[PluginInfo]:
-        return self.registry.get_catalog()
+        return [*self.registry.get_catalog(), *self._builtin_plugins.values()]
 
     def get_manifest(self, plugin_id: str, version: Optional[str] = None) -> Optional[PluginManifest]:
         """Manifest of ``version`` (default: newest the runtime can host).
@@ -128,7 +135,7 @@ class PluginManager(Manager):
         return await self.registry.get_plugin_at_version(plugin_name, version, platform, architecture)
 
     def get_plugin(self, plugin_id: str) -> Optional[PluginInfo]:
-        return self.registry.get_plugin(plugin_id)
+        return self._builtin_plugins.get(plugin_id) or self.registry.get_plugin(plugin_id)
     
     def get_plugin_for_capability(
         self, capability: str,
@@ -144,7 +151,7 @@ class PluginManager(Manager):
             raise RuntimeError("PluginManager is not initialized")
         
     def require_plugin(self, plugin_id: str) -> PluginInfo:
-        plugin = self.registry.get_plugin(plugin_id)
+        plugin = self.get_plugin(plugin_id)
         if plugin is None:
             raise ValueError(f"Plugin '{plugin_id}' not found in catalog")
         return plugin

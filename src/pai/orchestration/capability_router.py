@@ -423,8 +423,13 @@ class CapabilityRouter(Manager):
         async with tracer.span("router.build_index", user_id=user_id) as span:
             # ── Built-ins: unconditional, don't need devices or plugins ──
             index: Dict[str, List[CapabilityTarget]] = {}
+            enabled_ids = await self._user_enabled_plugin_ids(user_id)
             if self.builtin_registry is not None:
                 for cap_id, entry in self.builtin_registry.describe_with_schema().items():
+                    # Built-in PLUGINS (e.g. "agent") are offered only to users who turned them on.
+                    if entry.get("requires_user_enable") and not any(
+                            t.get("plugin_id") in enabled_ids for t in entry.get("targets", [])):
+                        continue
                     for t in entry.get("targets", []):
                         index.setdefault(cap_id, []).append(
                             CapabilityTarget(
@@ -445,14 +450,14 @@ class CapabilityRouter(Manager):
 
 
             # ---- 1. User-enabled plugins ----
-            enabled_ids = await self._user_enabled_plugin_ids(user_id)
             span.set_attribute("user_enabled_plugins", sorted(enabled_ids))
             if not enabled_ids:
                 span.set_attribute("stage", "no_user_plugins")
                 return index
 
             # ---- 2. Those in the catalog with capabilities ----
-            catalog = {p.id: p for p in self.plugin_manager.get_catalog()}
+            # Built-in plugins run in the backend (handled above): they are not device plugins.
+            catalog = {p.id: p for p in self.plugin_manager.get_catalog() if not p.builtin}
             span.set_attribute(
                 "catalog_capability_counts",
                 {pid: len(p.capabilities) for pid, p in catalog.items()},

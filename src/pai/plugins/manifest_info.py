@@ -53,6 +53,10 @@ class PluginInfo(BaseModel):
     checksum: Optional[str] = None
     size: int = 0
 
+    # Provided by the backend itself (no package, nothing to install on a device): the user only
+    # turns it on or off. Example: the `agent` plugin.
+    builtin: bool = False
+
     # ── per-request compatibility (filled in by the catalog for a specific device) ──
     compatible: bool = True
     incompatibleReason: Optional[str] = None

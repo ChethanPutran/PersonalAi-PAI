@@ -552,6 +552,7 @@ function renderPlugins() {
       h("div", { style: "font-weight:650" }, p.name, " ", h("span", { class: "meta" }, "v" + p.version)),
       h("div", { class: "meta" }, p.description || p.id),
       h("div", { style: "margin-top:6px;display:flex;gap:6px;flex-wrap:wrap" }, ...p.platforms.map(x => h("span", { class: "chip" }, PLATFORM[x] || x)),
+        p.builtin && h("span", { class: "chip accent" }, "built in"),
         p.requires_confirmation && h("span", { class: "chip warn" }, "asks before acting"))),
     sw(p.enabled, `${p.name} (${p.id})`, async v => {
       await api(`/plugins/${encodeURIComponent(p.id)}/${v ? "enable" : "disable"}`, { method: "POST", body: {} });

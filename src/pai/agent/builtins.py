@@ -7,7 +7,10 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
+from dataclasses import replace
+
 from pai.agent.errors import AgentError
+from pai.agent.plugin import AGENT_PLUGIN_ID
 from pai.agent.models import AgentLimits, AgentSpec, AgentState
 from pai.agent.runtime import AgentRuntime
 from pai.orchestration.builtin_capabilities import BuiltinCapability
@@ -70,7 +73,7 @@ def build_agent_capabilities(runtime: AgentRuntime) -> list[BuiltinCapability]:
                            for i in runtime.list(user_id, state)]}
 
     agent_id = {"agent_id": {"type": "string"}}
-    return [
+    caps = [
         BuiltinCapability(
             id="agent.start",
             description=(
@@ -104,3 +107,6 @@ def build_agent_capabilities(runtime: AgentRuntime) -> list[BuiltinCapability]:
             id="agent.list", description="List the user's agents (running and recently finished).",
             parameters={"type": "object", "properties": {"state": {"type": "string"}}}, handler=_list),
     ]
+    # Provided by the built-in `agent` plugin: offered to a user only once they enable it.
+    return [replace(c, plugin_id=AGENT_PLUGIN_ID, requires_user_enable=True) for c in caps]
+

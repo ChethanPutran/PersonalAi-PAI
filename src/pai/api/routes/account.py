@@ -170,6 +170,7 @@ async def my_plugins(context: PAIAppContext = Depends(get_app_context),
         "id": p.id, "name": p.name, "description": p.description, "version": p.version,
         "platforms": sorted(str(getattr(k, "value", k)) for k in p.platforms),
         "requires_confirmation": bool(p.requiresConfirmation),
+        "builtin": bool(getattr(p, "builtin", False)),
         "enabled": enabled.get(p.id, False),
     } for p in pm.get_catalog()]
     plugins.sort(key=lambda p: (p["name"].lower(), p["id"]))

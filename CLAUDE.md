@@ -307,6 +307,16 @@ were deleted; every remaining file collects. Two files still fail because they c
 - Voice requests carry `Origin.VOICE`; never accept spoken confirmation for a risky action.
 - Tests: `.venv/bin/python -m pytest tests/voice tests/chat tests/llm -q`.
 
+## Latency (chat and voice)
+
+- **Fast conversational path** (`pai/orchestration/fast_route.py`, `orchestrator.fast_chat_path`, on by default): before planning, `FastRouter` decides CHAT or ACT. Rules first (small talk with no action wording = CHAT; any action/device/data wording = ACT), then at most one tiny classifier call on the fast `chat` route (hard timeout); any doubt or failure = ACT. CHAT skips the planner LLM call (`Planner.chat_only_plan`, the plan the planner would have returned) so the reply streams after ONE fast-model round trip instead of planner (3.5 to 6 s) + reply. The trace has `orchestrator.route` (`route`, `how`) and `orchestrator.planner` (`fast_chat_path`).
+- **Voice**: the trace's `voice.stt` span starts when the user began talking; the wait that matters is `finalize_ms` on it and the `voice.latency` span (`stt_finalize_ms`, `first_audio_after_speech_end_ms`). TTS segments are synthesized `voice.tts_prefetch` at a time (default 2) while earlier ones play, playback stays in order. AIRouter TTS cannot stream or return raw PCM (it returns a whole WAV per request): for lower first-audio latency use a local engine (`voice.tts: piper|espeak`) or a provider that streams.
+
+## Agent plugin and computer control
+
+- The agent is a **built-in plugin** (`pai.agent.plugin`, id `agent`): backend-provided, nothing to install, shown in the plugin lists (`builtin: true`), off until the user enables it (`POST /plugins/agent/enable`, Settings page, plugin screens). Its capabilities (`agent.*`) carry `plugin_id="agent"`, `requires_user_enable=True`; `CapabilityRouter._build_index` only offers them to users who enabled it, and `POST /agents` returns 403 `agent_plugin_disabled` otherwise.
+- **Computer control**: the capability contract every platform implements is `docs/computer_control.md` (`computer.observe/click/type/key/scroll/swipe/long_press/apps.*/status`, reusing the existing `screen` / `input` permissions). The agent perceives through `pai.agent.computer.format_observation` (a compact element list, never raw JSON/base64) and follows the COMPUTER CONTROL rules in `prompts/agent/react` v1.1.0.
+
 ## Agents
 
 - Long-running, spawnable, talk-to-able ReAct agents live in `src/pai/agent/` (see its README); the system starts them via the `agent.start` builtin capability or `POST /agents`, and users converse over `WS /agents/{id}/ws` or `POST /agents/{id}/messages`.

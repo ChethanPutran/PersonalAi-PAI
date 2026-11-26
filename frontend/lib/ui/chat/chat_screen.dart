@@ -1,3 +1,4 @@
+import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:pai_mobile/auth/auth_service.dart';
@@ -337,7 +338,11 @@ Future<void> _loadSessionsAndCurrent() async {
     var index = -1;
     var gotAny = false;
 
-    void showAssistant(String content, {String? id}) {
+    // A reply arrives as many tiny deltas. Rendering each one (rebuilding the list and re-parsing the
+    // markdown, plus a scroll animation per token) makes long replies janky, so after the first token
+    // (shown at once: that is the latency the user feels) updates are coalesced to ~25 per second.
+    Timer? flush;
+    void showAssistant(String content, {String? id, bool animate = true}) {
       if (!mounted) return;
       final msg = ChatMessage(
         id: id ?? msgId,
@@ -353,7 +358,15 @@ Future<void> _loadSessionsAndCurrent() async {
           messages[index] = msg;
         }
       });
-      _scrollToBottom();
+      _scrollToBottom(animate: animate);
+    }
+
+    void scheduleFlush() {
+      if (flush != null) return;
+      flush = Timer(const Duration(milliseconds: 40), () {
+        flush = null;
+        showAssistant(buf.toString(), animate: false);
+      });
     }
 
     try {
@@ -366,11 +379,18 @@ Future<void> _loadSessionsAndCurrent() async {
           case ChatStreamStatus():
             break; // the status WS already renders progress
           case ChatStreamDelta():
+            final first = !gotAny;
             gotAny = true;
             buf.write(ev.delta);
-            showAssistant(buf.toString());
+            if (first) {
+              showAssistant(buf.toString(), animate: false);
+            } else {
+              scheduleFlush();
+            }
           case ChatStreamDone():
             gotAny = true;
+            flush?.cancel();
+            flush = null;
             showAssistant(ev.response.message); // authoritative final text
           case ChatStreamError():
             throw StateError(ev.message);
@@ -378,6 +398,8 @@ Future<void> _loadSessionsAndCurrent() async {
       }
       if (!gotAny) throw StateError('Empty stream');
     } catch (e) {
+      flush?.cancel();
+      flush = null;
       if (gotAny) {
         showAssistant('${buf.toString()}\n\n[Connection interrupted: $e]');
         return;
@@ -389,6 +411,8 @@ Future<void> _loadSessionsAndCurrent() async {
         idempotencyKey: key,
       );
       showAssistant(res.message);
+    } finally {
+      flush?.cancel();
     }
   }
 
@@ -408,14 +432,26 @@ Future<void> _loadSessionsAndCurrent() async {
   // Scroll
   // -------------------------------------------------------------------
 
-  void _scrollToBottom() {
+  bool _scrollQueued = false;
+
+  /// One scroll per frame however many times it is asked (every streamed token asks). While a reply
+  /// streams, jump instead of animating: restarting a 250 ms animation per token only adds jank.
+  void _scrollToBottom({bool animate = true}) {
+    if (_scrollQueued) return;
+    _scrollQueued = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      _scrollQueued = false;
       if (!scrollController.hasClients) return;
-      scrollController.animateTo(
-        scrollController.position.maxScrollExtent,
-        duration: const Duration(milliseconds: 250),
-        curve: Curves.easeOut,
-      );
+      final end = scrollController.position.maxScrollExtent;
+      if (animate) {
+        scrollController.animateTo(
+          end,
+          duration: const Duration(milliseconds: 250),
+          curve: Curves.easeOut,
+        );
+      } else {
+        scrollController.jumpTo(end);
+      }
     });
   }
 

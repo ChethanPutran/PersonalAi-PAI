@@ -27,6 +27,7 @@ from pai.api.dependencies import get_current_user
 from pai.app_context import PAIAppContext, get_app_context
 from pai.security.tokens.auth import decode_access_token
 
+from pai.agent.plugin import AGENT_PLUGIN_DISABLED_MESSAGE, AGENT_PLUGIN_ID
 router = APIRouter(prefix="/agents", tags=["agents"])
 
 SSE_KEEPALIVE_SECONDS = 15.0
@@ -64,6 +65,8 @@ def _http(exc: AgentError) -> HTTPException:
 @router.post("", status_code=201, response_model=AgentInfo)
 async def start_agent(body: SpawnRequest, user_id: str = Depends(get_current_user),
                       context: PAIAppContext = Depends(get_app_context)) -> AgentInfo:
+    if not await context.orchestrator.plugin_manager.is_enabled_for_user(user_id, AGENT_PLUGIN_ID):
+        raise HTTPException(403, detail={"code": "agent_plugin_disabled", "message": AGENT_PLUGIN_DISABLED_MESSAGE})
     limits: Dict[str, Any] = {k: v for k, v in (("max_steps", body.max_steps),
                                                 ("max_runtime_seconds", body.max_runtime_seconds)) if v is not None}
     try:
