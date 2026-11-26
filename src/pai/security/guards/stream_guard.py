@@ -28,11 +28,12 @@ from pai.security.guards.llm_guard import (
 )
 
 # A partial line that could still become a tool envelope.
-_ENVELOPE_START = re.compile(r"^\s*(?:\{|```|[A-Za-z_]\w*\.[A-Za-z_][\w.]*\()")
+_ENVELOPE_START = re.compile(r"^\s*(?:\{|```|<\s*(?:/|t|f)|[A-Za-z_]\w*\.[A-Za-z_][\w.]*\()")
 # A single bare first token ("camera.capture") that a "(" might still follow.
 _BARE_TOKEN = re.compile(r"^\s*[A-Za-z_][\w.]*$")
 _TRAILING_BEARER = re.compile(r"\bBearer\s*$", re.I)
 _OPEN_FENCE = re.compile(r"^\s*```(?:json)?\s*$", re.I)
+_TAG_OPEN = re.compile(r"<\s*(tool_call|function_call|tool_use|tool)\b[^>]*>", re.I)
 _PEM_BEGIN = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
 _MAX_HELD_CHARS = 8000          # never hold more than this (an unterminated block is flushed)
 
@@ -125,6 +126,10 @@ class StreamingSanitizer:
             return ""
         if _OPEN_FENCE.match(line.rstrip("\n")):
             self._block, self._block_end = [line], "```"
+            return ""
+        m = _TAG_OPEN.search(line)
+        if m and not re.search(r"<\s*/\s*" + m.group(1) + r"\s*>", line[m.end():], re.I):
+            self._block, self._block_end = [line], "</" + m.group(1)
             return ""
         if _PEM_BEGIN.search(line) and "-----END" not in line:
             self._block, self._block_end = [line], "-----END"

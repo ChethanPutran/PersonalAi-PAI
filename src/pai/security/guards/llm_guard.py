@@ -159,6 +159,13 @@ _TOOL_CALL_PATTERNS: List[Tuple[re.Pattern, str]] = [
         r'```(?:json)?\s*\{[\s\S]*?"(?:tool|capability|action)"[\s\S]*?```',
     ), "fenced_json_envelope"),
 
+    # Tag-style calls some models emit: <tool_call>location.get</tool_call>, <function_call>...,
+    # <tool_use>...; an unclosed opening tag is removed up to the end of the text.
+    (re.compile(
+        r'<\s*(tool_call|function_call|tool_use|tool)\b[^>]*>[\s\S]*?(?:<\s*/\s*\1\s*>|\Z)',
+        re.IGNORECASE,
+    ), "tag_tool_call"),
+
     # Function-call syntax: tool_name(arg1=val, arg2=val)
     (re.compile(
         r'^\s*[a-zA-Z_][\w.]*\.[a-zA-Z_]\w*\([^\n]*\)\s*$',

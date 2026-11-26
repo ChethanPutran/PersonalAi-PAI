@@ -1,5 +1,5 @@
 id: chat.reply
-current: v1.4.0
+current: v1.5.0
 description: >
   Conversational reply. Now uses spotlighted boundaries around all
   user-controlled blocks so injection attempts in memory, history, or
@@ -76,3 +76,10 @@ versions:
       Adds `user_profile_block` (empty -> omitted): an ABOUT THE USER data block (boundary-wrapped, not
       instructions) so replies can be personal: preferred name, interests, hobbies, likes/dislikes,
       occupation and preferred style. Without a profile the prompt renders byte-identical to v1.3.0.
+
+  v1.5.0:
+    created_at: "2026-11-26"
+    notes: >
+      Adds an explicit rule under LIVE CAPABILITIES: the reply step cannot run tools, so it must not promise
+      actions or emit tool-call syntax (a model wrote `<tool_call>location.get</tool_call>` into a spoken reply).
+      Without a capability block the prompt renders byte-identical to v1.4.0.
