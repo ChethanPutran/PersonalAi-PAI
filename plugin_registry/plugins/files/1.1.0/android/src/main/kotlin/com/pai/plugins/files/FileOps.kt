@@ -28,10 +28,12 @@ internal class FileOps(private val jail: FileJail) {
         fun walk(d: File) {
             val children = d.listFiles()?.sortedBy { it.name.lowercase() } ?: return
             for (c in children) {
+                // Folders switched off in the settings (and links that lead out of the roots) are not shown at all.
+                val canon = c.canonicalFile
+                if (!jail.inside(canon)) continue
                 if (out.size >= max) { truncated = true; return }
                 out += entry(c)
-                // Never follow a symlink that leaves the roots while recursing.
-                if (recursive && c.isDirectory && jail.inside(c.canonicalFile)) walk(c)
+                if (recursive && c.isDirectory) walk(c)
             }
         }
         walk(dir)
@@ -57,6 +59,7 @@ internal class FileOps(private val jail: FileJail) {
     }
 
     fun write(path: String, text: String, append: Boolean, createDirs: Boolean): Map<String, Any?> {
+        jail.requireWritable()
         val f = jail.resolve(path)
         val bytes = text.toByteArray(Charsets.UTF_8)
         if (bytes.size > MAX_WRITE) throw FilesError("too_large", "That is too large to write in one go (10 MB limit)")
@@ -84,9 +87,11 @@ internal class FileOps(private val jail: FileJail) {
     }
 
     fun delete(path: String, recursive: Boolean): Map<String, Any?> {
+        jail.requireWritable()
         val f = jail.resolve(path)
-        if (jail.isRoot(f)) throw FilesError("path_not_allowed", "PAI's own folder cannot be deleted")
+        if (jail.isRoot(f)) throw FilesError("path_not_allowed", "An allowed folder itself cannot be deleted")
         if (!f.exists()) throw FilesError("not_found", "No such file")
+        jail.requireNoDeniedInside(f)
         if (f.isDirectory) {
             if (!recursive && (f.list()?.isNotEmpty() == true)) throw FilesError("not_empty", "That folder is not empty (set recursive to delete it with everything in it)")
             if (!f.deleteRecursively()) throw FilesError("delete_failed", "The folder could not be deleted")
@@ -95,8 +100,10 @@ internal class FileOps(private val jail: FileJail) {
     }
 
     fun copy(source: String, destination: String, overwrite: Boolean): Map<String, Any?> {
+        jail.requireWritable()
         val src = jail.resolve(source); val dst = jail.resolve(destination)
         if (!src.exists()) throw FilesError("not_found", "No such file")
+        jail.requireNoDeniedInside(src)
         if (dst.exists() && !overwrite) throw FilesError("exists", "The destination already exists (set overwrite to replace it)")
         if (src.isDirectory) {
             if (dst.canonicalPath.startsWith(src.canonicalPath + File.separator)) throw FilesError("bad_parameter", "A folder cannot be copied into itself")
@@ -109,9 +116,11 @@ internal class FileOps(private val jail: FileJail) {
     }
 
     fun move(source: String, destination: String, overwrite: Boolean): Map<String, Any?> {
+        jail.requireWritable()
         val src = jail.resolve(source); val dst = jail.resolve(destination)
-        if (jail.isRoot(src)) throw FilesError("path_not_allowed", "PAI's own folder cannot be moved")
+        if (jail.isRoot(src)) throw FilesError("path_not_allowed", "An allowed folder itself cannot be moved")
         if (!src.exists()) throw FilesError("not_found", "No such file")
+        jail.requireNoDeniedInside(src)
         if (dst.exists() && !overwrite) throw FilesError("exists", "The destination already exists (set overwrite to replace it)")
         if (src.isDirectory && dst.canonicalPath.startsWith(src.canonicalPath + File.separator)) throw FilesError("bad_parameter", "A folder cannot be moved into itself")
         dst.parentFile?.mkdirs()

@@ -1,6 +1,9 @@
 package com.pai.plugins.files
 
 import android.util.Log
+import android.os.Build
+import android.os.Environment
+import com.pai.plugin.api.ConfigurablePlugin
 import com.pai.plugin.api.PluginContext
 import com.pai.plugin.api.PluginModule
 import kotlinx.coroutines.CancellationException
@@ -9,12 +12,13 @@ import kotlinx.coroutines.withContext
 import java.io.File
 
 /**
- * Files (`pai.files`): list, read, write, stat, delete, copy and move inside PAI's own folders on the phone
- * (the app's external files folder, visible over USB, plus a private one). Nothing outside them is
- * reachable: Android's shared storage needs a user-chosen folder (Storage Access Framework), which a
- * background capability cannot ask for. Capability ids and parameters match the desktop files plugin.
+ * Files (`pai.files`): list, read, write, stat, delete, copy and move inside the folders the user allowed.
+ * With no settings that is PAI's own folders (the app's external files folder, visible over USB, plus a
+ * private one). Shared folders (Pictures, Download...) are added in the plugin settings and need Android's
+ * "All files access". Denied folders and read-only are enforced here too, not only by the backend.
+ * Capability ids and parameters match the desktop files plugin.
  */
-class FilesPlugin : PluginModule {
+class FilesPlugin : PluginModule, ConfigurablePlugin {
 
     override val name = "pai.files"
     override val capabilities = listOf("files.list", "files.read", "files.write", "files.stat", "files.delete", "files.copy", "files.move")
@@ -22,17 +26,38 @@ class FilesPlugin : PluginModule {
     override val permissions = emptyList<String>()
 
     private var ops: FileOps? = null
+    private var appRoots: List<File> = emptyList()
+    private var firstRoot: File? = null
+
+    /** Test seam: whether Android's "All files access" is on. */
+    internal var allFilesAccess: () -> Boolean = { Build.VERSION.SDK_INT < 30 || Environment.isExternalStorageManager() }
 
     override fun attach(context: PluginContext) {
-        val roots = buildList {
+        appRoots = buildList {
             context.appContext.getExternalFilesDir(null)?.let { add(it) }       // /sdcard/Android/data/<app>/files
             add(File(context.filesDir, "user_files").apply { mkdirs() })
         }
-        ops = FileOps(FileJail(roots))
+        build(null)                                  // no settings yet: exactly 1.0.0 (PAI's own folders only)
+    }
+
+    /** The user's settings (allowedPaths, deniedPaths, readOnly). Called after attach and on every change. */
+    override fun configure(config: Map<String, Any?>) = build(config)
+
+    internal fun build(config: Map<String, Any?>?) {
+        if (config == null || config.isEmpty()) {
+            ops = FileOps(FileJail(appRoots)); firstRoot = appRoots.firstOrNull(); return
+        }
+        fun paths(k: String) = (config[k] as? List<*>).orEmpty().mapNotNull { (it as? String)?.trim()?.takeIf { s -> s.startsWith("/") } }.map { File(it) }
+        val allowed = if (config.containsKey("allowedPaths")) paths("allowedPaths") else appRoots
+        val jail = FileJail(allowed, paths("deniedPaths"), config["readOnly"] == true)
+        ops = FileOps(jail); firstRoot = jail.roots.firstOrNull()
     }
 
     override suspend fun invoke(capability: String, params: Map<String, Any?>): Map<String, Any?> {
         val o = ops ?: return failure("no_context_attached", "The files plugin is not ready")
+        if (!allFilesAccess() && SharedStorage.touched(params, firstRoot).any { SharedStorage.isShared(it, appRoots) }) {
+            return failure("all_files_access_required", SharedStorage.MESSAGE)
+        }
         return try {
             withContext(Dispatchers.IO) {
                 when (capability) {
@@ -66,7 +91,7 @@ class FilesPlugin : PluginModule {
     private fun long(v: Any?, default: Long): Long = (v as? Number)?.toLong() ?: default
     private fun failure(code: String, message: String) = mapOf("ok" to false, "error" to code, "message" to message)
 
-    override fun destroy() { ops = null }
+    override fun destroy() { ops = null; appRoots = emptyList(); firstRoot = null }
 
     private companion object { const val TAG = "PaiFilesKt" }
 }
