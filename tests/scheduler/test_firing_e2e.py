@@ -83,3 +83,25 @@ async def test_free_action_runs_without_consent_and_without_a_confirmation_pause
     (task,) = await tm.list()
     assert task.status == TaskStatus.COMPLETED and not task.requires_confirmation
     assert frames[0]["parameters"] == {"level": 3}
+
+
+async def test_consent_still_counts_when_the_store_hands_back_a_fresh_copy(
+        rig, security, session_factory, validator, devices):
+    """The DB-backed store does not persist `pre_approved`; the run must not lose the approval when the
+    task is reloaded (it failed with 'Consent is missing or inactive' at fire time)."""
+    tm, svc, frames, dev, stop = await build(rig, security, session_factory, validator, devices)
+    real_require = tm.store.require
+
+    async def fresh_copy(task_id):
+        t = (await real_require(task_id)).model_copy(deep=True)
+        t.authorization.pre_approved = False            # what a reload from the database gives
+        return t
+    tm.store.require = fresh_copy
+    await make_row(session_factory, consent=True, requires_consent=True)
+    await svc._tick()
+    await asyncio.gather(*svc._bg)
+    await asyncio.sleep(0.1)
+    stop.set(); await dev
+    assert [f["capability"] for f in frames] == ["camera.snap"]
+    (task,) = await tm.list()
+    assert task.status == TaskStatus.COMPLETED

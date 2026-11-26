@@ -75,6 +75,7 @@ class TaskManager(Manager):
         self.authorizer = security_manager
         self._running_tasks: Dict[str, asyncio.Task] = {}
         self._paused: set[str] = set()      # ids of tasks the user has paused (deadlines stop counting)
+        self._pre_approved_ids: set[str] = set()   # tasks the SERVER pre-approved (flag is never persisted)
         self._pause_events:  Dict[str, asyncio.Event] = {}   
 
     async def _on_initialize(self) -> None:
@@ -429,6 +430,9 @@ class TaskManager(Manager):
             scope=ScopeContext.from_execution_context(context).with_device(task.device_id),
             pre_approved=context.pre_approved,
         )
+        if context.pre_approved:
+            # The flag is deliberately not stored; _execute reloads the task from the store, so remember it here.
+            self._pre_approved_ids.add(task.id)
         decision = precheck
         if decision.effect == DecisionEffect.ALLOW:
             # Re-run bound to the *runtime* task id (the pre-check used the spec id).
@@ -977,7 +981,9 @@ class TaskManager(Manager):
         ) as span:
 
             task = await self.store.require(task_id)
-            
+            if task_id in self._pre_approved_ids:
+                task.authorization.pre_approved = True   # server-decided (schedule consent, admin tester)
+
             # Pause event for this run. Set = running, cleared = paused.
             # Created *before* start() so a pause arriving the instant
             # we go RUNNING has an event to clear.
@@ -1137,6 +1143,7 @@ class TaskManager(Manager):
             finally:
                 self._running_tasks.pop(task_id, None)
                 self._pause_events.pop(task_id, None)
+                self._pre_approved_ids.discard(task_id)
 
     async def _run_pausable(self, task_id: str, coro: Any, deadline: Optional[float]) -> Any:
         """Await ``coro`` with a deadline that does NOT run while the user has the task paused.
