@@ -11,6 +11,46 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel
 
 
+class StorageNotWritable(RuntimeError):
+    """A directory the agent must write to (device id, plugins, logs) is not writable."""
+
+
+def pai_home() -> Path:
+    """Root of everything the agent stores: ``$PAI_HOME``, else ``~/.pai``.
+
+    In a container whose user has no passwd entry ``Path.home()`` fails; set ``PAI_HOME`` (the
+    official image does) or mount a volume and point ``PAI_HOME`` at it."""
+    env = os.environ.get("PAI_HOME")
+    if env:
+        return Path(env).expanduser()
+    try:
+        return Path.home() / ".pai"
+    except RuntimeError as exc:                       # no HOME and no passwd entry
+        raise StorageNotWritable(
+            "Cannot work out a home directory for this user. Set PAI_HOME to a writable "
+            "directory (for Docker: -e PAI_HOME=/data -v pai-device:/data).") from exc
+
+
+def ensure_writable_dir(path: Path, what: str) -> Path:
+    """Create ``path`` if needed and prove we can write in it, or explain how to fix it."""
+    path = Path(path)
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / f".write-test-{os.getpid()}"
+        probe.write_text("")
+        probe.unlink()
+    except OSError as exc:
+        raise StorageNotWritable(
+            f"The {what} directory {path} is not writable ({exc.strerror or exc}).\n"
+            "  Docker: a named volume created by an older image is owned by root. Remove it once "
+            "(docker volume rm pai-device) and run again,\n"
+            "          or run as your own user with a folder you own: "
+            "--user \"$(id -u):$(id -g)\" -e PAI_HOME=/data -v \"$HOME/.pai-device:/data\".\n"
+            "  Otherwise: make the directory writable (chown/chmod), or point PAI_HOME / "
+            "PAI_STATE_DIR / PAI_PLUGIN_DIR at one that is.") from exc
+    return path
+
+
 def _default_arch() -> str:
     m = _platform.machine().lower()
     return {
@@ -41,10 +81,10 @@ class DeviceConfig:
     runtime_version: str = "1.0.0"
 
     state_dir: Path = field(
-        default_factory=lambda: Path.home() / ".pai" / "state"
+        default_factory=lambda: Path(os.environ.get("PAI_STATE_DIR") or pai_home() / "state")
     )
     plugin_dir: Path = field(
-        default_factory=lambda: Path.home() / ".pai" / "plugins"
+        default_factory=lambda: Path(os.environ.get("PAI_PLUGIN_DIR") or pai_home() / "plugins")
     )
 
     heartbeat_interval: float = 20.0

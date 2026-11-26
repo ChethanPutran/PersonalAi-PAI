@@ -44,7 +44,7 @@ The agent is a long-running process that:
 5. **Installs plugins** on demand: downloads the artifact from the backend, verifies the sha256 against the registry index, installs pip dependencies, runs post-install scripts, and instantiates the plugin adapter.
 6. **Executes capabilities** requested via WebSocket, returning the result to the backend's `device_executor`.
 
-The `server-cli` command offers a terminal interface to the same backend, for inspecting catalogs, installing plugins, and invoking capabilities without touching the agent process.
+The `pai-device` command offers a terminal interface to the same backend, for inspecting catalogs, installing plugins, and invoking capabilities without touching the agent process.
 
 ---
 
@@ -98,8 +98,8 @@ uv run --active --env-file .env server
 Expected output:
 
 ```
-INFO [server.transport] Logging in as agent-user@example.com
-INFO [server.transport] Logged in as agent-user@example.com (admin=False)
+INFO [pai_device.transport] Logging in as agent-user@example.com
+INFO [pai_device.transport] Logged in as agent-user@example.com (admin=False)
 INFO [server.agent] Registered as device b4686279-… (Device registered)
 INFO [server.agent] WS handshake complete for b4686279-…
 ```
@@ -107,7 +107,7 @@ INFO [server.agent] WS handshake complete for b4686279-…
 The agent is now online. Install a plugin:
 
 ```bash
-uv run --active --env-file .env server-cli install browser --watch
+uv run --active --env-file .env pai-device install browser --watch
 ```
 
 ---
@@ -203,83 +203,135 @@ sudo journalctl -u pai-agent -f
 
 ## Command-line interface
 
-`server-cli` reads the same `.env` as the agent and logs in via `POST /auth/login`. Every command is a single-shot HTTP interaction — it doesn't require the agent to be running unless noted.
+`pai-device` is the whole client in one command: talk to the assistant (text and voice), manage your plugins and
+settings, run capabilities, or start the device agent. It reads the same environment as the agent
+(`PAI_BACKEND_URL`, `PAI_SERVER_EMAIL`, `PAI_SERVER_PASSWORD`; `pai-device config show` prints the effective
+settings with the password masked), logs in once and runs one command.
 
 ```bash
-uv run --active --env-file .env server-cli <command> [args]
+pai-device                 # no arguments, or `pai-device run`: start the agent (same as `pai-server`)
+pai-device <command> --help
 ```
 
-### Commands
+Exit codes: `0` ok, `1` failed (the message is the server's own words), `2` bad usage / missing setup,
+`3` an action is waiting for your approval, `130` interrupted.
 
-| Command | What it does | Needs agent online? |
-|---|---|---|
-| `list` | Show the plugin catalog visible to this user | No |
-| `show <id>` | Full metadata for one plugin | No |
-| `install <id>[@<ver>] [--force] [--watch]` | Ask the device to install a plugin | **Yes** |
-| `uninstall <id> [--watch]` | Ask the device to uninstall a plugin | **Yes** |
-| `enable <id>` | Enable for this user + device | No (eventual) |
-| `disable <id>` | Disable for this user + device | No (eventual) |
-| `status` | All plugin rows for the device | No |
-| `installed` | Only plugins actually installed | No |
-| `registry` | Backend's `plugin_registry/` index | No |
-| `catalog --platform <p>` | Platform-filtered catalog | No |
-| `system` | Plugin manager health | No |
-| `invoke <capability> [--params …] [--timeout N]` | Run a capability and wait for result | **Yes** |
+### Talk to the assistant
+
+| Command | What it does |
+|---|---|
+| `chat "message"` | One message; the reply streams as it is written. Progress lines (`· Understanding your request…`) go to stderr, so `chat … > answer.txt` keeps only the answer. Text piped on stdin works too. |
+| `chat` | Interactive session (`/new`, `/status`, `/help`, `/quit`). Ctrl+C stops the current reply, not the session. |
+| `voice` | Realtime voice over `WS /voice/stream`: your microphone streams up while you talk, the spoken answer plays as it is generated. Needs `pip install 'pai-device[voice]'` (and PortAudio, e.g. `apt install libportaudio2`). |
+| `voice --ptt` | Push-to-talk: Enter starts talking, Enter again sends. |
+| `voice --text-only` | Type your messages, read (and hear, if a speaker exists) the answers. Works without the voice extra. |
+| `voice --barge-in` | Keep the microphone open while the assistant speaks so you can interrupt it. Use headphones: a laptop speaker leaks into its microphone, so by default the microphone is muted while the assistant talks. |
+
+`chat` and `voice` share one conversation (the last session id is kept in the state dir; `--new` starts fresh,
+`--session ID` picks one). When an action needs your approval, `chat` asks right there (`y` once, `s` this session
+if the server allows it, anything else denies); without a terminal it prints `pai-device approve <task>` and does
+**not** approve anything.
+
+### Settings and account
+
+| Command | What it does |
+|---|---|
+| `settings [show]` / `settings set --name … --timezone … --language … --remote-install on\|off --remote-invoke on\|off` | Your profile plus this device's remote-access switches, in one place |
+| `remote-access show` / `remote-access set --install on\|off --invoke on\|off` | Who may install / run plugins on this device **from outside it**. Both are **off by default**: until you switch them on, nothing but this device itself (your other devices, the web, schedules, agents) can install plugins here or run them here |
+| `profile show` / `profile set --name --timezone --language` | Your profile (an empty value clears it) |
+| `password` | Change your password (prompts without echo; never taken as an argument) |
+| `devices` | Your devices, whether they are online, and their remote-access switches (`*` = this device) |
+| `plugins [list]` | Plugins for your account, plus this device's install state |
+| `plugins enable <id>` / `plugins disable <id>` | Switch a plugin on or off for your account |
+| `config show` | The effective local configuration (password masked) |
+
+### Install, run, approve
+
+| Command | What it does |
+|---|---|
+| `install <id>[@ver] [--device D] [--force] [--no-wait] [--timeout N]` | Ask a device to install a plugin and **follow it live**: `request received → sent to the device → downloading → verifying → installing → done`, or a plain failure message with a hint and a non-zero exit. `--no-wait` only prints the operation id |
+| `uninstall <id> [--device D] [--no-wait]` | Same, for removal |
+| `operations [--device D] [--plugin P] [--active]` | Recent installs/removals and how they went |
+| `invoke <capability> [--device D] [--param k=v …] [--json-params '{…}'] [--timeout N] [--approve] [--scope once\|session\|always]` | Run a capability through the real pipeline (authorization, confirmation, audit) and wait for the result |
+| `approve <task> [--scope …]` / `deny <task>` | Answer a task that waits for your confirmation |
+| `list`, `show <id>`, `status`, `installed`, `registry`, `catalog`, `system`, `enable`, `disable` | Catalog and per-device plugin state (unchanged) |
+
+Acting on **another** device (`--device <other>`) is a remote action: the backend refuses it with the owner's own
+message unless that device has the matching switch on (`remote-access set` on that device, or the Settings page).
+Acting on this device from itself is always allowed. `install`/`uninstall` use short polling *inside the CLI only*
+(a CLI has no WebSocket to be pushed to); the apps and this agent get the same updates pushed live.
+
+`invoke` typed parameters: `--param n=3 --param ok=true --param name=bob` (values that parse as JSON are typed, the rest
+are text); `--json-params '@file.json'` reads a file, and with no parameters at all JSON on stdin is used. An action that
+needs confirmation is shown to you (capability, risk, parameters with secrets masked) and **does not run** unless you
+pass `--approve` (or approve it in the app). `--scope session|always` is only honoured when the server allows it.
 
 ### Common options
 
 | Option | Applies to | Notes |
 |---|---|---|
-| `--device <id>` | All | Overrides `~/.pai/state/device_id` |
-| `--json` | All | Raw JSON output (pipe to `jq`) |
-| `--watch` | `install`, `uninstall` | Spinner + elapsed time until resolved |
-| `--force` | `install` | Skip "already installed" pre-check |
-| `--version <ver>` | `install` | Alternative to `@<ver>` syntax |
-| `--params`, `-p` | `invoke` | Inline JSON, `@file.json`, or omit for stdin |
-| `--timeout <sec>` | `invoke` | Default 60s |
+| `--device <id>` | Most | Overrides `~/.pai/state/device_id` |
+| `--json` | Most | Raw JSON output (pipe to `jq`) |
 
 ### Examples
 
 ```bash
-# List catalog
-server-cli list
-
-# Install latest version
-server-cli install browser --watch
-
-# Install a specific version
-server-cli install browser@1.0.1 --watch
-
-# Force reinstall after editing the artifact in place
-server-cli install browser@1.0.1 --force --watch
-
-# Enable so the agent runs it
-server-cli enable browser
-
-# Check what's actually installed
-server-cli installed
-
-# Invoke a capability
-server-cli invoke browser.navigate \
-  --params '{"url": "https://example.com"}'
-
-# Pipe params from a file
-server-cli invoke browser.book --params @steps.json --timeout 180
-
-# Machine-readable output
-server-cli list --json | jq '.plugins[].id'
+pai-device chat "what's the weather like?"          # streams the answer
+pai-device voice --ptt                               # push-to-talk (Enter to talk, Enter to send)
+pai-device install browser_linux@1.0.1               # follows the install; exit 0 only if it worked
+pai-device install camera_linux --device $PHONE      # needs the phone's "Allow remote plugin install" switch
+pai-device remote-access set --invoke on             # let my other devices run plugins on THIS device
+pai-device invoke files.read --param path=/etc/hostname
+pai-device invoke shell.exec --param command="uname -a" --approve   # you have seen what it will do
+pai-device operations --active
+pai-device list --json | jq '.plugins[].id'
 ```
 
 ### Shell completion (optional)
 
 ```bash
-uv add argcomplete
-# then:
-register-python-argcomplete server-cli > ~/.server-cli-complete
-echo "source ~/.server-cli-complete" >> ~/.bashrc
+pip install argcomplete
+eval "$(register-python-argcomplete pai-device)"      # add to ~/.bashrc
 ```
 
 ---
+
+## Running in Docker
+
+```bash
+docker build -f docker/Dockerfile.device -t pai-device .
+PAI_SERVER_EMAIL=you@example.com PAI_SERVER_PASSWORD=... ./scripts/run_pai_server_device_docker.sh
+```
+
+* Everything the agent stores (device id, downloaded plugins, logs) lives under `$PAI_HOME`
+  (`/home/pai/.pai` in the image; override the pieces with `PAI_STATE_DIR` / `PAI_PLUGIN_DIR`). Mount a
+  volume there to keep it across runs.
+* **"Permission denied: /home/pai/.pai/state"** means that volume is owned by root (created by an older
+  image). Remove it once with `docker volume rm pai-device`, or run as your own user with a folder you own:
+  `--user "$(id -u):$(id -g)" -e PAI_HOME=/data -v "$HOME/.pai-device:/data"`. The agent checks the
+  directories at start and prints these hints instead of a traceback.
+* Inside a container `localhost` is the container: use `--network host` (Linux) or the host's address for
+  `PAI_BACKEND_URL`.
+* A container only sees what you give it. Plugins that need the machine itself (camera, screenshots,
+  keyboard/mouse, audio) need the host devices passed in, for example `--device /dev/video0 --group-add video`
+  or the X11/Wayland and PulseAudio sockets; without them those plugins report a permission error. A
+  headless server container runs the Python server plugins only.
+
+## Remote access (who may install / run plugins on this device)
+
+By default nothing outside this device can change it. Other devices of the same user, the web, schedules
+and agents can install plugins on it, or run plugins on it, only after the owner turns on **Allow remote
+plugin install** / **Allow remote plugin use** for this device (the PAI app's settings, or the account
+Settings page at `/settings` on the backend).
+
+* The agent learns the switches from the backend (`connected` frame, then `device.remote_access` frames when the
+  owner changes them) and **fails closed**: until told, remote requests are refused.
+* It enforces them itself, in addition to the backend: a `plugin.install`/`plugin.uninstall` whose
+  `requested_by_device` is not this device, or an invoke whose `source_device_id` is not this device, is refused
+  while the matching switch is off. Your own CLI commands on this device are local and always allowed.
+* Every API call carries `X-PAI-Device-Id` so the backend can tell "this device acting on itself" from remote.
+* While installing, the agent sends `plugin.progress` frames (`downloading`, `verifying`, `installing`) so the
+  requesting app shows live status instead of polling.
 
 ## Plugin system
 
@@ -421,7 +473,7 @@ For a real release, bump the version so the old one stays on disk for rollback:
 
 ```bash
 python scripts/bump_plugin.py browser patch --reload-backend
-server-cli install browser@<new-version> --watch
+pai-device install browser@<new-version> --watch
 ```
 
 ### Versioning
@@ -435,7 +487,7 @@ python scripts/bump_plugin.py browser patch --commit        # bump + git commit
 python scripts/bump_plugin.py browser minor --reload-backend
 ```
 
-The old version stays on disk — `server-cli install browser@1.0.0 --watch` rolls back without rebuilding.
+The old version stays on disk — `pai-device install browser@1.0.0 --watch` rolls back without rebuilding.
 
 ---
 
@@ -455,7 +507,7 @@ server/
     config.py                # DeviceConfig + wire models (pydantic)
     transport.py             # APIClient (login/retry) + WSClient
     plugins.py               # DevicePluginManager, adapters
-    cli.py                   # server-cli
+    cli.py                   # pai-device
   scripts/
     bump_plugin.py           # versioning helper
     test_server.py           # HTTP fixture server for tests
@@ -585,18 +637,18 @@ The device belongs to a different user. The agent stops (retrying won't help). T
 1. Delete `~/.pai/state/device_id` (forces a new id)
 2. Restart the agent
 
-The old device row stays in the backend's `devices` table; `server-cli status --device <old>` will show it offline.
+The old device row stays in the backend's `devices` table; `pai-device status --device <old>` will show it offline.
 
 ### `HTTP 409: Device is not connected`
 
-`server-cli install` and `uninstall` push over WS — they need the agent running. Either start it, or use `server-cli enable` (durable intent that takes effect on next sync).
+`pai-device install` and `uninstall` push over WS — they need the agent running. Either start it, or use `pai-device enable` (durable intent that takes effect on next sync).
 
 ### `No artifact for browser@1.0.1 installable on platform=…`
 
 The manifest doesn't declare an artifact for this device's platform/architecture/device_type. Check:
 
 ```bash
-server-cli show browser | jq '{platforms, architectures, device_types}'
+pai-device show browser | jq '{platforms, architectures, device_types}'
 ```
 
 ### `pip install failed (1): No module named pip`
@@ -638,7 +690,7 @@ Two paths to force it:
 
 ```bash
 # Fast (agent must be online)
-server-cli install browser@<version> --force --watch
+pai-device install browser@<version> --force --watch
 
 # Slow (agent offline; happens within 60 s anyway)
 # just wait — _sync_once detects sha drift
@@ -656,8 +708,8 @@ ls plugin_registry/browser/1.0.1/server/
 The capability is not in the plugin's manifest, or the plugin isn't running. Check:
 
 ```bash
-server-cli installed              # is_installed + enabled
-server-cli show browser | jq '.capabilities'
+pai-device installed              # is_installed + enabled
+pai-device show browser | jq '.capabilities'
 ```
 
 ### Agent keeps re-installing the same plugin every 60 s
@@ -693,7 +745,7 @@ The agent uses **three transport mechanisms**, each for a different job:
 | WebSocket | Install, uninstall, capability dispatch | Server → device push; low latency; keeps the device state visible to the backend |
 | 60 s polling (`_sync_once`) | Reconciliation | Catches backend changes made while the WS was down; survives backend restarts |
 
-The reconciliation loop is the correctness anchor. The WS is the fast path. `server-cli enable` writes intent to the DB; `_sync_once` acts on it within 60 s. `server-cli install` pushes directly over WS; `_sync_once` corrects any drift if the push was missed.
+The reconciliation loop is the correctness anchor. The WS is the fast path. `pai-device enable` writes intent to the DB; `_sync_once` acts on it within 60 s. `pai-device install` pushes directly over WS; `_sync_once` corrects any drift if the push was missed.
 
 ### Why `device_id` is persisted
 

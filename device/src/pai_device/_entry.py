@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 
 from .agent.agent import DeviceAgent
-from .config import DeviceConfig
+from .config import DeviceConfig, StorageNotWritable, pai_home
 
 logger = logging.getLogger(__name__)
 
@@ -26,9 +26,6 @@ _QUIET_IN_TERMINAL = ("httpx", "httpcore", "urllib3")
 
 
 def _configure_logging(log_dir: Path, verbose_http: bool = False) -> None:
-    log_dir.mkdir(parents=True, exist_ok=True)
-    http_log = log_dir / "http.log"
-
     root = logging.getLogger()
     root.setLevel(logging.INFO)
     for h in list(root.handlers):
@@ -46,9 +43,15 @@ def _configure_logging(log_dir: Path, verbose_http: bool = False) -> None:
         )
     root.addHandler(console)
 
-    fh = logging.handlers.RotatingFileHandler(
-        http_log, maxBytes=10 * 1024 * 1024, backupCount=5,
-    )
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        fh = logging.handlers.RotatingFileHandler(
+            log_dir / "http.log", maxBytes=10 * 1024 * 1024, backupCount=5,
+        )
+    except OSError as exc:       # an unwritable log dir must not stop the agent: log to the console only
+        logging.getLogger(__name__).warning(
+            "File logging disabled: cannot write %s (%s)", log_dir, exc.strerror or exc)
+        return
     fh.setFormatter(logging.Formatter(
         "%(asctime)s %(levelname)s %(message)s"
     ))
@@ -69,7 +72,7 @@ def _run_once(cfg: DeviceConfig) -> int:
 
 def _spawn_child() -> subprocess.Popen:
     return subprocess.Popen(
-        [sys.executable, "-m", "server"],
+        [sys.executable, "-m", "pai_device"],
         env=os.environ.copy(),
     )
 
@@ -127,8 +130,8 @@ def main() -> int:
              "(dev only; requires `uv add --dev watchfiles`)",
     )
     p.add_argument(
-        "--log-dir", default="logs/server",
-        help="directory for http.log (default: ./logs/server)",
+        "--log-dir", default=None,
+        help="directory for http.log (default: $PAI_HOME/logs, i.e. ~/.pai/logs)",
     )
     p.add_argument(
         "--verbose-http", action="store_true",
@@ -136,7 +139,12 @@ def main() -> int:
     )
     args = p.parse_args()
 
-    _configure_logging(Path(args.log_dir), verbose_http=args.verbose_http)
+    try:
+        log_dir = Path(args.log_dir) if args.log_dir else pai_home() / "logs"
+    except StorageNotWritable as exc:
+        print(f"storage error: {exc}", file=sys.stderr)
+        return 3
+    _configure_logging(log_dir, verbose_http=args.verbose_http)
 
     try:
         cfg = DeviceConfig.from_env()
@@ -157,4 +165,8 @@ def main() -> int:
     if args.reload:
         return _run_reload()
 
-    return _run_once(cfg)
+    try:
+        return _run_once(cfg)
+    except StorageNotWritable as exc:
+        print(f"storage error: {exc}", file=sys.stderr)
+        return 3

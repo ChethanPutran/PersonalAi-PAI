@@ -13,9 +13,11 @@ FROM python:3.12-slim
 # copies its ownership from the image, so without this it is created root-owned and the agent
 # cannot write its device id / plugins ("Permission denied: /home/pai/.pai/state").
 RUN useradd --create-home --uid 1000 pai \
- && mkdir -p /home/pai/.pai && chown -R pai:pai /home/pai
+ && mkdir -p /home/pai/.pai/state /home/pai/.pai/plugins /home/pai/.pai/logs \
+ && chown -R pai:pai /home/pai
 COPY --from=build /install /usr/local
-ENV PYTHONUNBUFFERED=1 PAI_DEVICE_TYPE=server
+ENV PYTHONUNBUFFERED=1 PAI_DEVICE_TYPE=server HOME=/home/pai PAI_HOME=/home/pai/.pai \
+    PYTHONUSERBASE=/home/pai/.pai/python PIP_NO_CACHE_DIR=1
 USER pai
 WORKDIR /home/pai
 # Registered device id, downloaded plugins and logs live here: mount a volume to keep them.

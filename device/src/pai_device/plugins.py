@@ -16,8 +16,10 @@ import hashlib
 import importlib.util
 import json
 import logging
+import os
 import shutil
 import sys
+import tarfile
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -308,6 +310,22 @@ class PythonPluginAdapter(PluginAdapter):
 
         logger.info("Installing plugin deps: %s", deps)
         await self._run_streamed(argv, "pip")
+        self._expose_user_site()
+
+    @staticmethod
+    def _expose_user_site() -> None:
+        """pip falls back to the user site when site-packages is not writable (a non-root container).
+        A directory created after the interpreter started is not on sys.path, so the plugin could not
+        import what was just installed until the next restart: add it now."""
+        import importlib
+        import site
+        try:
+            user_site = site.getusersitepackages()
+            if user_site and os.path.isdir(user_site) and user_site not in sys.path:
+                site.addsitedir(user_site)
+        except Exception:                          # no usable user site: nothing to expose
+            logger.debug("could not expose the user site", exc_info=True)
+        importlib.invalidate_caches()
 
     async def start(
         self, manifest: Dict[str, Any], artifact: Path, config: Dict[str, Any]
@@ -551,12 +569,18 @@ class DevicePluginManager:
                 await self._stop_locked(plugin_id)
                 self._forget(plugin_id)
 
-            # Move artifact into place
+            # Put the download in place. The backend serves a plugin as a .tar.gz package
+            # (<platform>/<files>); unpack it and find the library/script the manifest names.
+            # A bare artifact file (older backends, tests) is simply copied.
             target_dir = self.plugin_root / plugin_id / version
             target_dir.mkdir(parents=True, exist_ok=True)
-            target_artifact = target_dir / artifact.name
+            if tarfile.is_tarfile(artifact):
+                target_artifact = self._unpack_package(artifact, target_dir, manifest)
+            else:
+                target_artifact = target_dir / artifact.name
+                if artifact.resolve() != target_artifact.resolve():
+                    shutil.copy2(artifact, target_artifact)
             if artifact.resolve() != target_artifact.resolve():
-                shutil.copy2(artifact, target_artifact)
                 try:
                     artifact.unlink()
                 except OSError:
@@ -683,6 +707,43 @@ class DevicePluginManager:
             if self._cap_index.get(cap) == plugin_id:
                 self._cap_index.pop(cap, None)
         logger.debug("Forgot plugin %s", plugin_id)
+
+    #: A plugin package is a few MB; anything far beyond this is a bomb, not a plugin.
+    MAX_PACKAGE_BYTES = 512 * 1024 * 1024
+
+    def _unpack_package(self, archive: Path, target_dir: Path, manifest: Dict[str, Any]) -> Path:
+        """Extract a plugin package into ``target_dir`` and return the artifact file inside it.
+
+        Safe by construction: only regular files and directories, no absolute or ``..`` paths, no
+        links (``filter="data"`` refuses them too), and a cap on the unpacked size. The artifact is the
+        path the manifest names for its platform (``platforms.<p>.artifact``, e.g. ``linux/libx.so``);
+        failing that, the first library/script found.
+        """
+        with tarfile.open(archive, "r:*") as tar:
+            members = tar.getmembers()
+            total = 0
+            for m in members:
+                name = Path(m.name)
+                if name.is_absolute() or ".." in name.parts:
+                    raise RuntimeError(f"unsafe path in plugin package: {m.name!r}")
+                if not (m.isfile() or m.isdir()):
+                    raise RuntimeError(f"unsupported entry in plugin package: {m.name!r}")
+                total += max(m.size, 0)
+            if total > self.MAX_PACKAGE_BYTES:
+                raise RuntimeError("plugin package is too large to unpack")
+            tar.extractall(target_dir, members=members, filter="data")
+
+        root = target_dir.resolve()
+        for spec in (manifest.get("platforms") or {}).values():
+            rel = (spec or {}).get("artifact") if isinstance(spec, dict) else None
+            if rel:
+                candidate = (target_dir / rel).resolve()
+                if candidate.is_file() and root in candidate.parents:
+                    return candidate
+        found = self._find_artifact(target_dir)
+        if found is None:
+            raise RuntimeError("no artifact found in the plugin package")
+        return found
 
     def _find_artifact(self, version_dir: Path) -> Optional[Path]:
         """Return the first supported artifact file found under ``version_dir``."""

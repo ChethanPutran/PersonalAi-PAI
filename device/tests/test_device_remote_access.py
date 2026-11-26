@@ -103,3 +103,11 @@ async def test_remote_invoke_is_refused_when_off_and_local_is_not(agent):
     await agent._handle_ws_message({"type": "invoke", "request_id": "r3", "capability": "camera.capture",
                                     "source_device_id": "B"})
     assert ran == ["camera.capture"]
+
+
+@pytest.mark.asyncio
+async def test_pushed_operation_updates_are_ignored_quietly(agent, caplog):
+    import logging
+    with caplog.at_level(logging.WARNING):
+        await agent._handle_ws_message({"type": "plugin.operation", "operation": {"id": "op1", "status": "installing"}})
+    assert not [r for r in caplog.records if "Unhandled" in r.getMessage()]

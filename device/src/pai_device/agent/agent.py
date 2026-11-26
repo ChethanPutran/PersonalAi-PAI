@@ -36,6 +36,7 @@ from ..config import (
     DeviceConfig,
     DeviceRegistrationInfo,
     RegisterRequest,
+    ensure_writable_dir,
 )
 from ..plugins import DevicePluginManager
 from ..transport import APIClient, WSClient, sha256_file
@@ -65,6 +66,8 @@ class DeviceAgent:
     lifecycle.
     """
 
+    PROGRESS_KEEPALIVE_SECONDS = 20.0     # well under the backend watchdog's stall limit (120 s)
+
     def __init__(self, config: DeviceConfig) -> None:
         """Build the agent's collaborators and prepare the state directory.
 
@@ -74,8 +77,8 @@ class DeviceAgent:
         self.config = config
 
         # Persistent local state (device id, etc.) lives under ``state_dir``.
-        self.state_dir = Path(config.state_dir)
-        self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.state_dir = ensure_writable_dir(Path(config.state_dir), "state")
+        ensure_writable_dir(Path(config.plugin_dir), "plugin")
         self.device_id_file = self.state_dir / "device_id"
 
         # --- collaborators ---------------------------------------------------
@@ -90,6 +93,10 @@ class DeviceAgent:
         # What the owner allows OTHER devices to do to this one. Fail closed: nothing is allowed
         # until the backend says so (in the ``connected`` frame, then ``device.remote_access``).
         self.remote_access: Dict[str, bool] = {"install": False, "invoke": False}
+        # One plugin change at a time. Without it the sync loop (which uninstalls local plugins the
+        # backend "does not know") ran in the middle of an install, whose dependency step takes tens
+        # of seconds, and removed the plugin that was being installed.
+        self._plugin_lock = asyncio.Lock()
         # ``_stop`` is set by the signal handlers (or by the WS loop when the
         # backend sends a terminal close code) to tear everything down.
         self._stop = asyncio.Event()
@@ -381,6 +388,12 @@ class DeviceAgent:
             self._apply_remote_access(message.get("remote_access"))
             return
 
+        # The backend pushes install/uninstall progress to every device of the user (so apps can show it
+        # live). This agent is the one doing the work; it has nothing to display.
+        if msg_type == "plugin.operation":
+            logger.debug("operation update: %s", (message.get("operation") or {}).get("status"))
+            return
+
         # Trivial control messages — nothing to do but acknowledge.
         if msg_type == "pong":
             return
@@ -449,6 +462,10 @@ class DeviceAgent:
     # ------------------------------------------------------------------
 
     async def _handle_install(self, message: Dict[str, Any]) -> None:
+        async with self._plugin_lock:
+            await self._handle_install_locked(message)
+
+    async def _handle_install_locked(self, message: Dict[str, Any]) -> None:
         """Handle a ``plugin.install`` command from the backend.
 
         Refuses a remote request unless the owner allowed remote installs on this device, then
@@ -472,9 +489,21 @@ class DeviceAgent:
             return
 
         logger.info("Installing plugin %s@%s", plugin_id, version)
+        current = {"stage": "downloading"}
+        keepalive: Optional[asyncio.Task] = None
         try:
             async def stage(name: str) -> None:
+                current["stage"] = name
                 await self._progress(op_id, name)
+
+            # A long step (installing dependencies can take minutes) sends nothing by itself; without
+            # a periodic sign of life the backend's watchdog would fail a healthy install as
+            # "device unresponsive". Repeat the current stage until the install ends.
+            async def beat() -> None:
+                while True:
+                    await asyncio.sleep(self.PROGRESS_KEEPALIVE_SECONDS)
+                    await self._progress(op_id, current["stage"])
+            keepalive = asyncio.create_task(beat(), name=f"install-keepalive:{plugin_id}")
 
             await self._install_plugin(plugin_id, version, stage=stage)
             await self.api.report_install(plugin_id, {
@@ -488,6 +517,10 @@ class DeviceAgent:
         except Exception as exc:
             logger.exception("Install %s failed", plugin_id)
             await self._report_install_failure(plugin_id, version, op_id, str(exc)[:500])
+        finally:
+            if keepalive is not None:
+                keepalive.cancel()
+                await asyncio.gather(keepalive, return_exceptions=True)
 
     async def _report_install_failure(
         self, plugin_id: str, version: str, op_id: Optional[str], error: str,
@@ -502,6 +535,10 @@ class DeviceAgent:
             await self._progress(op_id, "failed", error=error)
 
     async def _handle_uninstall(self, message: Dict[str, Any]) -> None:
+        async with self._plugin_lock:
+            await self._handle_uninstall_locked(message)
+
+    async def _handle_uninstall_locked(self, message: Dict[str, Any]) -> None:
         """Handle a ``plugin.uninstall`` command from the backend."""
         plugin_id = (
             (message.get("plugin") or {}).get("id")
@@ -630,7 +667,8 @@ class DeviceAgent:
         await asyncio.sleep(2.0)
         while not self._stop.is_set():
             try:
-                await self._sync_once()
+                async with self._plugin_lock:
+                    await self._sync_once()
             except Exception:
                 logger.exception("Sync failed")
             await asyncio.sleep(self.config.reconcile_interval)

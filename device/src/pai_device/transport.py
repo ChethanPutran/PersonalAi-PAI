@@ -15,7 +15,7 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, AsyncIterator, Dict, Optional, Tuple
 
 import httpx
 import websockets
@@ -471,18 +471,159 @@ class APIClient:
         capability: str,
         parameters: Optional[Dict[str, Any]] = None,
         timeout: float = 60.0,
+        wait_seconds: Optional[float] = None,
+        session_id: Optional[str] = None,
     ) -> Dict[str, Any]:
+        """``POST /devices/{id}/invoke``: run a capability through the real pipeline.
+
+        200 = finished (``ok``/``result``/``error``); 202 = ``awaiting_confirmation`` with the
+        ``confirmation`` details (approve with :meth:`confirm_task`). ``wait_seconds`` is how long
+        the server waits for the result before answering (it caps it at 120).
+        """
+        body: Dict[str, Any] = {
+            "capability": capability,
+            "parameters": parameters or {},
+            "timeout_seconds": timeout,
+            "wait_seconds": min(timeout, 120.0) if wait_seconds is None else wait_seconds,
+        }
+        if session_id:
+            body["session_id"] = session_id
         r = await self._request(
-            "POST",
-            f"/devices/{device_id}/invoke",
-            json={
-                "capability": capability,
-                "parameters": parameters or {},
-                "timeout_seconds": timeout,
-            },
-            timeout=timeout + 10.0,   # httpx timeout must exceed server timeout
+            "POST", f"/devices/{device_id}/invoke", json=body,
+            timeout=body["wait_seconds"] + 15.0,   # httpx timeout must exceed the server's wait
         )
         return r.json()
+
+    # ------------------------------------------------------------------
+    # Generic JSON + SSE (used by the CLI's account / chat commands)
+    # ------------------------------------------------------------------
+
+    async def request_json(
+        self, method: str, path: str, *, json: Any = None,
+        params: Optional[Dict[str, Any]] = None, timeout: Optional[float] = None,
+    ) -> Any:
+        """Authenticated call returning the decoded JSON body (``None`` for an empty one)."""
+        kwargs: Dict[str, Any] = {}
+        if json is not None:
+            kwargs["json"] = json
+        if params:
+            kwargs["params"] = {k: v for k, v in params.items() if v is not None}
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        r = await self._request(method, path, **kwargs)
+        return r.json() if r.content else None
+
+    async def sse(
+        self, method: str, path: str, *, json: Any = None,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> AsyncIterator[Tuple[str, Any]]:
+        """Stream a Server-Sent-Events response as ``(event, data)`` pairs, as they arrive.
+
+        No read timeout (a reply can take a while; the server sends keep-alives). A 401 before
+        the first byte re-logs in once. Errors raise ``httpx.HTTPStatusError`` with the body read,
+        so callers can show the server's own message.
+        """
+        await self.ensure_token()
+        timeout = httpx.Timeout(connect=10.0, read=None, write=30.0, pool=None)
+        for attempt in (1, 2):
+            headers = {"Authorization": f"Bearer {self._token}", "Accept": "text/event-stream"}
+            if self.device_id:
+                headers["X-PAI-Device-Id"] = self.device_id
+            async with self._http.stream(
+                method, path, headers=headers, json=json,
+                params={k: v for k, v in (params or {}).items() if v is not None} or None,
+                timeout=timeout,
+            ) as r:
+                if r.status_code == 401 and attempt == 1:
+                    await r.aread()
+                    await self.login()
+                    continue
+                if r.status_code >= 400:
+                    await r.aread()
+                    r.raise_for_status()
+                async for item in iter_sse(r.aiter_lines()):
+                    yield item
+                return
+
+    # ------------------------------------------------------------------
+    # Account / settings / operations / tasks (thin wrappers over request_json)
+    # ------------------------------------------------------------------
+
+    async def get_profile(self) -> Dict[str, Any]:
+        return await self.request_json("GET", "/account/profile")
+
+    async def update_profile(self, **fields: Any) -> Dict[str, Any]:
+        return await self.request_json("PATCH", "/account/profile", json=fields)
+
+    async def change_password(self, current: str, new: str) -> Dict[str, Any]:
+        return await self.request_json(
+            "POST", "/account/password",
+            json={"current_password": current, "new_password": new})
+
+    async def account_devices(self) -> Dict[str, Any]:
+        return await self.request_json("GET", "/account/devices")
+
+    async def account_plugins(self) -> Dict[str, Any]:
+        return await self.request_json("GET", "/account/plugins")
+
+    async def get_remote_access(self, device_id: str) -> Dict[str, Any]:
+        return await self.request_json("GET", f"/devices/{device_id}/remote-access")
+
+    async def set_remote_access(
+        self, device_id: str, *, install: Optional[bool] = None, invoke: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        body = {k: v for k, v in (("allow_remote_install", install), ("allow_remote_invoke", invoke))
+                if v is not None}
+        return await self.request_json("PUT", f"/devices/{device_id}/remote-access", json=body)
+
+    async def get_operation(self, operation_id: str) -> Dict[str, Any]:
+        return await self.request_json("GET", f"/plugins/operations/{operation_id}")
+
+    async def list_operations(
+        self, *, device_id: Optional[str] = None, plugin_id: Optional[str] = None,
+        active: bool = False, limit: int = 50,
+    ) -> Dict[str, Any]:
+        return await self.request_json("GET", "/plugins/operations", params={
+            "device_id": device_id, "plugin_id": plugin_id,
+            "active": "true" if active else None, "limit": limit})
+
+    async def get_task(self, task_id: str) -> Dict[str, Any]:
+        return await self.request_json("GET", f"/tasks/{task_id}")
+
+    async def confirm_task(self, task_id: str, scope: str = "once") -> Dict[str, Any]:
+        """Approve a task waiting for confirmation. The server decides which scopes it allows."""
+        return await self.request_json("POST", f"/tasks/{task_id}/confirm", json={"scope": scope})
+
+    async def deny_task(self, task_id: str) -> Dict[str, Any]:
+        return await self.request_json("POST", f"/tasks/{task_id}/deny")
+
+
+async def iter_sse(lines: AsyncIterator[str]) -> AsyncIterator[Tuple[str, Any]]:
+    """Parse ``text/event-stream`` lines into ``(event, data)``. ``data`` is JSON-decoded when it
+    is JSON, else the raw string; comments (keep-alives) and ``id:``/``retry:`` lines are skipped."""
+    event, data = "message", []
+    async for line in lines:
+        if line == "":
+            if data:
+                raw = "\n".join(data)
+                try:
+                    payload: Any = json.loads(raw)
+                except ValueError:
+                    payload = raw
+                yield event, payload
+            event, data = "message", []
+        elif line.startswith(":"):
+            continue
+        elif line.startswith("event:"):
+            event = line[6:].strip() or "message"
+        elif line.startswith("data:"):
+            data.append(line[5:][1:] if line[5:6] == " " else line[5:])
+    if data:                                   # stream ended without a trailing blank line
+        raw = "\n".join(data)
+        try:
+            yield event, json.loads(raw)
+        except ValueError:
+            yield event, raw
 
 
 # ---------------------------------------------------------------------------

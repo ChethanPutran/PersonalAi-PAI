@@ -14,38 +14,21 @@ import argcomplete
 import time
 import httpx
 
+from . import chatcli, cli_settings, voicecli
+from .cli_support import (
+    Ctx, dim, error_text, follow_operation, parse_params, print_confirmation, print_json as _print_json,
+    print_table as _print_table, print_task_outcome, wait_for_task,
+)
 from .config import DeviceConfig
 from .transport import APIClient
 
+# Commands that live in their own modules: name -> async handler(args, ctx)
+MODULE_COMMANDS = {**cli_settings.COMMANDS, **chatcli.COMMANDS, **voicecli.COMMANDS}
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def _read_device_id(config: DeviceConfig) -> Optional[str]:
     f = Path(config.state_dir) / "device_id"
     return f.read_text().strip() if f.exists() else None
-
-
-def _print_json(data: Any) -> None:
-    print(json.dumps(data, indent=2, default=str))
-
-
-def _print_table(
-    rows: Sequence[Sequence[Any]], headers: Sequence[str]
-) -> None:
-    if not rows:
-        print("(none)")
-        return
-    widths = [len(h) for h in headers]
-    for row in rows:
-        for i, cell in enumerate(row):
-            widths[i] = max(widths[i], len(str(cell)))
-    fmt = "  ".join(f"{{:<{w}}}" for w in widths)
-    print(fmt.format(*headers))
-    print(fmt.format(*["-" * w for w in widths]))
-    for row in rows:
-        print(fmt.format(*[str(c) for c in row]))
 
 
 # ---------------------------------------------------------------------------
@@ -129,7 +112,7 @@ async def _watch_install(
         elapsed = time.time() - start
         if elapsed > timeout:
             print(f"\r✗ timed out after {timeout:.0f}s" + " " * 40)
-            print(f"  Check:  server-cli status")
+            print(f"  Check:  pai-device status")
             return 1
 
         print(
@@ -283,27 +266,23 @@ async def _cmd_install(args, client: APIClient, device_id: Optional[str]) -> int
 
     # --- Request the install ------------------------------------------
     data = await client.install_plugin(pid, device_id, version=version)
-    _print_json(data)
-
-    if getattr(args, "watch", False) and not args.json:
-        return await _watch_install(
-            client, device_id, pid,
-            version=version,
-            target_shas=target_shas,
-        )
-
-    print(
-        f"\nInstall requested: {pid}"
-        + (f"@{version}" if version else " (latest)")
-        + f"\nWatch it with:\n"
-        f"  server-cli install {pid}"
-        + (f"@{version}" if version else "")
-        + " --watch\n"
-        "or poll with:\n"
-        "  server-cli status",
-        file=sys.stderr,
-    )
-    return 0
+    op_id = data.get("operation_id")
+    target = pid + (f"@{version}" if version else "")
+    if args.json and (args.no_wait or not op_id):
+        _print_json(data)
+        return 0
+    if not op_id:                       # an older backend without operations: the legacy poll
+        print(f"Install requested: {target}", file=sys.stderr)
+        return await _watch_install(client, device_id, pid, version=version, target_shas=target_shas)
+    if args.no_wait:
+        print(f"Install requested: {target} on {device_id}\noperation {op_id}")
+        dim(f"Follow it: pai-device operations --active")
+        return 0
+    print(f"Installing {target} on {device_id} …")
+    code = await follow_operation(client, op_id, label=f"installing {target}", timeout=args.timeout)
+    if args.json:
+        _print_json(await client.get_operation(op_id))
+    return code
 
 async def _cmd_enable(args, client: APIClient, device_id: Optional[str]) -> int:
     data = await client.enable_plugin(args.plugin_id, device_id)
@@ -388,7 +367,7 @@ async def _cmd_installed(args, client: APIClient, device_id: Optional[str]) -> i
 
     if not installed:
         print(f"No plugins installed on device {device_id}.")
-        print(f"Available catalog:  server-cli list")
+        print(f"Available catalog:  pai-device list")
         return 0
 
     rows = [
@@ -418,59 +397,58 @@ async def _cmd_invoke(
         )
         return 1
 
-    # Parameters: --params '<json>'  |  --params @file.json  |  stdin
-    raw = args.params
-    if raw is None and not sys.stdin.isatty():
-        raw = sys.stdin.read()
-
-    if raw:
-        if raw.startswith("@"):
-            raw = Path(raw[1:]).read_text()
-        try:
-            params = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            print(f"error: --params is not valid JSON: {exc}", file=sys.stderr)
-            return 2
-    else:
-        params = {}
-
+    # Parameters: --param k=v (repeatable), --json-params '<json>' | @file.json (alias --params/-p);
+    # with none of them, JSON piped on stdin is used.
+    json_text = args.json_params
+    if json_text is None and not args.param and not sys.stdin.isatty():
+        json_text = sys.stdin.read().strip() or None
     try:
-        resp = await client.invoke_capability(
-            device_id=device_id,
-            capability=args.capability,
-            parameters=params,
-            timeout=args.timeout,
-        )
-    except httpx.HTTPStatusError as exc:
-        # Let _amain print the body; but for invoke we want a cleaner
-        # message on 409 (device offline) and 504 (timeout).
-        if exc.response.status_code in (409, 504):
-            try:
-                detail = exc.response.json().get("detail", exc.response.text)
-            except Exception:
-                detail = exc.response.text
-            print(f"✗ {detail}", file=sys.stderr)
-            return 1
-        raise
+        params = parse_params(args.param, json_text)
+    except (ValueError, OSError) as exc:
+        print(f"error: bad parameters: {exc}", file=sys.stderr)
+        return 2
+
+    resp = await client.invoke_capability(
+        device_id=device_id,
+        capability=args.capability,
+        parameters=params,
+        timeout=args.timeout,
+    )
+
+    if resp.get("awaiting_confirmation"):
+        task_id = resp.get("task_id")
+        if args.json and not args.approve:
+            _print_json(resp)
+            return 3
+        print_confirmation(resp.get("confirmation") or {"capability": args.capability},
+                           task_id=None if args.approve else task_id, out=print)
+        if not args.approve:
+            dim("Not approved: nothing ran. Re-run with --approve, or approve it in the PAI app.")
+            return 3
+        await client.confirm_task(task_id, scope=args.scope)
+        dim(f"approved ({args.scope}); waiting for the result…")
+        task = await wait_for_task(client, task_id, timeout=args.timeout)
+        return print_task_outcome(task, as_json=args.json)
 
     if args.json:
         _print_json(resp)
+        return 0 if resp.get("ok") else 1
+
+    if resp.get("ok"):
+        result = resp.get("result")
+        # Plugins answer {"ok": ..., "data": ...}; show the payload, not the envelope.
+        if isinstance(result, dict) and "data" in result and result.get("ok", True) is not False:
+            result = result["data"]
+        _print_json(result if result is not None else {"status": resp.get("status")})
         return 0
 
-    result = resp.get("result") or {}
-    if isinstance(result, dict) and result.get("ok") is False:
-        print(f"✗ {result.get('error', 'plugin reported failure')}",
-              file=sys.stderr)
-        if result.get("data") is not None:
-            _print_json(result["data"])
-        return 1
-
-    # Success — print the data payload if there is one, else the whole result.
-    data = result.get("data") if isinstance(result, dict) else result
-    if data is None:
-        data = result
-    _print_json(data)
-    return 0
+    result = resp.get("result")
+    error = (resp.get("error") or (result.get("error") if isinstance(result, dict) else None)
+             or resp.get("status"))
+    print(f"✗ {error}", file=sys.stderr)
+    if isinstance(result, dict) and result.get("data") is not None:
+        _print_json(result["data"])
+    return 1
 
 
 async def _watch_uninstall(
@@ -487,7 +465,7 @@ async def _watch_uninstall(
         elapsed = time.time() - start
         if elapsed > timeout:
             print(f"\r✗ timed out after {timeout:.0f}s" + " " * 40)
-            print(f"  Check:  server-cli status")
+            print(f"  Check:  pai-device status")
             return 1
 
         print(
@@ -526,28 +504,32 @@ async def _cmd_uninstall(
         return 1
 
     data = await client.uninstall_plugin(args.plugin_id, device_id)
-    _print_json(data)
-
-    if getattr(args, "watch", False):
+    op_id = data.get("operation_id")
+    if args.json and (args.no_wait or not op_id):
+        _print_json(data)
+        return 0
+    if not op_id:                       # an older backend without operations
         return await _watch_uninstall(client, device_id, args.plugin_id)
-
-    print(
-        "\nUninstall requested. Watch it with:\n"
-        f"  server-cli uninstall {args.plugin_id} --watch\n"
-        "or poll with:\n"
-        "  server-cli status",
-        file=sys.stderr,
-    )
-    return 0
+    if args.no_wait:
+        print(f"Uninstall requested: {args.plugin_id} on {device_id}\noperation {op_id}")
+        return 0
+    print(f"Removing {args.plugin_id} from {device_id} …")
+    code = await follow_operation(client, op_id, label=f"removing {args.plugin_id}", timeout=args.timeout)
+    if args.json:
+        _print_json(await client.get_operation(op_id))
+    return code
 
 # ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
 
 async def _dispatch(
-    args, client: APIClient, device_id: Optional[str]
+    args, client: APIClient, device_id: Optional[str], config: Optional[DeviceConfig] = None,
 ) -> int:
     cmd = args.command
+    handler = MODULE_COMMANDS.get(cmd)
+    if handler is not None:
+        return await handler(args, Ctx(client=client, device_id=device_id, config=config))
     if cmd == "list":
         return await _cmd_list(args, client)
     if cmd == "show":
@@ -572,9 +554,16 @@ async def _dispatch(
         return await _cmd_installed(args, client, device_id)
     if cmd == "invoke":
         return await _cmd_invoke(args, client, device_id)
-    
+
     print(f"unknown command: {cmd}", file=sys.stderr)
     return 2
+
+
+def _print_http_error(exc: httpx.HTTPStatusError) -> None:
+    """The server's own words: ``✗ message`` plus a dim ``(HTTP 403 code)`` line."""
+    message, code = error_text(exc)
+    print(f"✗ {message}", file=sys.stderr)
+    dim(f"  (HTTP {exc.response.status_code}{' ' + code if code else ''} on {exc.request.method} {exc.request.url.path})")
 
 
 async def _amain(args) -> int:
@@ -587,19 +576,14 @@ async def _amain(args) -> int:
     client = APIClient(config.api_base, config.email, config.password)
     try:
         await client.login()
-        device_id = args.device or _read_device_id(config)
-        return await _dispatch(args, client, device_id)
+        client.device_id = _read_device_id(config)      # THIS device: acting on another one is remote
+        device_id = args.device or client.device_id
+        return await _dispatch(args, client, device_id, config)
     except httpx.HTTPStatusError as exc:
-        body = exc.response.text
-        try:
-            body = json.dumps(exc.response.json(), indent=2)
-        except Exception:
-            pass
-        print(
-            f"HTTP {exc.response.status_code} on "
-            f"{exc.request.method} {exc.request.url}:\n{body}",
-            file=sys.stderr,
-        )
+        _print_http_error(exc)
+        return 1
+    except httpx.TransportError as exc:
+        print(f"✗ can't reach the backend at {config.api_base}: {exc}", file=sys.stderr)
         return 1
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -624,10 +608,16 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     p = argparse.ArgumentParser(
-        prog="server-cli",
-        description="Query and manage PAI plugins from the terminal.",
+        prog="pai-device",
+        description="PAI on this device: talk to the assistant (chat, voice), manage your plugins and "
+                    "settings, run capabilities, or start the device agent (`pai-device run`).",
+        epilog="Config comes from the environment: PAI_BACKEND_URL, PAI_SERVER_EMAIL, PAI_SERVER_PASSWORD "
+               "(see `pai-device config show`).",
     )
-    sub = p.add_subparsers(dest="command", required=True)
+    sub = p.add_subparsers(dest="command", required=True, metavar="command")
+
+    sub.add_parser("run", help="start the device agent (same as `pai-server`; "
+                               "accepts --reload --log-dir --verbose-http)")
 
     sp = sub.add_parser(
         "list", parents=[common],
@@ -642,8 +632,11 @@ def _build_parser() -> argparse.ArgumentParser:
     sp.add_argument("plugin_id")
 
     sp = sub.add_parser(
-    "install", parents=[common],
-    help="ask the device to install a plugin (async; poll status)",
+        "install", parents=[common],
+        help="install a plugin on a device and follow it live (stages + clear errors)",
+        description="Installing on ANOTHER device needs that device's \"Allow remote plugin install\" switch "
+                    "(pai-device remote-access). Without --no-wait the command follows the install until it "
+                    "finishes and exits non-zero if it fails.",
     )
     sp.add_argument(
         "plugin_id",
@@ -658,20 +651,18 @@ def _build_parser() -> argparse.ArgumentParser:
         help="skip the 'already installed' pre-check and force a reinstall "
             "(needed when you've edited the artifact without bumping the version)",
     )
-    sp.add_argument(
-        "--watch", action="store_true",
-        help="poll until the install completes (spinner + elapsed time)",
-    )
+    sp.add_argument("--no-wait", action="store_true", help="only request it; print the operation id")
+    sp.add_argument("--timeout", type=float, default=600.0, help="stop following after this many seconds")
+    sp.add_argument("--watch", action="store_true", help=argparse.SUPPRESS)      # old flag: following is the default
 
     sp = sub.add_parser(
         "uninstall", parents=[common],
-        help="ask the device to uninstall a plugin (async; poll status)",
+        help="remove a plugin from a device and follow it live",
     )
     sp.add_argument("plugin_id")
-    sp.add_argument(
-        "--watch", action="store_true",
-        help="poll until the uninstall completes (spinner + elapsed time)",
-    )
+    sp.add_argument("--no-wait", action="store_true", help="only request it; print the operation id")
+    sp.add_argument("--timeout", type=float, default=120.0)
+    sp.add_argument("--watch", action="store_true", help=argparse.SUPPRESS)
 
     sp = sub.add_parser(
         "enable", parents=[common],
@@ -713,20 +704,32 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser(
         "invoke", parents=[common],
-        help="run a capability on the device and wait for the result",
+        help="run a capability on a device and wait for the result",
+        description="Goes through the real pipeline (authorization, confirmation, audit). Running on ANOTHER "
+                    "device needs its \"Allow remote plugin use\" switch. An action that needs approval is "
+                    "shown to you and does NOT run unless you pass --approve (or approve it in the app).",
     )
     sp.add_argument(
         "capability",
         help="capability id, e.g. browser.navigate or camera.capture",
     )
+    sp.add_argument("--param", "-P", action="append", metavar="KEY=VALUE",
+                    help="a parameter (repeatable); values like 3, true, [1,2] are typed, the rest are text")
     sp.add_argument(
-        "--params", "-p", default=None,
-        help="JSON parameters; '@file.json' to read from file; omit to read stdin",
+        "--json-params", "--params", "-p", dest="json_params", default=None, metavar="JSON",
+        help="parameters as a JSON object; '@file.json' reads a file; with no parameters at all, JSON on stdin is used",
     )
     sp.add_argument(
         "--timeout", type=float, default=60.0,
         help="seconds to wait for the plugin result (default: 60)",
     )
+    sp.add_argument("--approve", action="store_true",
+                    help="if the action needs confirmation, approve it (you have just seen what it will do)")
+    sp.add_argument("--scope", choices=["once", "session", "always"], default="once",
+                    help="how long an --approve lasts (the server limits what is allowed)")
+
+    for module in (cli_settings, chatcli, voicecli):
+        module.register(sub, common)
     return p
 
 
@@ -734,8 +737,32 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = _build_parser()                 # build once
     argcomplete.autocomplete(parser)         # arm completion on the same object
     args = parser.parse_args(argv)           # then parse
-    return asyncio.run(_amain(args))
+    if args.command == "run":
+        return _run_agent([])
+    try:
+        return asyncio.run(_amain(args))
+    except KeyboardInterrupt:
+        print(file=sys.stderr)
+        return 130
+
+
+AGENT_FLAGS = ("--reload", "--log-dir", "--verbose-http")
+
+
+def _run_agent(rest: List[str]) -> int:
+    from ._entry import main as agent_main
+    sys.argv = ["pai-device", *rest]
+    return agent_main()
+
+
+def entry(argv: Optional[List[str]] = None) -> int:
+    """The ``pai-device`` command: the CLI, or the agent when started the old way (no arguments,
+    ``run``, or the agent's own flags), so existing service files keep working."""
+    args = list(sys.argv[1:] if argv is None else argv)
+    if not args or args[0] == "run" or args[0].startswith(AGENT_FLAGS):
+        return _run_agent(args[1:] if args and args[0] == "run" else args)
+    return main(args)
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(entry())
