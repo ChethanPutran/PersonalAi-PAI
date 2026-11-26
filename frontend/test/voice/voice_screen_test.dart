@@ -8,7 +8,7 @@ import 'package:pai_mobile/ui/voice/voice_screen.dart';
 import 'fakes.dart';
 
 void main() {
-  testWidgets('renders live captions and state, stop only while speaking, end closes', (tester) async {
+  testWidgets('shows state only (no transcript, no reply text), end closes', (tester) async {
     final transport = FakeTransport();
     final c = VoiceController(
       socket: VoiceSocket(factory: () async => transport),
@@ -48,7 +48,7 @@ void main() {
     c.connection = VoiceConnection.connected;
     c.handleEvent(const TranscriptPartial('t', 'what is the wea'));
     await tester.pump(const Duration(milliseconds: 50));
-    expect(find.text('what is the wea'), findsOneWidget);
+    expect(find.text('what is the wea'), findsNothing); // your words are not shown: just answer
 
     c.handleEvent(const StateChanged(VoiceState.thinking));
     await tester.pump(const Duration(milliseconds: 50));
@@ -58,8 +58,10 @@ void main() {
     c.handleEvent(const AssistantTextDelta('t', 'r', 'sunny.'));
     c.handleEvent(const StateChanged(VoiceState.speaking));
     await tester.pump(const Duration(milliseconds: 50));
-    expect(find.text('It is sunny.'), findsOneWidget);
+    expect(find.text('It is sunny.'), findsNothing); // the reply is spoken, not displayed
     expect(find.text('Speaking'), findsOneWidget);
+    // ...but the controller still has both for the chat history / other consumers
+    expect(c.assistantText, 'It is sunny.');
 
     // stop() closes stream controllers, which FakeAsync can't drain; run it on real time.
     final stopped = tester.runAsync(() => c.stop().timeout(const Duration(seconds: 2)));

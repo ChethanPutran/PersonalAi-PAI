@@ -3,10 +3,12 @@ import 'package:pai_mobile/models/device.dart';
 
 import '../../device/remote_access.dart';
 import '../../models/user.dart';
+import '../../profile/account_service.dart';
 import '../../profile/profile_service.dart';
 import '../../profile/settings_service.dart';
 import '../theme/theme.dart';
 import '../widgets/hud/hud.dart';
+import 'account_sections.dart';
 
 class ProfileScreen extends StatefulWidget {
   final ProfileService service;
@@ -17,6 +19,9 @@ class ProfileScreen extends StatefulWidget {
   /// This device's remote-access switches. When null the "Remote access" section is hidden.
   final RemoteAccessController? remoteAccess;
 
+  /// Editable "About you", "This device" name and "Personalization" sections. When null they are hidden.
+  final AccountService? account;
+
   const ProfileScreen({
     super.key,
     required this.service,
@@ -24,6 +29,7 @@ class ProfileScreen extends StatefulWidget {
     required this.onLogout,
     this.currentDeviceId,
     this.remoteAccess,
+    this.account,
   });
 
   @override
@@ -79,6 +85,25 @@ class _ProfileScreenState extends State<ProfileScreen> {
         _loading = false;
       });
     }
+  }
+
+  DeviceInfo? get _thisDevice {
+    final id = widget.currentDeviceId;
+    if (id == null) return null;
+    for (final d in _devices) {
+      if (d.id == id) return d;
+    }
+    return null;
+  }
+
+  /// The name was saved: refresh the device list quietly (no skeleton) so the new name shows below.
+  Future<void> _onDeviceRenamed(String name) async {
+    final p = _profile;
+    if (p == null) return;
+    try {
+      final devices = await widget.service.getDevices(userId: p.id, currentDeviceId: widget.currentDeviceId);
+      if (mounted) setState(() => _devices = devices);
+    } catch (_) {/* the saved name is already on the server; the list refreshes on the next pull */}
   }
 
   // ---------------------------------------------------------------
@@ -179,6 +204,23 @@ class _ProfileScreenState extends State<ProfileScreen> {
         child: ListView(
       children: [
         if (_profile != null) _ProfileHeader(profile: _profile!),
+
+        if (widget.account != null) ...[
+          _SectionHeader('About you'),
+          AboutYouSection(service: widget.account!),
+          if (_thisDevice != null) ...[
+            _SectionHeader('This device'),
+            DeviceNameSection(
+              key: ValueKey('device-name-${_thisDevice!.id}'),
+              service: widget.account!,
+              deviceId: _thisDevice!.id,
+              initialName: _thisDevice!.name,
+              onRenamed: _onDeviceRenamed,
+            ),
+          ],
+          _SectionHeader('Personalization'),
+          PersonalizationSection(service: widget.account!),
+        ],
 
         _SectionHeader('My Devices (${_devices.length})'),
         if (_devices.isEmpty)

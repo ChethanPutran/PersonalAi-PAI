@@ -25,6 +25,8 @@ import 'chat/chat_service.dart';
 import 'plugins/permission_reporter.dart';
 import 'plugins/plugin_manager.dart';
 import 'plugins/plugin_service.dart';
+import 'plugins/builtin_plugins.dart';
+import 'profile/account_service.dart';
 import 'plugins/plugin_installer.dart';
 import 'plugins/plugin_repository.dart';
 import 'plugins/plugin_registry.dart';
@@ -63,6 +65,8 @@ class PaiApp extends StatefulWidget {
 class _PaiAppState extends State<PaiApp> {
   late final AuthService auth;
   late final ApiClient api;
+  late final BuiltinPluginsController _builtinPlugins;
+  late final AccountService _accountService;
   String? deviceId;
     final GlobalKey<NavigatorState> _navigatorKey =
     GlobalKey<NavigatorState>();
@@ -118,6 +122,8 @@ class _PaiAppState extends State<PaiApp> {
     super.initState();
     auth = AuthService(baseUrl: AppConfig.baseUrl);
     api = ApiClient(baseUrl: AppConfig.baseUrl, auth: auth);
+    _builtinPlugins = BuiltinPluginsController(api: api);
+    _accountService = AccountService(api: api);
 
     PushService.onNotificationTap = (data) {
       // Reminders tab is index 4 (Chat=0, Tasks=1, Plugins=2, Test=3, Profile=4, Reminders=5)
@@ -929,6 +935,7 @@ Future<void> _refreshDevicesAfterConnect() async {
     _testTaskRunner?.dispose();
     _connectionService?.dispose();
     _remoteAccess?.dispose();
+    _builtinPlugins.dispose();
     super.dispose();
   }
 
@@ -1042,6 +1049,7 @@ Future<void> _refreshDevicesAfterConnect() async {
         manager: _pluginManager!,
         deviceRepository: _deviceRepository!,
         thisDevice: _device,
+        builtinPlugins: _builtinPlugins,
       ),
       SchedulesScreen(
         service: _scheduleService!,
@@ -1055,6 +1063,7 @@ Future<void> _refreshDevicesAfterConnect() async {
         settings: _settingsService,
         currentDeviceId: deviceId,
         remoteAccess: _remoteAccess,
+        account: _accountService,
         onLogout: _logout,
       ),
       if (kDebugMode)

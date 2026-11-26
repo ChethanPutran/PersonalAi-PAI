@@ -148,7 +148,11 @@ class PcmPlayer implements AudioOutput {
   final int sliceMs;
   final int feedThresholdMs;
 
-  PcmPlayer({this.prebufferMs = 120, this.sliceMs = 40, this.feedThresholdMs = 60});
+  /// Audio buffered before the speaker is started. The server sends 60 ms frames (and a whole sentence in
+  /// one burst), so 60 ms = start on the FIRST frame instead of waiting for a second one (120 ms before).
+  /// Going lower than one frame can't help; the next sentence is covered by the starvation handling in
+  /// [_onFeed]/[feed], not by this value.
+  PcmPlayer({this.prebufferMs = 60, this.sliceMs = 40, this.feedThresholdMs = 60});
 
   int _rate = 24000;
   bool _ready = false;

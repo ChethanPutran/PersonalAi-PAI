@@ -297,4 +297,40 @@ void main() {
     expect(errors.single.fatal, isTrue);
     expect(r.socket.state, VoiceConnection.closed);
   });
+
+  test('the speaker is set up as soon as the session is ready (not at the first reply)', () async {
+    final r = Rig();
+    expect(r.player.configuredRate, isNull);
+    await r.boot();
+    expect(r.player.configuredRate, 24000); // output rate from session.ready: no setup delay before the first word
+  });
+
+  test('text nobody shows does not rebuild the UI: partials and reply tokens are silent, states are not', () async {
+    final r = Rig();
+    await r.boot();
+    var rebuilds = 0;
+    r.c.addListener(() => rebuilds++);
+
+    r.t.serverJson({'type': 'transcript.partial', 'turn_id': 't1', 'text': 'what is'});
+    r.t.serverJson({'type': 'assistant.text.delta', 'turn_id': 't1', 'response_id': 'r1', 'delta': 'It is '});
+    r.t.serverJson({'type': 'assistant.text.delta', 'turn_id': 't1', 'response_id': 'r1', 'delta': 'sunny.'});
+    await pump();
+    expect(rebuilds, 0);
+    expect(r.c.userPartial, 'what is'); // still tracked for the chat history / other consumers
+    expect(r.c.assistantText, 'It is sunny.');
+
+    r.t.serverJson({'type': 'state', 'state': 'thinking', 'turn_id': 't1'});
+    await pump();
+    expect(rebuilds, greaterThan(0));
+  });
+
+  test('audio frames are played the moment they arrive after audio.start (no wait for text or the end)', () async {
+    final r = Rig();
+    await r.boot();
+    r.t.serverJson({'type': 'assistant.audio.start', 'response_id': 'r1', 'sample_rate': 24000});
+    await pump();
+    r.t.serverAudio(frame(1440)); // one 60 ms frame
+    await pump();
+    expect(r.player.fed.length, 1); // handed to the speaker immediately; no text event needed first
+  });
 }

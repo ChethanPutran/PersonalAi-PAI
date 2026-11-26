@@ -6,9 +6,13 @@ import '../../services/voice/voice_events.dart';
 import '../../services/voice/voice_socket.dart';
 import '../theme/theme.dart';
 import '../widgets/hud/hud.dart';
-import '../widgets/markdown/markdown_safety.dart' show stripMarkdown;
 
 /// Full-screen, hands-free voice conversation (ChatGPT-voice style).
+///
+/// It shows NO transcript and NO reply text: you talk, PAI answers out loud, and the screen only
+/// says what state it is in (listening / thinking / speaking) with the orb. Showing the words first
+/// made the answer feel late. Both sides of every turn are stored in the chat session by the server,
+/// so the text is in the chat when you come back.
 ///
 /// Push it with [VoiceScreen.open]; it returns when the user ends the call so the
 /// caller can refresh the chat (voice turns are stored in the same session).
@@ -173,15 +177,8 @@ class _VoiceScreenState extends State<VoiceScreen> {
                         )),
                     const SizedBox(height: 14),
                     Expanded(
-                      flex: 4,
-                      child: _Captions(
-                        user: _c.userCaption,
-                        userIsPartial: _c.userPartial.isNotEmpty,
-                        assistant: _c.assistantText,
-                        streaming: _c.state == VoiceState.speaking ||
-                            _c.state == VoiceState.thinking,
-                        error: _c.error,
-                      ),
+                      flex: 3,
+                      child: Center(child: _ErrorNote(error: _c.error)),
                     ),
                     if (_showKeyboard)
                       Padding(
@@ -235,85 +232,30 @@ class _VoiceScreenState extends State<VoiceScreen> {
   }
 }
 
-class _Captions extends StatelessWidget {
-  final String user;
-  final bool userIsPartial;
-  final String assistant;
-  final bool streaming;
+/// The only text besides the state label: something went wrong (no microphone, connection lost...).
+class _ErrorNote extends StatelessWidget {
   final String? error;
-  const _Captions({
-    required this.user,
-    required this.userIsPartial,
-    required this.assistant,
-    required this.streaming,
-    required this.error,
-  });
+  const _ErrorNote({required this.error});
 
   @override
   Widget build(BuildContext context) {
-    final t = Theme.of(context).textTheme;
+    final e = error;
+    if (e == null) return const SizedBox.shrink();
     final scheme = Theme.of(context).colorScheme;
-    if (user.isEmpty && assistant.isEmpty && error == null) {
-      return const SizedBox.shrink();
-    }
-    // HudPanel shrink-wraps its child in a Column, which hands a scroll view UNBOUNDED height: the scroll
-    // view then sizes itself to the text and the panel overflows by (text height - the space this slot
-    // has). Bound it to the slot instead, so a long reply scrolls (and a short one still shrink-wraps).
-    return LayoutBuilder(
-      builder: (context, slot) => Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 20),
-        child: HudPanel(
-          blur: true,
-          padding: EdgeInsets.zero,
-          child: ConstrainedBox(
-            constraints: BoxConstraints(maxHeight: slot.maxHeight),
-            child: SingleChildScrollView(
-              reverse: true,
-              padding: const EdgeInsets.all(PaiSpacing.lg),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  if (user.isNotEmpty) ...[
-                    Text('YOU', style: t.labelSmall?.copyWith(color: PaiColors.teal, letterSpacing: 3)),
-                    const SizedBox(height: 4),
-                    Text(
-                      user,
-                      style: t.bodyLarge?.copyWith(
-                        color: scheme.onSurfaceVariant,
-                        fontStyle: userIsPartial ? FontStyle.italic : FontStyle.normal,
-                      ),
-                    ),
-                  ],
-                  if (assistant.isNotEmpty) ...[
-                    const SizedBox(height: 14),
-                    Text('PAI', style: t.labelSmall?.copyWith(color: scheme.primary, letterSpacing: 3)),
-                    const SizedBox(height: 4),
-                    Wrap(
-                      crossAxisAlignment: WrapCrossAlignment.center,
-                      spacing: 4,
-                      children: [
-                        // Captions are plain text: never show raw markdown symbols (the reply may be partial).
-                        Text(stripMarkdown(assistant), style: t.bodyLarge?.copyWith(color: scheme.onSurface, fontSize: 17)),
-                        if (streaming) const BlinkingCursor(),
-                      ],
-                    ),
-                  ],
-                  if (error != null) ...[
-                    const SizedBox(height: 14),
-                    Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Icon(Icons.error_outline, size: 18, color: scheme.error),
-                        const SizedBox(width: 8),
-                        Expanded(child: Text(error!, style: t.bodyMedium?.copyWith(color: scheme.error))),
-                      ],
-                    ),
-                  ],
-                ],
-              ),
-            ),
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 28),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.error_outline, size: 18, color: scheme.error),
+          const SizedBox(width: 8),
+          Flexible(
+            child: Text(e,
+                textAlign: TextAlign.center,
+                style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: scheme.error)),
           ),
-        ),
+        ],
       ),
     );
   }

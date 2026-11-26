@@ -6,7 +6,9 @@ import 'package:pai_mobile/plugins/plugin_service.dart';
 import '../../core/app_version.dart';
 import '../../plugins/models/plugin_info.dart';
 import '../../plugins/models/plugin_update.dart';
+import '../../plugins/builtin_plugins.dart';
 import 'widgets/accessibility_setup_notice.dart';
+import 'widgets/builtin_capabilities_section.dart';
 import 'widgets/plugin_update_sheet.dart';
 import '../../plugins/plugin_manager.dart';
 import 'capability_config_screen.dart';
@@ -21,11 +23,15 @@ class PluginsScreen extends StatefulWidget {
   final DeviceRepository deviceRepository;
   final DeviceInfo? thisDevice;
 
+  /// Built-in plugins (the agent). Null = no such section (tests, or the feature is not wired).
+  final BuiltinPluginsController? builtinPlugins;
+
   const PluginsScreen({
     super.key,
     required this.manager,
     required this.deviceRepository,
     required this.thisDevice,
+    this.builtinPlugins,
   });
 
   @override
@@ -113,6 +119,20 @@ class _PluginRow extends StatelessWidget {
 
 class _PluginsScreenState extends State<PluginsScreen> {
   final Set<String> _installing = {};
+
+  @override
+  void initState() {
+    super.initState();
+    widget.builtinPlugins?.load();
+  }
+
+  Future<void> _refresh() async {
+    await Future.wait([widget.manager.loadCatalog(), widget.builtinPlugins?.load() ?? Future<void>.value()]);
+  }
+
+  Widget _builtinSection() => widget.builtinPlugins == null
+      ? const SizedBox.shrink()
+      : BuiltinCapabilitiesSection(controller: widget.builtinPlugins!);
 
   // ---------------------------------------------------------------------------
   // Install — with permission-consent flow
@@ -265,11 +285,12 @@ Future<void> _handleInstall(String pluginId, String version) async {
 
           if (thisDevicePlugins.isEmpty && otherGroups.isEmpty) {
             return RefreshIndicator(
-              onRefresh: widget.manager.loadCatalog,
+              onRefresh: _refresh,
               child: LayoutBuilder(
                 builder: (context, box) => ListView(
                   physics: const AlwaysScrollableScrollPhysics(),
                   children: [
+                    _builtinSection(),
                     SizedBox(
                       height: box.maxHeight,
                       child: const HudEmptyState(
@@ -285,7 +306,7 @@ Future<void> _handleInstall(String pluginId, String version) async {
           }
 
           return RefreshIndicator(
-            onRefresh: widget.manager.loadCatalog,
+            onRefresh: _refresh,
             child: Align(
               alignment: Alignment.topCenter,
               child: ConstrainedBox(
@@ -293,6 +314,7 @@ Future<void> _handleInstall(String pluginId, String version) async {
                 child: ListView(
               physics: const AlwaysScrollableScrollPhysics(),
               children: [
+                _builtinSection(),
                 _SectionHeader(
                   title: 'This device',
                   subtitle:

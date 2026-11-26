@@ -148,6 +148,10 @@ class VoiceController extends ChangeNotifier {
         chatSessionId = ev.chatSessionId;
         bargeInSupported = ev.bargeIn;
         if (ev.chatSessionId.isNotEmpty) onChatSession?.call(ev.chatSessionId);
+        // Set the speaker up NOW, not when the first reply arrives: opening the native audio output
+        // takes 50-300 ms on a phone, and doing it at `assistant.audio.start` put that delay in front of
+        // the first word of every session's first answer. (A different rate at audio.start re-opens it.)
+        if (ev.outputSampleRate > 0) unawaited(_player.configure(ev.outputSampleRate));
         unawaited(_onReady(ev));
       case StateChanged():
         state = ev.state;
@@ -159,6 +163,7 @@ class VoiceController extends ChangeNotifier {
         break;
       case TranscriptPartial():
         userPartial = ev.text;
+        return; // not displayed on the voice screen: no rebuild per partial
       case TranscriptFinal():
         userText = ev.text;
         userPartial = '';
@@ -168,6 +173,7 @@ class VoiceController extends ChangeNotifier {
         statusMessage = ev.message.isNotEmpty ? ev.message : ev.stage;
       case AssistantTextDelta():
         assistantText += ev.delta;
+        return; // not displayed on the voice screen: no rebuild per token
       case AssistantTextDone():
         assistantText = ev.text;
       case AssistantAudioStart():
