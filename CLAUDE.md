@@ -315,7 +315,7 @@ were deleted; every remaining file collects. Two files still fail because they c
 ## Agent plugin and computer control
 
 - The agent is a **built-in plugin** (`pai.agent.plugin`, id `agent`): backend-provided, nothing to install, shown in the plugin lists (`builtin: true`), off until the user enables it (`POST /plugins/agent/enable`, Settings page, plugin screens). Its capabilities (`agent.*`) carry `plugin_id="agent"`, `requires_user_enable=True`; `CapabilityRouter._build_index` only offers them to users who enabled it, and `POST /agents` returns 403 `agent_plugin_disabled` otherwise.
-- **Computer control**: the capability contract every platform implements is `docs/computer_control.md` (`computer.observe/click/type/key/scroll/swipe/long_press/apps.*/status`, reusing the existing `screen` / `input` permissions). The agent perceives through `pai.agent.computer.format_observation` (a compact element list, never raw JSON/base64) and follows the COMPUTER CONTROL rules in `prompts/agent/react` v1.1.0.
+- **Computer control**: the capability contract every platform implements is `src/pai/agent/COMPUTER_CONTROL.md` (`computer.observe/click/type/key/scroll/swipe/long_press/apps.*/status`, reusing the existing `screen` / `input` permissions). The agent perceives through `pai.agent.computer.format_observation` (a compact element list, never raw JSON/base64) and follows the COMPUTER CONTROL rules in `prompts/agent/react` v1.1.0.
 
 ## Agents
 
