@@ -130,6 +130,7 @@ def test_the_settings_page_is_served_without_data_and_the_api_needs_a_login(worl
     page = client.get("/api/v1/account/settings")
     assert page.status_code == 200 and "text/html" in page.headers["content-type"]
     assert "Allow remote plugin install" in page.text and "alice@example.com" not in page.text
+    assert 'href="help"' in page.text          # relative link to /account/help
     assert client.get("/settings", follow_redirects=False).status_code in (302, 307)
     assert client.get("/api/v1/account/profile").status_code == 401
     assert client.get("/api/v1/account/devices").status_code == 401

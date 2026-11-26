@@ -59,6 +59,9 @@ button, input, select { font: inherit; color: inherit; }
 .nav { display: flex; flex-direction: column; gap: 2px; }
 .nav a { display: flex; align-items: center; gap: 11px; padding: 9px 12px; border-radius: 10px; color: var(--muted);
   text-decoration: none; font-weight: 500; cursor: pointer; }
+.side-help { display: flex; align-items: center; gap: 11px; padding: 9px 12px; border-radius: 10px; color: var(--muted);
+  text-decoration: none; margin-top: auto; }
+.side-help:hover { background: var(--surface-2); color: var(--text); }
 .nav a:hover { background: var(--surface-2); color: var(--text); }
 .nav a[aria-current="true"] { background: var(--accent-soft); color: var(--accent); }
 .nav svg { width: 18px; height: 18px; flex: none; }
@@ -194,7 +197,8 @@ dialog p { margin: 0 0 18px; color: var(--muted); }
   .side .brand { padding: 0; }
   .nav { flex-direction: row; }
   .nav a { padding: 8px 12px; white-space: nowrap; }
-  .nav a span { display: none; }
+  .nav a span, .side-help span { display: none; }
+  .side-help { margin-top: 0; padding: 8px 12px; }
   .side-foot { margin: 0 0 0 auto; padding: 4px; background: transparent; }
   .two { grid-template-columns: 1fr; }
   .main { padding-top: 24px; }
@@ -224,6 +228,10 @@ dialog p { margin: 0 0 18px; color: var(--muted); }
   <aside class="side">
     <div class="brand"><div class="logo">P</div><span>Settings</span></div>
     <nav class="nav" id="nav" aria-label="Settings sections"></nav>
+    <a class="side-help" id="help-link" href="help" target="_blank" rel="noopener" title="What you can ask PAI">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 1 1 3.5 2.3c-.7.3-1 .9-1 1.7"/><path d="M12 17h.01"/></svg>
+      <span>Help</span>
+    </a>
     <div class="side-foot">
       <div class="avatar" id="side-avatar">?</div>
       <div class="who"><b id="side-name">…</b><span id="side-email"></span></div>
