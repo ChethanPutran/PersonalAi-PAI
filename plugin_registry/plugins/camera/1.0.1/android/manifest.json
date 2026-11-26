@@ -1,0 +1,149 @@
+{
+  "schemaVersion": 1,
+  "id": "camera_android",
+  "name": "Camera",
+  "type": "kotlin",
+  "version": "1.0.1",
+  "description": "Take photos and record short videos with the phone's front or back camera.",
+  "author": "PAI",
+  "license": "MIT",
+  "runtime": {
+    "kind": "device",
+    "nativeModule": "pai.camera",
+    "minPaiVersion": "0.4.0"
+  },
+  "platforms": {
+    "android": {
+      "artifact": "android/plugin.dex",
+      "entrypoint": "com.pai.plugins.camera.CameraPlugin"
+    }
+  },
+  "architectures": [
+    "x86_64",
+    "arm64"
+  ],
+  "deviceTypes": [
+    "phone",
+    "tablet"
+  ],
+  "permissions": [
+    "camera",
+    "microphone",
+    "filesystem"
+  ],
+  "capabilities": [
+    {
+      "id": "camera.capture",
+      "taskType": "one_shot",
+      "timeoutSeconds": 30,
+      "description": "Take a still photo with the front or back camera. Returns the file path, width, height and size.",
+      "permissions": [
+        "camera",
+        "filesystem"
+      ],
+      "requireConfirmation": true,
+      "risk": "medium",
+      "confirmationReason": "Capturing photos can be sensitive. Please confirm that you want to take a photo.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "lens": {
+            "type": "string",
+            "enum": [
+              "front",
+              "back"
+            ],
+            "default": "back",
+            "askIfUnspecified": true,
+            "description": "Which camera to use."
+          },
+          "outputPath": {
+            "type": "string",
+            "description": "File name (or relative path) inside the plugin's captures folder. Defaults to PAI_<time>.jpg."
+          },
+          "maxDimension": {
+            "type": "integer",
+            "minimum": 320,
+            "maximum": 4096,
+            "default": 2048,
+            "description": "Longest side of the photo in pixels."
+          },
+          "format": {
+            "type": "string",
+            "enum": [
+              "jpeg"
+            ],
+            "default": "jpeg"
+          },
+          "saveToGallery": {
+            "type": "boolean",
+            "default": false,
+            "description": "Also save a copy to the phone's gallery (Pictures/PAI for photos, Movies/PAI for videos) so the user can open it in the Gallery app. Use it when the user asks to save to, or see it in, the gallery or photos. Needs Android 10 or newer."
+          }
+        }
+      }
+    },
+    {
+      "id": "camera.record",
+      "taskType": "long_running",
+      "timeoutSeconds": 90,
+      "description": "Record a short video (MP4). Returns the file path, duration and size.",
+      "permissions": [
+        "camera",
+        "microphone",
+        "filesystem"
+      ],
+      "requireConfirmation": true,
+      "risk": "high",
+      "confirmationReason": "Recording video can be sensitive. Please confirm that you want to record a video.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "lens": {
+            "type": "string",
+            "enum": [
+              "front",
+              "back"
+            ],
+            "default": "back"
+          },
+          "durationMs": {
+            "type": "integer",
+            "minimum": 500,
+            "maximum": 60000,
+            "default": 5000,
+            "description": "How long to record."
+          },
+          "outputPath": {
+            "type": "string",
+            "description": "File name (or relative path) inside the plugin's captures folder. Defaults to PAI_<time>.mp4."
+          },
+          "audio": {
+            "type": "boolean",
+            "default": true
+          },
+          "saveToGallery": {
+            "type": "boolean",
+            "default": false,
+            "description": "Also save a copy to the phone's gallery (Pictures/PAI for photos, Movies/PAI for videos) so the user can open it in the Gallery app. Use it when the user asks to save to, or see it in, the gallery or photos. Needs Android 10 or newer."
+          }
+        }
+      }
+    }
+  ],
+  "changelog": {
+    "summary": "Camera for Android can now also save a copy of a photo or video to the phone's gallery.",
+    "features": [
+      "saveToGallery (camera.capture and camera.record, default false): also saves a copy to Pictures/PAI (photos) or Movies/PAI (videos) so it shows up in the Gallery app; the original stays in the plugin's private folder",
+      "the result reports gallery_saved, gallery_location and gallery_uri, or gallery_saved=false with the reason (Android 10 or newer is needed); a failed copy never fails the capture"
+    ],
+    "fixes": [],
+    "breaking": []
+  },
+  "metadata": {
+    "allowedRoots": [
+      "/data/user/0/com.example.pai_mobile/files/plugins/pai.camera/captures",
+      "/data/data/com.example.pai_mobile/files/plugins/pai.camera/captures"
+    ]
+  }
+}
