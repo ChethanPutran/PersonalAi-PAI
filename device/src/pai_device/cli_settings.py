@@ -9,6 +9,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import getpass
+import json
+import posixpath
+import re
 import sys
 from typing import Any, Awaitable, Callable, Dict, Optional
 
@@ -136,8 +139,149 @@ async def cmd_devices(args, ctx: Ctx) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# Plugin settings: pai-device plugins config <id> [--set k=v | k+=x | k-=x] [--reset k]
+# ---------------------------------------------------------------------------
+
+class EditError(ValueError):
+    pass
+
+
+def _norm_item(text: str) -> str:
+    t = text.strip()
+    return posixpath.normpath(t) if t.startswith(("/", "~")) else t
+
+
+def _typed(key: str, spec: Dict[str, Any], text: str) -> Any:
+    t = spec.get("type")
+    if t == "boolean":
+        v = parse_on_off(text) if text.strip().lower() in ("on", "off", "true", "false", "yes", "no", "1", "0") else None
+        if v is None:
+            raise EditError(f"{key}: use on/off (true/false)")
+        return v
+    if t in ("integer", "number"):
+        try:
+            return int(text) if t == "integer" else float(text)
+        except ValueError:
+            raise EditError(f"{key}: must be {'a whole number' if t == 'integer' else 'a number'}") from None
+    if t == "array":
+        if text.strip().startswith("["):
+            try:
+                v = json.loads(text)
+            except ValueError:
+                raise EditError(f"{key}: not valid JSON") from None
+            if not isinstance(v, list):
+                raise EditError(f"{key}: must be a JSON list")
+            return v
+        return [_norm_item(i) for i in text.split(",") if i.strip()]
+    return text
+
+
+def build_changes(props: Dict[str, Dict[str, Any]], effective: Dict[str, Any],
+                  sets: Optional[list], resets: Optional[list]) -> Dict[str, Any]:
+    """The PUT body (changed keys only; ``None`` resets a key) from ``--set`` / ``--reset`` arguments."""
+    changes: Dict[str, Any] = {}
+    for item in sets or []:
+        m = re.match(r"^([A-Za-z0-9_.]+)(\+=|-=|=)(.*)$", item, re.S)
+        if not m:
+            raise EditError(f"'{item}': use key=value, key+=item or key-=item")
+        key, op, text = m.groups()
+        spec = props.get(key)
+        if spec is None:
+            raise EditError(f"{key}: not a setting of this plugin (settings: {', '.join(props) or 'none'})")
+        if op == "=":
+            changes[key] = _typed(key, spec, text)
+            continue
+        if spec.get("type") != "array":
+            raise EditError(f"{key}: '+=' and '-=' only work on list settings")
+        current = list(changes.get(key, effective.get(key)) or [])
+        if op == "+=":
+            current += [i for i in _typed(key, spec, text) if i not in current]
+        else:
+            drop = {_norm_item(i) for i in _typed(key, spec, text)}
+            current = [c for c in current if _norm_item(c) not in drop]
+        changes[key] = current
+    for key in resets or []:
+        if key not in props:
+            raise EditError(f"{key}: not a setting of this plugin (settings: {', '.join(props) or 'none'})")
+        changes[key] = None
+    return changes
+
+
+def _show_value(v: Any) -> str:
+    if isinstance(v, list):
+        return ", ".join(map(str, v)) if v else "(none)"
+    if isinstance(v, bool):
+        return "on" if v else "off"
+    return "(not set)" if v is None else str(v)
+
+
+def _print_plugin_config(plugin_id: str, device_id: str, state: Dict[str, Any]) -> None:
+    props = (state.get("schema") or {}).get("properties") or {}
+    values, defaults = state.get("values") or {}, state.get("defaults") or {}
+    effective = state.get("effective") or {}
+    print(f"Settings of {plugin_id} on device {device_id}:")
+    for key, spec in props.items():
+        print(f"\n  {key}: {spec.get('title') or key}")
+        if spec.get("description"):
+            print(f"      {spec['description']}")
+        print(f"      current : {_show_value(effective.get(key))}" + ("" if key in values else "  (default)"))
+        print(f"      default : {_show_value(defaults.get(key))}")
+    print("\nChange: --set key=value | key+=item | key-=item, --reset key")
+
+
+def _print_config_errors(exc: httpx.HTTPStatusError) -> bool:
+    try:
+        detail = exc.response.json().get("detail")
+    except Exception:
+        return False
+    if exc.response.status_code == 422 and isinstance(detail, dict) and isinstance(detail.get("errors"), dict):
+        print("✗ those settings were not accepted:", file=sys.stderr)
+        for key, msg in detail["errors"].items():
+            print(f"  {key}: {msg}", file=sys.stderr)
+        return True
+    return False
+
+
+async def _cmd_plugin_config(args, ctx: Ctx, pid: str) -> int:
+    device_id = _need_device(args, ctx)
+    if not device_id:
+        return 1
+    state = await ctx.client.get_plugin_config(device_id, pid)
+    props = (state.get("schema") or {}).get("properties") or {}
+    if not props:
+        print(f"{pid} has no settings.")
+        return 0
+    sets, resets = getattr(args, "set", None), getattr(args, "reset", None)
+    if sets or resets:
+        try:
+            changes = build_changes(props, state.get("effective") or {}, sets, resets)
+        except EditError as exc:
+            print(f"✗ {exc}", file=sys.stderr)
+            return 2
+        try:
+            state = await ctx.client.set_plugin_config(device_id, pid, changes)
+        except httpx.HTTPStatusError as exc:
+            if _print_config_errors(exc):
+                return 1
+            raise
+        if not args.json:
+            print(f"✓ settings saved for {pid}" + ("" if state.get("delivered", True)
+                                                  else " (the device is offline: it applies them when it reconnects)"))
+    if args.json:
+        print_json(state)
+    else:
+        _print_plugin_config(pid, device_id, state)
+    return 0
+
+
 async def cmd_plugins(args, ctx: Ctx) -> int:
     pid = getattr(args, "plugin_id", None)
+    if args.action == "config":
+        if not pid:
+            print("error: pai-device plugins config <plugin_id> [--device ID] [--set k=v] [--reset k]", file=sys.stderr)
+            return 2
+        return await _cmd_plugin_config(args, ctx, pid)
     if args.action in ("enable", "disable"):
         if not pid:
             print(f"error: pai-device plugins {args.action} <plugin_id>", file=sys.stderr)
@@ -308,9 +452,13 @@ def register(sub: "argparse._SubParsersAction", common: argparse.ArgumentParser)
     sub.add_parser("password", parents=[common], help="change your password (prompts; never echoes)")
     sub.add_parser("devices", parents=[common], help="your devices and their remote-access switches")
 
-    sp = sub.add_parser("plugins", parents=[common], help="your plugins: list, enable, disable (account level)")
-    sp.add_argument("action", choices=["list", "enable", "disable"], nargs="?", default="list")
-    sp.add_argument("plugin_id", nargs="?", help="plugin id for enable/disable")
+    sp = sub.add_parser("plugins", parents=[common], help="your plugins: list, enable, disable (account level), config (per-device settings)")
+    sp.add_argument("action", choices=["list", "enable", "disable", "config"], nargs="?", default="list")
+    sp.add_argument("plugin_id", nargs="?", help="plugin id for enable/disable/config")
+    sp.add_argument("--set", action="append", metavar="KEY=VALUE",
+                    help="config: change a setting (repeatable). Lists: key+=path adds, key-=path removes, "
+                         "key=a,b or key='[\"a\",\"b\"]' replaces. Booleans: on/off")
+    sp.add_argument("--reset", action="append", metavar="KEY", help="config: back to the default (repeatable)")
     sp.add_argument("--no-device", action="store_true", help="don't add this device's install state to the list")
 
     sp = sub.add_parser("operations", parents=[common], help="recent plugin installs/removals and how they went")

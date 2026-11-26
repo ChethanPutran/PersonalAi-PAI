@@ -373,10 +373,13 @@ class APIClient:
         plugin_id: str,
         device_id: str,
         version: Optional[str] = None,
+        config: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         body: Dict[str, Any] = {"device_id": device_id}
         if version:
             body["version"] = version
+        if config is not None:
+            body["config"] = config
         r = await self._request(
             "POST",
             f"/plugins/{plugin_id}/install",
@@ -565,6 +568,13 @@ class APIClient:
 
     async def account_plugins(self) -> Dict[str, Any]:
         return await self.request_json("GET", "/account/plugins")
+
+    async def get_plugin_config(self, device_id: str, plugin_id: str) -> Dict[str, Any]:
+        return await self.request_json("GET", f"/plugins/device/{device_id}/{plugin_id}/config")
+
+    async def set_plugin_config(self, device_id: str, plugin_id: str, values: Dict[str, Any]) -> Dict[str, Any]:
+        return await self.request_json("PUT", f"/plugins/device/{device_id}/{plugin_id}/config",
+                                       json={"values": values})
 
     async def get_remote_access(self, device_id: str) -> Dict[str, Any]:
         return await self.request_json("GET", f"/devices/{device_id}/remote-access")

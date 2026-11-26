@@ -87,6 +87,9 @@ async def test_remote_invoke_is_refused_when_off_and_local_is_not(agent):
     ran = []
 
     class Plugins:
+        def find_by_capability(self, cap):
+            return None
+
         async def invoke(self, cap, params):
             ran.append(cap)
             return {"ok": 1}

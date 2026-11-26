@@ -38,6 +38,8 @@ from ..config import (
     RegisterRequest,
     ensure_writable_dir,
 )
+from ..path_policy import PathPolicy, apply_roots_env, has_policy
+from ..plugin_config_store import PluginConfigStore
 from ..plugins import DevicePluginManager
 from ..transport import APIClient, WSClient, sha256_file
 from pai_device.agent.capabilities import BuiltinCapabilities
@@ -85,6 +87,9 @@ class DeviceAgent:
         )
         self.ws = WSClient(config.ws_url, self.api)
         self.plugins = DevicePluginManager(config.plugin_dir)
+        # Effective per-plugin settings (the user's choices), persisted so they apply before/without the backend.
+        self.config_store = PluginConfigStore(self.state_dir / "plugin_config")
+        self.plugin_configs: Dict[str, Dict[str, Any]] = self.config_store.load_all()
 
         # --- runtime state ---------------------------------------------------
         self.device_id: Optional[str] = None
@@ -383,6 +388,7 @@ class DeviceAgent:
         if msg_type == "connected":
             logger.info("WS handshake complete for %s", self.device_id)
             self._apply_remote_access(message.get("remote_access"))
+            self._background.append(asyncio.create_task(self._sync_plugin_configs()))
             if not self._remote_access_synced:                  # once per start: a reconnect must not undo the owner
                 self._remote_access_synced = True
                 self._background.append(asyncio.create_task(self._sync_remote_access_from_config()))
@@ -414,6 +420,10 @@ class DeviceAgent:
             await self._handle_uninstall(message)
             return
 
+        if msg_type == "plugin.config":
+            await self._handle_plugin_config(message)
+            return
+
         # Backend-initiated liveness check.
         if msg_type == "ping":
             await self.ws.send({"type": "pong", "device_id": self.device_id})
@@ -432,6 +442,64 @@ class DeviceAgent:
             return
 
         logger.warning("Unhandled WS message: %s", message)
+
+    # ------------------------------------------------------------------
+    # Plugin settings (per-device configuration chosen by the user)
+    # ------------------------------------------------------------------
+
+    def _set_plugin_config(self, plugin_id: str, values: Any) -> None:
+        """Remember (memory + disk) the effective settings of a plugin and align the native upper bound."""
+        if not isinstance(values, dict) or not plugin_id:
+            return
+        self.plugin_configs[plugin_id] = values
+        try:
+            self.config_store.save(plugin_id, values)
+        except Exception:
+            logger.exception("Could not persist the settings of %s", plugin_id)
+        apply_roots_env(plugin_id, PathPolicy.from_values(values) if has_policy(values) else None)
+
+    async def _handle_plugin_config(self, message: Dict[str, Any]) -> None:
+        """``plugin.config``: the user changed a plugin's settings. Same remote rule as installs; fail closed."""
+        plugin_id = message.get("plugin_id")
+        if message.get("device_id") not in (None, self.device_id):
+            logger.warning("Ignoring plugin.config meant for another device")
+            return
+        if not plugin_id or not isinstance(message.get("config"), dict):
+            logger.warning("Malformed plugin.config: %s", message)
+            return
+        if self._is_remote(message.get("requested_by_device")) and not self.remote_access["install"]:
+            logger.warning("Refused remote settings change for %s: remote install is off on this device", plugin_id)
+            return
+        self._set_plugin_config(plugin_id, message["config"])
+        logger.info("Settings of %s updated", plugin_id)
+
+    async def _sync_plugin_configs(self) -> None:
+        """After (re)connecting: fetch each installed plugin's settings so changes made while offline apply.
+        The backend is the user's choice; what is already stored here keeps being enforced if it is unreachable."""
+        if not self.device_id:
+            return
+        for plugin_id in self.plugins.list_ids():
+            try:
+                state = await self.api.get_plugin_config(self.device_id, plugin_id)
+            except Exception as exc:
+                logger.debug("No settings fetched for %s: %s", plugin_id, exc)
+                continue
+            eff = (state or {}).get("effective") if isinstance(state, dict) else None
+            if isinstance(eff, dict) and eff != self.plugin_configs.get(plugin_id):
+                self._set_plugin_config(plugin_id, eff)
+                logger.info("Settings of %s synced from the backend", plugin_id)
+
+    def _enforce_plugin_config(self, capability: str, parameters: Dict[str, Any]) -> Optional[str]:
+        """Plain-words refusal when the plugin's folder settings forbid this call (else ``None``)."""
+        plugin = self.plugins.find_by_capability(capability)
+        values = self.plugin_configs.get(plugin.id) if plugin else None
+        if plugin is None or not has_policy(values):
+            return None
+        policy = PathPolicy.from_values(values)
+        error = policy.check(capability, parameters)
+        if error is None:
+            apply_roots_env(plugin.id, policy)               # native upper bound = allowed folders
+        return error
 
     # ------------------------------------------------------------------
     # Install / uninstall
@@ -517,6 +585,9 @@ class DeviceAgent:
             await self._report_install_failure(plugin_id, version, op_id, err)
             return
 
+        if isinstance(message.get("config"), dict):          # chosen at install time: in force from the start
+            self._set_plugin_config(plugin_id, message["config"])
+
         logger.info("Installing plugin %s@%s", plugin_id, version)
         current = {"stage": "downloading"}
         keepalive: Optional[asyncio.Task] = None
@@ -587,6 +658,11 @@ class DeviceAgent:
         await self._progress(op_id, "installing")            # "working on it"
         try:
             await self.plugins.uninstall(plugin_id)
+            self.plugin_configs.pop(plugin_id, None)
+            try:
+                self.config_store.delete(plugin_id)
+            except Exception:
+                logger.exception("Could not remove the settings of %s", plugin_id)
             await self.api.report_uninstall(plugin_id, {
                 "device_id": self.device_id,
                 "operation_id": op_id,
@@ -647,6 +723,14 @@ class DeviceAgent:
                 )
                 payload = {"ok": True, "data": result}
             else:
+                refusal = self._enforce_plugin_config(capability, parameters)
+                if refusal:
+                    logger.warning("Task %s refused by plugin settings: %s", request_id, refusal)
+                    await self.ws.send({
+                        "type": "result", "request_id": request_id, "success": False, "error": refusal,
+                        "result": {"ok": False, "error": refusal},
+                    })
+                    return
                 result = await self.plugins.invoke(capability, parameters)
                 payload = {"ok": True, "data": result}
                 logger.info("Task %s completed (capability=%s) result: %s", request_id, capability, result)

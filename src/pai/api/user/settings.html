@@ -189,6 +189,22 @@ dialog::backdrop { background: rgba(10,12,18,.55); }
 dialog h3 { margin: 0 0 6px; }
 dialog p { margin: 0 0 18px; color: var(--muted); }
 
+/* ---------- plugin settings dialog ---------- */
+dialog.wide { max-width: 560px; max-height: calc(100dvh - 32px); overflow-y: auto; }
+.pcfg-field { padding: 14px 0; }
+.pcfg-field + .pcfg-field { border-top: 1px solid var(--line); }
+.pcfg-field .t { font-weight: 600; }
+.pcfg-field .d, .pcfg-field .def { color: var(--muted); font-size: 13.5px; margin-top: 2px; }
+.pcfg-field .def { font-size: 12.5px; color: var(--faint); overflow-wrap: anywhere; }
+.pcfg-row { display: flex; gap: 8px; align-items: center; padding: 6px 10px; margin-top: 6px; border-radius: 8px; background: var(--surface-2); }
+.pcfg-row code { flex: 1; overflow-wrap: anywhere; font-size: 13px; }
+.pcfg-add { display: flex; gap: 8px; margin-top: 8px; }
+.pcfg-sug { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.pcfg-sug button { border: 1px dashed var(--off); background: transparent; color: var(--accent); border-radius: 999px; padding: 3px 11px; cursor: pointer; font-size: 13px; font-weight: 600; }
+.pcfg-sug button:disabled { opacity: .45; cursor: default; }
+.pcfg-err { color: var(--bad); font-size: 13.5px; margin-top: 6px; }
+.pcfg-head { display: flex; gap: 16px; align-items: flex-start; }
+.pcfg-head .grow { min-width: 0; }
 /* ---------- mobile ---------- */
 @media (max-width: 860px) {
   .shell { grid-template-columns: 1fr; }
@@ -378,6 +394,10 @@ dialog p { margin: 0 0 18px; color: var(--muted); }
 <dialog id="confirm"><h3 id="c-title"></h3><p id="c-body"></p>
   <div class="actions" style="justify-content:flex-end"><button class="btn" id="c-no">Cancel</button><button class="btn danger" id="c-yes">Confirm</button></div></dialog>
 
+<dialog id="pcfg" class="wide" aria-labelledby="pcfg-title"><h3 id="pcfg-title"></h3><p id="pcfg-sub"></p>
+  <div id="pcfg-form"></div><div id="pcfg-error" class="pcfg-err" role="alert" hidden></div>
+  <div class="actions" style="justify-content:flex-end;margin-top:14px"><button type="button" class="btn" id="pcfg-cancel">Cancel</button><button type="button" class="btn primary" id="pcfg-save">Save</button></div></dialog>
+
 <script>
 "use strict";
 const API = "/api/v1";
@@ -420,11 +440,12 @@ function icon(name) {
 }
 
 /* ---- API ---- */
-class ApiError extends Error { constructor(status, message) { super(message); this.status = status; } }
+class ApiError extends Error { constructor(status, message, errors) { super(message); this.status = status; this.errors = errors || null; } }
 function errText(body) {
   const d = body && body.detail;
   if (typeof d === "string") return d;
   if (d && d.message) return d.message;
+  if (d && d.errors && typeof d.errors === "object") return "Some settings were not accepted. Check the fields marked below.";
   if (Array.isArray(d) && d.length) return d.map(x => (x.msg || "").replace(/^Value error, /, "")).filter(Boolean).join(". ");
   return "Something went wrong.";
 }
@@ -440,7 +461,7 @@ async function api(path, opts = {}) {
   } catch { throw new ApiError(0, "Can't reach the server. Check your connection."); }
   if (res.status === 401 && token) { signOut(true); throw new ApiError(401, "Your session ended. Please sign in again."); }
   let data = null; try { data = await res.json(); } catch {}
-  if (!res.ok) throw new ApiError(res.status, errText(data));
+  if (!res.ok) throw new ApiError(res.status, errText(data), data && data.detail && data.detail.errors);
   return data;
 }
 
@@ -642,8 +663,13 @@ function deviceCard(d) {
     try {
       const { plugins } = await api(`/plugins/device/${encodeURIComponent(d.id)}/installed`);
       const items = plugins.filter(p => p.is_installed);
-      installedBox.replaceChildren(...(items.length ? items.map(p => h("div", { class: "it" }, h("b", {}, p.plugin_id), h("span", { class: "meta" }, "v" + (p.version || "?")),
-        h("span", { class: "chip " + (p.enabled_on_device ? "ok" : "") }, p.enabled_on_device ? "enabled" : "disabled"))) : [h("div", { class: "meta" }, "Nothing installed on this device.")]));
+      installedBox.replaceChildren(...(items.length ? items.map(p => {
+        const settingsBtn = h("button", { class: "btn sm", type: "button", hidden: true, "aria-label": `Settings for ${p.plugin_id} on ${d.name}` }, "Settings");
+        settingsBtn.addEventListener("click", () => openPluginSettings(d.id, d.name, p.plugin_id, p.plugin_id));
+        api(pluginConfigUrl(d.id, p.plugin_id)).then(st => { settingsBtn.hidden = !hasSettings(st); }).catch(() => {});   // only plugins that declare settings
+        return h("div", { class: "it" }, h("b", {}, p.plugin_id), h("span", { class: "meta" }, "v" + (p.version || "?")),
+          h("span", { class: "chip " + (p.enabled_on_device ? "ok" : "") }, p.enabled_on_device ? "enabled" : "disabled"), h("span", { class: "grow" }), settingsBtn);
+      }) : [h("div", { class: "meta" }, "Nothing installed on this device.")]));
     } catch (e) { installedBox.replaceChildren(h("div", { class: "meta" }, e.message)); }
   });
   const remove = h("button", { class: "btn sm danger", type: "button" }, "Remove device");
@@ -671,6 +697,106 @@ function deviceCard(d) {
       setting("allow_remote_invoke", "Allow remote plugin use", "Let your other devices, schedules and agents run plugins on this device, like taking a photo or opening a file.")),
     h("div", { class: "device-foot" }, ...foot),
     h("div", { style: "padding:0 22px" }, installedBox));
+}
+
+/* ---- plugin settings (generated from the plugin's configSchema; the server validates and enforces) ---- */
+const clone = v => JSON.parse(JSON.stringify(v === undefined ? null : v));
+const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const showDefault = v => Array.isArray(v) ? (v.length ? v.join(", ") : "none") : typeof v === "boolean" ? (v ? "on" : "off") : (v == null ? "none" : String(v));
+const pluginConfigUrl = (deviceId, pluginId) => `/plugins/device/${encodeURIComponent(deviceId)}/${encodeURIComponent(pluginId)}/config`;
+const hasSettings = st => !!(st && st.schema && st.schema.properties && Object.keys(st.schema.properties).length);
+
+/* One field. ``draft[key]`` is the working value; ``resets`` holds keys sent as null (back to the default). */
+function settingField(key, spec, draft, resets, defaults, errs) {
+  const id = "pcfg-" + key, errId = id + "-err";
+  const box = h("div", { class: "pcfg-field" });
+  const err = h("div", { class: "pcfg-err", id: errId, role: "alert", hidden: true });
+  errs[key] = m => { err.textContent = m || ""; err.hidden = !m; };
+  const touch = () => { resets.delete(key); errs[key](""); render(); };
+  const title = spec.title || key;
+  const hint = [spec.description && h("div", { class: "d", id: id + "-d" }, spec.description),
+    "default" in spec || key in defaults ? h("div", { class: "def" }, "Default: " + showDefault(defaults[key])) : null];
+  const useDefault = h("button", { class: "btn ghost sm", type: "button", "aria-label": "Use the default for " + title }, "Use default");
+  useDefault.addEventListener("click", () => { draft[key] = clone(defaults[key]); resets.add(key); errs[key](""); render(); });
+  const head = (control) => h("div", { class: "pcfg-head" },
+    h("div", { class: "grow" }, h("label", { class: "t", for: id }, title), hint), control);
+  const t = spec.type, widget = (spec["x-pai"] || {}).widget;
+
+  function render() {
+    useDefault.hidden = same(draft[key], defaults[key]) && !resets.has(key) || !(key in defaults);
+    if (t === "boolean") {
+      const b = h("button", { class: "switch", id, role: "switch", type: "button", "aria-checked": String(!!draft[key]), "aria-label": title,
+        "aria-describedby": errId });
+      b.addEventListener("click", () => { draft[key] = !draft[key]; touch(); });
+      box.replaceChildren(head(b), err, useDefault);
+    } else if (t === "array") {
+      const items = draft[key] || [];
+      const rows = items.map((p, i) => {
+        const rm = h("button", { class: "btn ghost sm danger", type: "button", "aria-label": `Remove ${p}` }, "Remove");
+        rm.addEventListener("click", () => { draft[key] = items.filter((_, j) => j !== i); touch(); });
+        return h("div", { class: "pcfg-row" }, h("code", {}, p), rm);
+      });
+      const input = h("input", { class: "input", id, type: "text", "aria-describedby": errId + (spec.description ? " " + id + "-d" : ""),
+        placeholder: widget === "paths" ? "Add a folder, e.g. ~/Projects or /data/shared" : "Add an entry", "aria-label": widget === "paths" ? "Add folder for " + title : "Add entry for " + title });
+      const add = h("button", { class: "btn sm", type: "button" }, widget === "paths" ? "Add folder" : "Add");
+      const addValue = v => { v = (v || "").trim(); if (!v) return; if (!items.includes(v)) draft[key] = [...items, v]; touch(); };
+      add.addEventListener("click", () => { addValue(input.value); });
+      input.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); addValue(input.value); } });
+      const sugs = (spec["x-pai"] || {}).suggestions || [];
+      const chips = sugs.length ? h("div", { class: "pcfg-sug", role: "group", "aria-label": "Suggested folders" },
+        ...sugs.map(sg => { const b = h("button", { type: "button", disabled: items.includes(sg.path), title: sg.path, "aria-label": `Add ${sg.label} (${sg.path})` }, "+ " + sg.label);
+          b.addEventListener("click", () => addValue(sg.path)); return b; })) : null;
+      box.replaceChildren(head(null), h("div", { role: "list", "aria-label": title }, ...(rows.length ? rows : [h("div", { class: "meta", style: "margin-top:6px" }, "Empty (the plugin's own default applies).")])),
+        h("div", { class: "pcfg-add" }, input, add), chips, err, useDefault);
+      if (document.activeElement === document.body) input.focus();
+    } else if (spec.enum) {
+      const sel = h("select", { class: "input", id, "aria-describedby": errId }, ...spec.enum.map(o => h("option", { value: o, selected: o === draft[key] }, String(o))));
+      sel.addEventListener("change", () => { draft[key] = sel.value; resets.delete(key); errs[key](""); });
+      box.replaceChildren(head(null), sel, err, useDefault);
+    } else {
+      const num = t === "integer" || t === "number";
+      const inp = h("input", { class: "input", id, type: num ? "number" : "text", value: draft[key] == null ? "" : String(draft[key]), "aria-describedby": errId,
+        step: t === "integer" ? "1" : "any", min: spec.minimum, max: spec.maximum, maxlength: spec.maxLength });
+      inp.addEventListener("input", () => { draft[key] = num ? (inp.value === "" ? null : Number(inp.value)) : inp.value; resets.delete(key); errs[key](""); });
+      box.replaceChildren(head(null), inp, err, useDefault);
+    }
+  }
+  render();
+  return box;
+}
+
+/* Opens the dialog. ``onSave(changes)`` returns the saved state (a PUT) or, for an install, is handed the values to install with. */
+async function openPluginSettings(deviceId, deviceName, pluginId, pluginName, opts = {}) {
+  const dlg = $("#pcfg"), form = $("#pcfg-form"), top = $("#pcfg-error"), save = $("#pcfg-save");
+  $("#pcfg-title").textContent = `${pluginName || pluginId} settings`;
+  $("#pcfg-sub").textContent = opts.install ? `Choose how ${pluginName || pluginId} may work on ${deviceName} before it is installed.` : `Applies to ${pluginName || pluginId} on ${deviceName} only.`;
+  form.replaceChildren(h("div", { class: "meta" }, "Loading…")); top.hidden = true; save.disabled = true; save.textContent = opts.install ? "Install" : "Save";
+  $("#pcfg-cancel").onclick = () => dlg.close(); dlg.oncancel = () => {};
+  if (!dlg.open) dlg.showModal();
+  let st;
+  try { st = await api(pluginConfigUrl(deviceId, pluginId)); }
+  catch (e) { form.replaceChildren(h("div", { class: "banner bad" }, e.message)); return; }
+  const props = (st.schema && st.schema.properties) || {}, defaults = st.defaults || {}, effective = st.effective || {};
+  const draft = {}, resets = new Set(), errs = {};
+  for (const k of Object.keys(props)) draft[k] = clone(k in effective ? effective[k] : defaults[k]);
+  form.replaceChildren(...Object.entries(props).map(([k, spec]) => settingField(k, spec, draft, resets, defaults, errs)));
+  save.disabled = false;
+  save.onclick = async () => {
+    const changes = {};
+    for (const k of Object.keys(props)) { if (resets.has(k)) changes[k] = null; else if (!same(draft[k], effective[k])) changes[k] = draft[k]; }
+    top.hidden = true; Object.values(errs).forEach(f => f(""));
+    if (!Object.keys(changes).length && !opts.install) { dlg.close(); return; }
+    save.disabled = true;
+    try {
+      const r = opts.install ? await opts.install(changes) : await api(pluginConfigUrl(deviceId, pluginId), { method: "PUT", body: { values: changes } });
+      dlg.close();
+      if (!opts.install) toast(r && r.delivered === false ? "Saved. The device is offline and will apply it when it reconnects." : "Settings saved");
+    } catch (e) {
+      if (e.errors) { for (const [k, m] of Object.entries(e.errors)) { if (errs[k]) errs[k](m); } }
+      top.textContent = e.message; top.hidden = false;
+      const first = Object.keys(e.errors || {}).find(k => document.getElementById("pcfg-" + k)); if (first) document.getElementById("pcfg-" + first).focus();
+    } finally { save.disabled = false; }
+  };
 }
 
 /* ---- plugins ---- */
