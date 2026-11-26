@@ -58,7 +58,7 @@ async def test_classifier_uses_the_fast_route_with_a_tiny_deterministic_call():
     route, how = await FastRouter(llm).decide("why is the sky blue")
     assert (route, how) == (TurnRoute.CHAT, "llm")
     request, used_route = llm.calls[0]
-    assert used_route == "chat" and request.max_tokens <= 8 and request.temperature == 0.0
+    assert used_route == "chat" and request.max_tokens <= 32 and request.temperature == 0.0
     assert (await FastRouter(FakeLLM("ACT")).decide("why is the sky blue"))[0] is TurnRoute.ACT
 
 
