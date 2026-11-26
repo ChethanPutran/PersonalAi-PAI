@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>PAI Help: what you can ask</title>
+<style>
+:root { --bg:#f5f6f8; --surface:#fff; --line:#e3e6ec; --text:#171a21; --muted:#5f6877; --accent:#4f46e5;
+  --accent-soft:#eceafd; --warn:#a15c00; --warn-soft:#fff2dc; --radius:14px;
+  --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg:#0f1115; --surface:#171a21; --line:#2a2f3a; --text:#eceef3; --muted:#a4acbb; --accent:#8b85ff;
+  --accent-soft:#232246; --warn:#f0b04c; --warn-soft:#2d2412; } }
+:root[data-theme="dark"] { --bg:#0f1115; --surface:#171a21; --line:#2a2f3a; --text:#eceef3; --muted:#a4acbb;
+  --accent:#8b85ff; --accent-soft:#232246; --warn:#f0b04c; --warn-soft:#2d2412; }
+* { box-sizing: border-box; }
+body { margin:0; background:var(--bg); color:var(--text); font:15px/1.55 var(--font); }
+main { max-width: 860px; margin: 0 auto; padding: 32px 16px 64px; }
+h1 { font-size: 26px; letter-spacing: -.02em; margin: 0 0 6px; }
+.lead { color: var(--muted); margin: 0 0 24px; }
+.grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px 18px 14px; }
+.card h2 { font-size: 16px; margin: 0 0 4px; }
+.card .need { font-size: 12.5px; color: var(--muted); margin: 0 0 10px; }
+.card ul { margin: 0; padding-left: 18px; }
+.card li { margin: 3px 0; }
+.say { display: block; margin: 8px 0 0; padding: 8px 11px; border-radius: 9px; background: var(--accent-soft);
+  font-size: 14px; }
+.note { margin: 26px 0 0; padding: 14px 16px; border-radius: var(--radius); background: var(--warn-soft);
+  border: 1px solid var(--line); }
+.note h2 { font-size: 15px; margin: 0 0 6px; color: var(--warn); }
+.note ul { margin: 0; padding-left: 18px; }
+h3 { margin: 30px 0 10px; font-size: 18px; }
+code { font: 13px ui-monospace, Menlo, Consolas, monospace; background: var(--accent-soft); padding: 1px 5px; border-radius: 5px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>What you can ask PAI</h1>
+  <p class="lead">Type or say a goal in plain words. PAI plans the steps and runs them on the right device,
+  which does not have to be the one you are talking to. What is available depends on the plugins installed
+  and enabled, and on which of your devices are online.</p>
+
+  <div class="grid">
+    <section class="card"><h2>Chat and answers</h2><p class="need">Always available</p>
+      <ul><li>Questions, explanations, advice, rough guesses</li><li>"What can you do?"</li></ul>
+      <span class="say">"I'm feeling hot. Can you guess the temperature?"</span></section>
+
+    <section class="card"><h2>Reminders and schedules</h2><p class="need">Built in. The target device must allow remote use.</p>
+      <ul><li>One-time, repeating (every N minutes or hours) and cron schedules</li><li>Create, list and delete them</li>
+      <li>Check your running and past tasks</li></ul>
+      <span class="say">"Remind me to call mom at 6pm tomorrow."</span></section>
+
+    <section class="card"><h2>Camera</h2><p class="need">Camera plugin on the phone. Asks every time.</p>
+      <ul><li>Take a photo or record a video</li><li>Save a copy to the gallery</li></ul>
+      <span class="say">"Take a photo with the back camera and save it to my gallery."</span></section>
+
+    <section class="card"><h2>Location, contacts, device</h2><p class="need">Plugins on the device</p>
+      <ul><li>Where you are now</li><li>Search or get a contact</li><li>Battery, model and other device info</li></ul>
+      <span class="say">"Where am I?"</span></section>
+
+    <section class="card"><h2>Notifications, flashlight, volume, media</h2><p class="need">Plugins on the device</p>
+      <ul><li>Send a notification to a device</li><li>Flashlight on or off</li><li>Set the volume, control playback</li></ul>
+      <span class="say">"Turn on the flashlight on my phone."</span></section>
+
+    <section class="card"><h2>Clipboard</h2><p class="need">Clipboard plugin</p>
+      <ul><li>Read what is on the clipboard</li><li>Copy text to it</li></ul>
+      <span class="say">"Copy this address to my phone's clipboard."</span></section>
+
+    <section class="card"><h2>Apps</h2><p class="need">Apps plugin</p>
+      <ul><li>List, launch and open apps</li></ul>
+      <span class="say">"Open the calculator on my phone."</span></section>
+
+    <section class="card"><h2>Files</h2><p class="need">Files plugin. Limited to the folders you allowed.</p>
+      <ul><li>List, read, write, copy and move files; check file info</li><li>Delete files (asks first)</li></ul>
+      <span class="say">"List the PDFs in my downloads folder on the server."</span></section>
+
+    <section class="card"><h2>Browser</h2><p class="need">Browser plugin on a device</p>
+      <ul><li>Open a page, fill in a form, make a booking</li></ul>
+      <span class="say">"Open the browser on the server and go to wikipedia.org."</span></section>
+
+    <section class="card"><h2>Computer control</h2><p class="need">Computer control plugin, ready on the device</p>
+      <ul><li>Look at the screen; click, long-press, type, press keys, scroll, swipe</li>
+      <li>List, launch and check the foreground app</li><li>Ask for its status to see what is missing</li></ul>
+      <span class="say">"Check if computer control is ready on my phone."</span></section>
+
+    <section class="card"><h2>Agents</h2><p class="need">Turn on the Agent plugin first</p>
+      <ul><li>Start a long-running agent for a multi-step goal</li><li>Message it, check on it, list your agents, stop it</li>
+      <li>Agents only use what you already have, and approvals still apply</li></ul>
+      <span class="say">"Start an agent to open Settings on my phone and turn on Bluetooth."</span></section>
+  </div>
+
+  <h3>How to talk to an agent</h3>
+  <div class="card"><ul>
+    <li><b>Start:</b> "Start an agent called Researcher to find the cheapest flight tomorrow."</li>
+    <li><b>Talk to it:</b> "Tell agent Researcher to look only at morning flights." Also use this to answer its questions.</li>
+    <li><b>Check:</b> "How is my agent doing?" or "List my agents."</li>
+    <li><b>Stop:</b> "Stop the Researcher agent."</li>
+    <li>Default budget is 25 steps, up to 100. An agent can never start other agents.</li></ul></div>
+
+  <div class="note"><h2>Good to know</h2><ul>
+    <li>Risky actions (camera, keyboard and mouse control, shell commands, deleting files) ask for your approval, and voice can never approve them. Confirm on screen.</li>
+    <li>Each device has its own switches for remote install and remote use, off by default. With remote use off, that device refuses plugin requests from your other devices, including schedules.</li>
+    <li>Scheduled actions that need approval run only after you approve them in Reminders.</li>
+    <li>If something is missing, install and enable its plugin from the Plugins screen or Settings.</li></ul></div>
+</main>
+</body>
+</html>

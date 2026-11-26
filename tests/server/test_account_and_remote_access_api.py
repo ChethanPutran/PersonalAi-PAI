@@ -239,3 +239,10 @@ def test_personalization_roundtrip_is_private_sanitised_and_clearable(world):
     assert "Name to use: Asha" in profile.block and "Hobbies: trekking" in profile.block
     assert client.delete("/api/v1/account/personalization", headers=alice).status_code == 204
     assert client.portal.call(svc.get, me).personalization.is_empty()        # the save invalidated the cache
+
+
+def test_the_capabilities_help_page_is_public_static_and_has_no_user_data(world):
+    client, alice, mallory, dev = world
+    page = client.get("/api/v1/account/help")
+    assert page.status_code == 200 and "text/html" in page.headers["content-type"]
+    assert "What you can ask PAI" in page.text and "alice@example.com" not in page.text

@@ -27,12 +27,21 @@ from pai.users.profile import Personalization, load_personalization
 router = APIRouter(prefix="/account", tags=["account"])
 
 _PAGE = Path(__file__).resolve().parent.parent / "user" / "settings.html"
+_HELP_PAGE = _PAGE.with_name("help.html")
 _LOCALE = re.compile(r"^[a-z]{2,3}(-[A-Za-z]{2,4})?$")
 
 
 # ============================================================
 # Settings page (static shell; its API calls need a bearer token)
 # ============================================================
+
+@router.get("/help", response_class=HTMLResponse, include_in_schema=False)
+async def help_page() -> HTMLResponse:
+    """What PAI can do, with examples. Static, public information (no user data)."""
+    if not _HELP_PAGE.is_file():
+        return HTMLResponse("<h1>Help page not installed</h1>", status_code=500)
+    return HTMLResponse(_HELP_PAGE.read_text(encoding="utf-8"), headers={"Cache-Control": "no-store"})
+
 
 @router.get("/settings", response_class=HTMLResponse, include_in_schema=False)
 async def settings_page() -> HTMLResponse:
