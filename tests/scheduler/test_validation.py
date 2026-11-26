@@ -161,3 +161,20 @@ async def test_shell_can_never_be_scheduled_it_needs_approval_every_time(validat
     pre = await validator.preflight(user_id=USER, capability="shell.exec", plugin_id="p1", device_id=DEV,
                                     executor_id="device_executor", parameters={"command": "ls"})
     assert pre.blocked and "every time" in pre.blocked_reason
+
+
+def test_stored_naive_fire_at_is_read_as_utc_not_local_time():
+    """SQLite returns the UTC fire_at without a zone; approving a future schedule in Asia/Kolkata must not
+    see it as 5.5 hours in the past."""
+    from datetime import datetime, timedelta, timezone as tz
+    from types import SimpleNamespace
+    from pai.scheduler.validation import ScheduleSpec, ScheduleValidator
+
+    future_utc = datetime.now(tz.utc) + timedelta(minutes=4)
+    row = SimpleNamespace(title="t", kind="one_shot", fire_at=future_utc.replace(tzinfo=None), cron=None,
+                          interval_seconds=None, timezone="Asia/Kolkata", capability="notification.send",
+                          parameters={}, target_device_id=None)
+    spec = ScheduleSpec.from_row(row)
+    errors = []
+    fire_at = ScheduleValidator._check_timing(spec, False, datetime.now(tz.utc), errors)
+    assert errors == [] and fire_at is not None

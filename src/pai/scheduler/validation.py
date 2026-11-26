@@ -65,7 +65,12 @@ class ScheduleSpec(BaseModel):
 
     @classmethod
     def from_row(cls, row: Any) -> "ScheduleSpec":
-        return cls(title=row.title, kind=row.kind, fire_at=row.fire_at, cron=row.cron,
+        fire_at = row.fire_at
+        if fire_at is not None and fire_at.tzinfo is None:
+            # Stored as UTC; SQLite hands it back without a zone. Left naive, _check_timing would read it
+            # as the schedule's LOCAL time (5.5 h off in Asia/Kolkata) and call a future time "in the past".
+            fire_at = fire_at.replace(tzinfo=timezone.utc)
+        return cls(title=row.title, kind=row.kind, fire_at=fire_at, cron=row.cron,
                    interval_seconds=row.interval_seconds, timezone=row.timezone or "UTC",
                    capability=row.capability, parameters=dict(row.parameters or {}),
                    target_device_id=row.target_device_id)
