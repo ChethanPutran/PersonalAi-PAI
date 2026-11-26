@@ -21,11 +21,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from uuid import uuid4
 
-from pai.api.dependencies import get_current_user, get_db, user_is_admin
+from pai.api.dependencies import get_current_user, get_db, get_source_device_id, user_is_admin
 from pai.common.enums.permission import Origin
 from pai.orchestration.capability_router import CapabilityNotAvailable
 from pai.orchestration.execution_context import ExecutionContext
 from pai.planning.models import TaskSpec
+from pai.security.audit.models import AuditEventType
 from pai.security.consent.models import ConfirmationInfo
 from pai.tasks.models import TaskStatus
 from pai.app_context import get_app_context, PAIAppContext
@@ -160,6 +161,68 @@ async def remove_my_device(
     return Response(status_code=204)
 
 # ============================================================
+# Remote access (what other devices may do to this one)
+# ============================================================
+
+class RemoteAccessUpdate(BaseModel):
+    """Send only what changes (``None`` = leave as is)."""
+    allow_remote_install: Optional[bool] = None
+    allow_remote_invoke: Optional[bool] = None
+
+
+def _remote_access_view(device: Any) -> Dict[str, Any]:
+    return {
+        "device_id": device.id,
+        "name": device.name,
+        "allow_remote_install": bool(getattr(device, "allow_remote_install", False)),
+        "allow_remote_invoke": bool(getattr(device, "allow_remote_invoke", False)),
+    }
+
+
+@router.get("/{device_id}/remote-access")
+async def get_remote_access(
+    device_id: str,
+    context: PAIAppContext = Depends(get_app_context),
+    user_id: str = Depends(get_current_user),
+) -> Dict[str, Any]:
+    device = await context.orchestrator.device_manager.get(device_id)
+    if device is None or getattr(device, "user_id", None) != user_id:
+        raise HTTPException(404, "Device not found")
+    return _remote_access_view(device)
+
+
+@router.put("/{device_id}/remote-access")
+async def set_remote_access(
+    device_id: str,
+    payload: RemoteAccessUpdate,
+    context: PAIAppContext = Depends(get_app_context),
+    user_id: str = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Turn remote plugin install / remote plugin use on or off for ONE of your devices.
+
+    Both are off by default. While off, nothing outside the device (another of your devices, the
+    web, a schedule, an agent) can install plugins on it or run plugins on it. Owner only;
+    every change is audited.
+    """
+    dm = context.orchestrator.device_manager
+    device = await dm.get(device_id)
+    if device is None or getattr(device, "user_id", None) != user_id:
+        raise HTTPException(404, "Device not found")
+    before = _remote_access_view(device)
+    updated = await dm.set_remote_access(
+        device_id, install=payload.allow_remote_install, invoke=payload.allow_remote_invoke)
+    if updated is None:
+        raise HTTPException(404, "Device not found")
+    after = _remote_access_view(updated)
+    context.orchestrator.security_manager.audit_logger.record(
+        AuditEventType.DEVICE_REMOTE_ACCESS_CHANGED, user_id=user_id, device_id=device_id,
+        allowed=True, reason="remote access settings changed",
+        metadata={"before": {k: before[k] for k in ("allow_remote_install", "allow_remote_invoke")},
+                  "after": {k: after[k] for k in ("allow_remote_install", "allow_remote_invoke")}})
+    return after
+
+
+# ============================================================
 # Heartbeat (HTTP)
 # ============================================================
 
@@ -230,6 +293,7 @@ async def invoke_on_device(
     context: PAIAppContext = Depends(get_app_context),
     user_id: str = Depends(get_current_user),
     session: AsyncSession = Depends(get_db),
+    source_device_id: Optional[str] = Depends(get_source_device_id),
 ):
     """Run a capability on a device THROUGH THE REAL PIPELINE (the plugin tester).
 
@@ -255,6 +319,7 @@ async def invoke_on_device(
         origin=Origin.USER_DIRECT,
         pre_approved=is_admin,            # set by the server only; never from the request
         device_id=device_id,
+        source_device_id=source_device_id,      # the target's "allow remote use" switch applies unless == device_id
         # Trusted scope: the device was just checked to be this user's own and online.
         metadata={"allowed_devices": [device_id]},
     )
@@ -361,6 +426,19 @@ async def dispatch_device_frame(
             device_executor = context.orchestrator.executor_manager.get("device_executor")
             if device_executor is not None and frame.request_id:
                 device_executor.deliver_result(frame.request_id, frame)
+
+    elif ftype == DeviceMessageType.PLUGIN_PROGRESS.value:
+        # A device reports how far a plugin install/uninstall got. Only its own operations count
+        # (PluginOperations checks the operation belongs to THIS device).
+        extra = frame.model_extra or {}
+        op_id = extra.get("operation_id")
+        ops = context.orchestrator.plugin_manager.operations
+        if op_id and ops is not None:
+            await ops.progress(
+                str(op_id), device_id=device_id, status=str(frame.status or ""),
+                error=frame.error, error_code=extra.get("error_code"), version=extra.get("version"))
+        else:
+            logger.debug("plugin.progress without an operation id from %s", device_id)
 
     elif ftype == DeviceMessageType.EVENT.value:
         logger.info("Event from %s: %s", device_id, frame.model_dump_json())
@@ -489,9 +567,15 @@ async def device_websocket(websocket: WebSocket, device_id: str):
         await device_manager.attach_connection(device_id, connection)
         logger.info("Device connection attached: %s", device_id)
 
+        me = await device_manager.get(device_id)
         await websocket.send_json({
             "type": "connected",
             "device_id": device_id,
+            # What the owner allows others to do to this device (the device enforces it too).
+            "remote_access": {
+                "install": bool(getattr(me, "allow_remote_install", False)),
+                "invoke": bool(getattr(me, "allow_remote_invoke", False)),
+            },
         })
 
         HEARTBEAT_TIMEOUT_SECONDS = 90.0   # 3× client heartbeat interval

@@ -17,7 +17,7 @@ from pai.storage.models import ScheduleModel
 
 ScheduleKind = Literal["one_shot", "cron", "interval"]
 CatchUp = Literal["none", "once", "all"]
-LastRunStatus = Literal["ok", "skipped_no_consent", "denied", "failed", "device_offline"]
+LastRunStatus = Literal["ok", "skipped_no_consent", "denied", "failed", "device_offline", "missed"]
 
 
 def utc_now() -> datetime:
@@ -50,6 +50,7 @@ class ScheduleBase(BaseModel):
     capability: str = "system.notifications.show"
     parameters: Dict[str, Any] = Field(default_factory=dict)
     catch_up: CatchUp = "once"
+    misfire_grace_seconds: Optional[int] = Field(default=None, ge=0)   # None = a missed fire never expires
     target_device_id: Optional[str] = None
 
     @field_validator("timezone")
@@ -86,6 +87,7 @@ class ScheduleUpdate(BaseModel):
     capability: Optional[str] = None
     parameters: Optional[Dict[str, Any]] = None
     catch_up: Optional[CatchUp] = None
+    misfire_grace_seconds: Optional[int] = Field(default=None, ge=0)
     target_device_id: Optional[str] = None
     enabled: Optional[bool] = None
 
@@ -115,6 +117,7 @@ class ScheduleOut(BaseModel):
     capability: str
     parameters: Dict[str, Any]
     catch_up: str
+    misfire_grace_seconds: Optional[int] = None
     enabled: bool
     last_fired_at: Optional[str]
     next_fire_at: Optional[str]
@@ -160,6 +163,7 @@ class ScheduleOut(BaseModel):
             capability=row.capability,
             parameters=row.parameters or {},
             catch_up=row.catch_up,
+            misfire_grace_seconds=row.misfire_grace_seconds,
             enabled=row.enabled,
             last_fired_at=iso(row.last_fired_at),
             next_fire_at=iso(row.next_fire_at),

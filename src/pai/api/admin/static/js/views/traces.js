@@ -9,7 +9,7 @@ import { api, openTraceStream } from '../api.js';
 import { btn, statusChip, errorState, copyTextButton, codeBlock } from '../ui.js';
 import { fmtEpoch, fmtMs, fmtCost, fmtTokens, sectionShares } from '../format.js';
 import { barChart, lineChart } from '../charts.js';
-import { llmCallsFromEvents, callLabel, cumulative, totalsOf } from '../usage_data.js';
+import { llmCallsFromEvents, speechStepsFromEvents, callLabel, cumulative, totalsOf } from '../usage_data.js';
 import { buildFlatTree, kindFamily, visibleRows, traceBounds, barGeometry, traceStats, defaultExpanded, collapseAllKeepRoots, expandAll, llmOther } from '../trace_tree.js';
 
 const KIND_ICON = { trace: 'play', span: 'bolt', llm: 'chat', tool: 'wrench', error: 'xcircle', log: 'dot' };
@@ -81,9 +81,18 @@ export async function mount(container, ctx) {
     h('div', { class: 'traces-filters' }, h('div', { class: 'full' }, fUser), fStatus,
       h('div', { class: 'row' }, h('label', { class: 'check', for: 'filter-errors' }, fErrors, 'errors'), h('label', { class: 'check', for: 'filter-live' }, fLive, 'live'), refreshBtn)),
     list);
-  const usagePanel = h('details', { class: 'goal-usage hidden', id: 'trace-usage', open: true });
-  const detailPanel = h('div', { class: 'card traces-detail' }, head, stats, usagePanel,
-    h('div', { class: 'trace-body' }, h('div', { class: 'tree-pane' }, h('div', { class: 'tree-toolbar' }, tSearch, expandBtn, collapseBtn), tree), sp2, detail));
+  // The usage aside (tokens and cost of every LLM call in this trace): opened with the Usage button, remembered per browser.
+  let usageOpen = false;
+  try { usageOpen = localStorage.getItem('pai.traces.usage') === '1'; } catch { /* storage blocked: closed */ }
+  const usagePanel = h('aside', { class: 'goal-usage hidden', id: 'trace-usage', 'aria-label': 'Usage of this trace' });
+  const usageBtn = btn('Usage', { ic: 'coins', size: 'sm', title: 'Tokens and cost of the LLM calls in this trace', onclick: () => {
+    usageOpen = !usageOpen;
+    try { localStorage.setItem('pai.traces.usage', usageOpen ? '1' : '0'); } catch { /* ignore */ }
+    renderUsage();
+  } });
+  usageBtn.id = 'btn-trace-usage';
+  const detailPanel = h('div', { class: 'card traces-detail' }, head, stats,
+    h('div', { class: 'trace-body' }, h('div', { class: 'tree-pane' }, h('div', { class: 'tree-toolbar' }, tSearch, expandBtn, collapseBtn, usageBtn), tree), sp2, detail, usagePanel));
   container.append(h('div', { class: 'traces', id: 'view-traces-root' }, listPanel, sp1, detailPanel));
   const unsplit = [
     splitter(sp1, listPanel, LS_ASIDE, { min: 220, max: () => Math.max(300, window.innerWidth - 420), invert: false }),
@@ -113,7 +122,7 @@ export async function mount(container, ctx) {
     if (!traces.length) { list.append(h('div', { class: 'empty-inline' }, 'No traces yet')); return; }
     for (const t of traces) {
       const row = h('button', { class: 'trace-row', type: 'button', role: 'option', 'aria-selected': String(selectedTraceId === t.trace_id), 'data-id': t.trace_id, onclick: () => selectTrace(t.trace_id) },
-        h('div', { class: 'top' }, statusChip(t.status), h('span', { class: 'time' }, fmtEpoch(t.started_at))),
+        h('div', { class: 'top' }, h('span', {}, statusChip(t.status), t.mode === 'voice' ? h('span', { class: 'chip running', title: 'Started by voice', style: 'margin-left:6px' }, 'voice') : null), h('span', { class: 'time' }, fmtEpoch(t.started_at))),
         h('div', { class: 'goal' }, (t.goal || t.user_id || '(anonymous)').slice(0, 80)),
         h('div', { class: 'meta' }, h('span', {}, `${t.event_count} events`), t.error_count ? h('span', { class: 'e' }, `${t.error_count} err`) : null,
           t.has_llm ? h('span', { class: 'l', title: 'LLM calls' }, icon('chat')) : null,
@@ -177,27 +186,42 @@ export async function mount(container, ctx) {
   // Tokens and cost of every LLM call in this goal (planner, chat, agents and calls made while running tools).
   function renderUsage() {
     const calls = llmCallsFromEvents(events);
-    const wasOpen = usagePanel.open;
+    const speech = speechStepsFromEvents(events);
+    const has = calls.length > 0 || speech.length > 0;
     clear(usagePanel);
-    if (!calls.length) { usagePanel.classList.add('hidden'); return; }
+    usageBtn.disabled = !has;
+    usageBtn.setAttribute('aria-pressed', String(usageOpen && has));
+    usageBtn.classList.toggle('active', usageOpen && has);
+    if (!has || !usageOpen) { usagePanel.classList.add('hidden'); return; }
     usagePanel.classList.remove('hidden');
     const t = totalsOf(calls);
+    const speechCost = speech.reduce((a, x) => a + (x.cost_usd ?? 0), 0);
+    const speechUnpriced = speech.filter((x) => x.cost_usd == null).length;
     const labels = calls.map(callLabel);
     const titles = calls.map((c, i) => `${labels[i]}\n${c.model}${c.span ? ` · in ${c.span}` : ''}`);
     const costs = calls.map((c) => c.cost_usd ?? 0);
     const sw = (cls, text) => h('span', {}, h('span', { class: `sw ${cls}` }), text);
     put(usagePanel,
-      h('summary', {}, `Tokens & cost by LLM call — ${t.calls} call${t.calls === 1 ? '' : 's'} · ${fmtTokens(t.total)} tokens · ${fmtCost(t.cost)}${t.unpriced ? ` (+${t.unpriced} unpriced)` : ''}`),
-      h('div', { class: 'grid two goal-charts' },
-        h('div', {}, h('div', { class: 'faint' }, 'Tokens per call'),
-          barChart({ labels, titles, width: 560, height: 170, fmt: fmtTokens, ariaLabel: 'Tokens per LLM call in this goal',
-            series: [{ name: 'Prompt', values: calls.map((c) => c.prompt_tokens), cls: 'ch-s0' }, { name: 'Completion', values: calls.map((c) => c.completion_tokens), cls: 'ch-s1' }] }),
-          h('div', { class: 'ch-legend' }, sw('ch-s0', 'Prompt'), sw('ch-s1', 'Completion'))),
-        h('div', {}, h('div', { class: 'faint' }, 'Cost per call and running total'),
-          lineChart({ labels, titles, width: 560, height: 170, fmt: fmtCost, ariaLabel: 'Cost per LLM call and running total for this goal',
-            series: [{ name: 'Cost of this call', values: costs, cls: 'ch-s3' }, { name: 'Running total', values: cumulative(costs), cls: 'ch-s2' }] }),
-          h('div', { class: 'ch-legend' }, sw('ch-s3', 'Cost of this call'), sw('ch-s2', 'Running total')))));
-    usagePanel.open = wasOpen;
+      h('div', { class: 'usage-head' }, h('h3', { class: 'card-title' }, 'Usage'),
+        btn('', { ic: 'close', size: 'sm', title: 'Hide usage', onclick: () => { usageOpen = false; try { localStorage.setItem('pai.traces.usage', '0'); } catch { /* ignore */ } renderUsage(); } })),
+      h('div', { class: 'usage-totals' },
+        h('div', {}, h('b', {}, String(t.calls)), ' call', t.calls === 1 ? '' : 's'), h('div', {}, h('b', {}, fmtTokens(t.total)), ' tokens'),
+        h('div', {}, h('b', {}, fmtCost(t.cost + speechCost)), t.unpriced + speechUnpriced ? ` (+${t.unpriced + speechUnpriced} unpriced)` : '')),
+      speech.length ? h('div', {}, h('div', { class: 'faint' }, 'Speech (billed per second of audio / per character)'),
+        h('table', { class: 'data usage-calls' }, h('thead', {}, h('tr', {}, ['Step', 'Model', 'Units', 'Cost'].map((x, i) => h('th', { class: i > 1 ? 'num' : '' }, x)))),
+          h('tbody', {}, speech.map((x) => h('tr', { title: x.error || '' }, h('td', {}, x.kind, x.error ? ' ⚠' : ''), h('td', { class: 'mono' }, x.model || '—'),
+            h('td', { class: 'num' }, x.units == null ? '—' : `${Number(x.units.toFixed(2))} ${x.unit === 'seconds' ? 's' : 'ch'}`), h('td', { class: 'num' }, x.cost_usd == null ? '—' : fmtCost(x.cost_usd))))))) : null,
+      ...(!calls.length ? [] : [h('div', {}, h('div', { class: 'faint' }, 'Tokens per call'),
+        barChart({ labels, titles, width: 360, height: 150, fmt: fmtTokens, ariaLabel: 'Tokens per LLM call in this trace',
+          series: [{ name: 'Prompt', values: calls.map((c) => c.prompt_tokens), cls: 'ch-s0' }, { name: 'Completion', values: calls.map((c) => c.completion_tokens), cls: 'ch-s1' }] }),
+        h('div', { class: 'ch-legend' }, sw('ch-s0', 'Prompt'), sw('ch-s1', 'Completion'))),
+      h('div', {}, h('div', { class: 'faint' }, 'Cost per call and running total'),
+        lineChart({ labels, titles, width: 360, height: 150, fmt: fmtCost, ariaLabel: 'Cost per LLM call and running total for this trace',
+          series: [{ name: 'Cost of this call', values: costs, cls: 'ch-s3' }, { name: 'Running total', values: cumulative(costs), cls: 'ch-s2' }] }),
+        h('div', { class: 'ch-legend' }, sw('ch-s3', 'Cost of this call'), sw('ch-s2', 'Running total'))),
+      h('table', { class: 'data usage-calls' }, h('thead', {}, h('tr', {}, ['Call', 'In', 'Out', 'Cost'].map((x, i) => h('th', { class: i ? 'num' : '' }, x)))),
+        h('tbody', {}, calls.map((c, i) => h('tr', { title: titles[i] }, h('td', {}, labels[i]), h('td', { class: 'num' }, fmtTokens(c.prompt_tokens)),
+          h('td', { class: 'num' }, fmtTokens(c.completion_tokens)), h('td', { class: 'num' }, c.cost_usd == null ? '—' : fmtCost(c.cost_usd))))))]));
   }
 
   function renderTree() {

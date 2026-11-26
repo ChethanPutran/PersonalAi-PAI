@@ -104,6 +104,8 @@ class ConfirmationInfo(BaseModel):
     allowed_scopes: List[ConsentScope] = Field(default_factory=lambda: [ConsentScope.ONCE])
     can_bind_params: bool = False
     default_binding: ParamBinding = DEFAULT_BINDING
+    # Parameters any remembered approval must be tied to (shell: the command). Clients must not offer 'any'.
+    required_binding_keys: List[str] = Field(default_factory=list)
     reason: Optional[str] = None
 
 

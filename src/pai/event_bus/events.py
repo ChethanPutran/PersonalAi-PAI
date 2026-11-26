@@ -52,6 +52,7 @@ class EventType(StrEnum):
     DEVICE_UNREGISTERED = "device.unregistered"
     DEVICE_METADATA_REFRESHED = "device.metadata_refreshed"
     DEVICE_OWNERSHIP_ASSIGNED = "device.ownership_assigned"
+    DEVICE_REMOTE_ACCESS_CHANGED = "device.remote_access_changed"
 
     # Execution
     EXECUTION_STARTED = "execution.started"
@@ -84,6 +85,7 @@ class EventType(StrEnum):
     PLUGIN_MANAGER_INITIALIZED = "plugin.plugin_manager_initialized"
     PLUGIN_CONFIG_UPDATED = "plugin.config_updated"
     PLUGIN_ERROR_RECORDED = "plugin.error_recorded"
+    PLUGIN_OPERATION = "plugin.operation"
     PLUGIN_RECONCILED = "plugin.reconciled"
 
     # Chat

@@ -51,6 +51,7 @@
     },
     {
       "id": "files.read",
+      "permissions": ["filesystem"],
       "requireConfirmation": true,
       "description": "Read a file's contents as text. Max 1 MB (10 MB hard cap).",
       "parameters": {
@@ -89,6 +90,7 @@
     },
     {
       "id": "files.stat",
+      "permissions": ["filesystem"],
       "description": "Get file metadata (size, modified time, is_dir, is_file).",
       "parameters": {
         "type": "object",
@@ -98,6 +100,7 @@
     },
     {
       "id": "files.delete",
+      "permissions": ["filesystem"],
       "description": "Delete a file or directory. Use recursive=true for non-empty dirs.",
       "requireConfirmation": true,
       "confirmationReason": "Deleting files can be sensitive. Please confirm that you want to delete this file or directory.",
@@ -112,6 +115,7 @@
     },
     {
       "id": "files.copy",
+      "permissions": ["filesystem"],
       "taskType": "one_shot",
       "timeoutSeconds": 120,
       "description": "Copy a file or directory. Creates destination dirs.",
@@ -128,6 +132,7 @@
     },
     {
       "id": "files.move",
+      "permissions": ["filesystem"],
       "taskType": "one_shot",
       "timeoutSeconds": 120,
       "description": "Move/rename a file or directory.",

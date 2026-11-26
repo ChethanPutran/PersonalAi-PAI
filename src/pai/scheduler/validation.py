@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 from pai.common.enums.permission import Origin
 from pai.security.authorization.context import ScopeContext
 from pai.security.authorization.decision import DecisionEffect
+from pai.security.consent.binding import BOUND_PARAMETERS
 
 REMINDER_CAPABILITY = "system.notifications.show"     # the classic reminder: always schedulable
 DEVICE_EXECUTOR = "device_executor"
@@ -228,6 +229,10 @@ class ScheduleValidator:
         executor_id: str, parameters: Dict[str, Any],
     ) -> Preflight:
         """Dry-run the REAL authorization pipeline as a scheduled run. No audit, no token."""
+        if capability in BOUND_PARAMETERS:
+            # Approved per command, once or for a session: nobody is there to approve a scheduled run.
+            return Preflight(effect="deny", risk="high",
+                             reason="it needs your approval every time it runs")
         manifest_risk = self._manifest_risk(plugin_id, capability)
         if executor_id != DEVICE_EXECUTOR:
             # Server plugins and built-ins skip device authorization in TaskManager.run too.

@@ -1,8 +1,3 @@
-"""PAI device agent package."""
-from __future__ import annotations
+"""PAI backend API server (FastAPI app factory, lifespan, shutdown).
 
-from .agent.agent import DeviceAgent
-from .config import DeviceConfig
-from ._entry import main
-
-__all__ = ["main", "DeviceAgent", "DeviceConfig"]
+The device agent lives in the separate ``pai_device`` package (``device/``)."""

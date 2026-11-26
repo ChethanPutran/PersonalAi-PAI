@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
@@ -33,10 +34,20 @@ logger = logging.getLogger(__name__)
 # How long a background scheduled run may take (beyond the task's own timeout) before it is
 # abandoned — e.g. a task that fell back to waiting for a human confirmation nobody gives.
 _RUN_GRACE_SECONDS = 120.0
+# catch_up="all": most missed runs replayed per tick (the rest stay due and go on the next tick), and
+# most occurrences enumerated while counting the stale ones (bounds the work after a long outage).
+MAX_REPLAY_PER_TICK = 50
+_MAX_SCAN = 10_000
+
+
+def _utc(dt: datetime) -> datetime:
+    """SQLite hands back naive datetimes; we always wrote UTC."""
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
 _AUDIT_FOR_STATUS = {
     "ok": AuditEventType.SCHEDULE_RUN,
     "skipped_no_consent": AuditEventType.SCHEDULE_SKIPPED,
     "device_offline": AuditEventType.SCHEDULE_SKIPPED,
+    "missed": AuditEventType.SCHEDULE_SKIPPED,
     "denied": AuditEventType.SCHEDULE_DENIED,
     "failed": AuditEventType.SCHEDULE_FAILED,
 }
@@ -155,20 +166,101 @@ class SchedulerService:
         repo: ScheduleRepository,
         now: datetime,
     ) -> None:
+        """Apply the misfire policy, then dispatch.
+
+        ``next_fire_at`` is persisted, so after downtime every missed schedule is simply "due" on
+        the first tick. How late it may still run is decided here:
+
+        * ``misfire_grace_seconds`` (None = no limit): a run later than this is MISSED, not run.
+        * ``catch_up="once"`` / ``"none"``: one run now (if within grace), then back on cadence.
+        * ``catch_up="all"``: every occurrence that fell within the grace window is replayed
+          oldest-first (at most ``MAX_REPLAY_PER_TICK`` per tick); older ones are recorded as missed.
+        """
+        grace = sched.misfire_grace_seconds
+        late = (now - _utc(sched.next_fire_at)).total_seconds() if sched.next_fire_at else 0.0
+
+        if sched.catch_up == "all" and sched.kind != "one_shot":
+            if late > 0:
+                await self._replay_missed(sched, repo, now)
+                return
+        elif grace is not None and late > grace:
+            await self._skip_missed(sched, repo, now, f"{int(late)}s late (grace {grace}s)")
+            return
+        await self._dispatch(sched, repo, now)
+
+    async def _dispatch(self, sched, repo, now, due_at: Optional[datetime] = None) -> None:
         if sched.capability == REMINDER_CAPABILITY:
-            await self._fire_reminder(sched, repo, now)      # the classic reminder, as before
+            await self._fire_reminder(sched, repo, now, due_at)    # the classic reminder, as before
         else:
-            await self._fire_action(sched, repo, now)        # a plugin/server/builtin action
+            await self._fire_action(sched, repo, now, due_at)      # a plugin/server/builtin action
+
+    async def _skip_missed(self, sched, repo, now, detail: str) -> None:
+        """Too late to run: say so (status, audit) and move on to the next occurrence after now."""
+        logger.warning("Schedule %s missed its fire time: %s", sched.id, detail)
+        await self._record(sched, repo, now, "missed", error=f"missed: {detail}"[:500])
+        await self._advance(sched, repo, now)
+
+    def _plan_replay(
+        self, sched: ScheduleModel, now: datetime,
+    ) -> tuple[int, bool, list[datetime]]:
+        """Split the occurrences in [next_fire_at, now] into (stale_count, stale_truncated, fresh)."""
+        first = _utc(sched.next_fire_at)
+        grace = sched.misfire_grace_seconds
+        cutoff = now - timedelta(seconds=grace) if grace is not None else None
+        stale, truncated, fresh = 0, False, []
+        cur: Optional[datetime] = first
+        step = timedelta(seconds=sched.interval_seconds or 3600) if sched.kind == "interval" else None
+
+        def advance(t: datetime) -> Optional[datetime]:
+            return t + step if step else self._next_fire_at(sched, t)
+
+        scanned = 0
+        while cur is not None and cur <= now:
+            if cutoff is not None and cur < cutoff:
+                if scanned >= _MAX_SCAN:          # a very long outage: jump straight to the window
+                    truncated = True
+                    if step:
+                        cur += step * math.ceil((cutoff - cur) / step)      # first run >= cutoff
+                    else:
+                        cur = self._next_fire_at(sched, cutoff - timedelta(microseconds=1))
+                    scanned = 0
+                    continue
+                stale += 1
+                scanned += 1
+            else:
+                fresh.append(cur)
+                if len(fresh) >= MAX_REPLAY_PER_TICK:
+                    break
+            cur = advance(cur)
+        return stale, truncated, fresh
+
+    async def _replay_missed(self, sched, repo, now) -> None:
+        stale, truncated, fresh = self._plan_replay(sched, now)
+        if stale:
+            n = f"{stale}+" if truncated else str(stale)
+            logger.warning("Schedule %s: %s missed run(s) are older than the grace window", sched.id, n)
+            await self._record(sched, repo, now, "missed",
+                               error=f"missed: {n} run(s) older than the {sched.misfire_grace_seconds}s grace window")
+        if not fresh:
+            await self._advance(sched, repo, now)       # nothing worth running: jump past now
+            return
+        logger.info("Schedule %s: replaying %d missed run(s)", sched.id, len(fresh))
+        for occ in fresh:
+            marker = sched.next_fire_at = occ           # "first run not yet handled"
+            await self._dispatch(sched, repo, now, due_at=occ)
+            if sched.next_fire_at is marker:            # not advanced (e.g. device offline): retry next tick
+                break
 
     async def _fire_reminder(
         self,
         sched: ScheduleModel,
         repo: ScheduleRepository,
         now: datetime,
+        due_at: Optional[datetime] = None,
     ) -> None:
         target_device = await self._resolve_device(sched)
         if target_device is None:
-            await self._handle_undeliverable(sched, repo, now, reason="no_device")
+            await self._handle_undeliverable(sched, repo, now, reason="no_device", due_at=due_at)
             return
 
         is_notification = sched.capability == "system.notifications.show"
@@ -192,7 +284,7 @@ class SchedulerService:
             delivery = "ws"
         else:
             await self._handle_undeliverable(
-                sched, repo, now, reason="device_offline_no_push",
+                sched, repo, now, reason="device_offline_no_push", due_at=due_at,
             )
             return
 
@@ -234,14 +326,14 @@ class SchedulerService:
                 },
                 # One key per firing: a device that already showed this reminder
                 # can de-duplicate a retry / recovery re-send.
-                idempotency_key=f"schedule:{sched.id}:{now.isoformat()}",
+                idempotency_key=f"schedule:{sched.id}:{(due_at or now).isoformat()}",
             )
         except Exception:
             logger.exception(
                 "Schedule %s: task creation failed", sched.id,
             )
             await self._record(sched, repo, now, "failed", error="could not create the reminder task")
-            await self._advance(sched, repo, now)
+            await self._advance(sched, repo, now, due_at)
             return
 
         # 3. Queue + run it. wait=False so the scheduler loop doesn't block
@@ -255,7 +347,7 @@ class SchedulerService:
                 logger.warning("Schedule %s: submit failed: %s", sched.id, exc)
 
         await self._record(sched, repo, now, "ok", task_id=task.id)
-        await self._advance(sched, repo, now)
+        await self._advance(sched, repo, now, due_at)
 
     # ------------------------------------------------------------------
     # Scheduled ACTIONS (plugin / server / built-in capabilities)
@@ -263,6 +355,7 @@ class SchedulerService:
 
     async def _fire_action(
         self, sched: ScheduleModel, repo: ScheduleRepository, now: datetime,
+        due_at: Optional[datetime] = None,
     ) -> None:
         """Run a scheduled action — unattended, so every safety check is re-done NOW:
 
@@ -276,22 +369,22 @@ class SchedulerService:
         """
         if self.validator is None:
             await self._record(sched, repo, now, "failed", error="scheduler is not set up for actions")
-            await self._advance(sched, repo, now)
+            await self._advance(sched, repo, now, due_at)
             return
         try:
             ft = await self.validator.resolve_for_fire(sched)
         except ScheduleValidationError as exc:
             await self._record(sched, repo, now, "failed", error=str(exc)[:500])
-            await self._advance(sched, repo, now)
+            await self._advance(sched, repo, now, due_at)
             return
         except Exception as exc:
             logger.exception("Schedule %s: could not resolve target", sched.id)
             await self._record(sched, repo, now, "failed", error=f"{type(exc).__name__}: {exc}"[:500])
-            await self._advance(sched, repo, now)
+            await self._advance(sched, repo, now, due_at)
             return
 
         if ft.requires_device and not await self._device_connected(ft.device_id):
-            await self._handle_undeliverable(sched, repo, now, reason="device_offline")
+            await self._handle_undeliverable(sched, repo, now, reason="device_offline", due_at=due_at)
             return
 
         pre = ft.preflight
@@ -300,7 +393,7 @@ class SchedulerService:
         sched.requires_consent, sched.risk, sched.executor = pre.requires_consent, pre.risk, ft.executor_id
         if pre.blocked:
             await self._record(sched, repo, now, "denied", error=pre.blocked_reason)
-            await self._advance(sched, repo, now)
+            await self._advance(sched, repo, now, due_at)
             return
 
         approved = False
@@ -316,7 +409,7 @@ class SchedulerService:
                         sched, "Scheduled action needs your approval",
                         f"Scheduled action '{sched.title}' needs your approval. "
                         "Open Reminders to approve it.")
-                await self._advance(sched, repo, now)
+                await self._advance(sched, repo, now, due_at)
                 return
             approved = True
 
@@ -324,14 +417,14 @@ class SchedulerService:
             schedule_id=sched.id, user_id=sched.user_id, title=sched.title, kind=sched.kind,
             capability=sched.capability, parameters=dict(sched.parameters or {}),
             device_id=ft.device_id, plugin_id=ft.plugin_id, executor_id=ft.executor_id,
-            approved=approved, request_id=f"schedule:{sched.id}:{now.isoformat()}")
+            approved=approved, request_id=f"schedule:{sched.id}:{(due_at or now).isoformat()}")
         logger.info("Firing scheduled action %s (%s) on %s via %s approved=%s",
                     sched.id, sched.capability, ft.device_id, ft.executor_id, approved)
         # Background: a slow device must not stall every other due schedule.
         t = asyncio.create_task(self._execute_job(job), name=f"schedule-run:{sched.id}")
         self._bg.add(t)
         t.add_done_callback(self._bg.discard)
-        await self._advance(sched, repo, now)
+        await self._advance(sched, repo, now, due_at)
 
     async def _execute_job(self, job: FireJob) -> None:
         status: LastRunStatus = "ok"
@@ -531,7 +624,7 @@ class SchedulerService:
             },
         )
 
-    async def _handle_undeliverable(self, sched, repo, now, reason: str):
+    async def _handle_undeliverable(self, sched, repo, now, reason: str, due_at: Optional[datetime] = None):
         if self._last_undeliverable.get(sched.id) != reason:
             logger.warning(
                 "Schedule %s undeliverable (%s) — catch_up=%s",
@@ -544,11 +637,15 @@ class SchedulerService:
                 "Schedule %s still undeliverable (%s)", sched.id, reason,
             )
         if sched.catch_up == "none":
-            await self._advance(sched, repo, now)
+            await self._advance(sched, repo, now, due_at)
 
-    async def _advance(self, sched, repo, now):
-        next_at = self._next_fire_at(sched, now)
+    async def _advance(self, sched, repo, now, due_at: Optional[datetime] = None):
+        """Move to the next occurrence after ``due_at`` (a replayed run) or after ``now``."""
+        next_at = self._next_fire_at(sched, due_at or now)
         await repo.mark_fired(sched.id, fired_at=now, next_fire_at=next_at)
+        sched.last_fired_at, sched.next_fire_at = now, next_at      # keep the loaded row in step
+        if next_at is None:
+            sched.enabled = False
 
 
     async def _resolve_device(self, sched) -> Optional[str]:

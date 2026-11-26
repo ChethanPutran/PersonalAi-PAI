@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional
 from pai.common.task_controls import TaskControls
 from pai.storage.repositories.task import upgrade_legacy_payload
 from pai.tasks.models import Task, TaskControlView
+from pai.tasks.user_errors import error_fields
 
 
 def _iso(dt: Any) -> Optional[str]:
@@ -69,6 +70,14 @@ def serialize_task(task: Any) -> Dict[str, Any]:
         v = d.get(k)
         return str(getattr(v, "value", v)) if v is not None else None
 
+    raw_error = d.get("error") or d.get("last_error")
+    if status == "cancelled" and not raw_error:
+        raw_error = "cancelled"                          # stopped on purpose: say so, not "no reason"
+    # Plain-language version of the error. A FAILED task always gets one, even if the executor
+    # reported nothing, so a client never has to show a bare "Failed".
+    error_info = (error_fields(raw_error, d.get("capability") or d.get("task_type"))
+                  if (raw_error or status == "failed") else None)
+
     return {
         **_control_fields(task, d),
         "id": d.get("id") or d.get("task_id") or "",
@@ -90,6 +99,7 @@ def serialize_task(task: Any) -> Dict[str, Any]:
         "started_at": _ts("started_at"),
         "completed_at": _ts("completed_at"),
         "error": d.get("error") or d.get("last_error"),
+        "error_info": error_info,        # {code, kind, message, hint, raw} or null
         "progress": d.get("progress"),
         "input": d.get("input"),
         "parameters": d.get("parameters"),

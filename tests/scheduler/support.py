@@ -17,17 +17,19 @@ DEV = "dev-1"
 OTHER_DEV = "dev-9"
 
 
-def cap(id_: str, perms=(), *, confirm: bool = False, risk: str = "low") -> CapabilitySpec:
+def cap(id_: str, perms=(), *, confirm: bool = False, risk: str = "low", params=None) -> CapabilitySpec:
+    extra = {"parameters": params} if params else {}
     return CapabilitySpec(id=id_, description=f"{id_} action", permissions=list(perms),
-                          requireConfirmation=confirm, risk=risk)
+                          requireConfirmation=confirm, risk=risk, **extra)
 
 
 CAPS: Dict[str, CapabilitySpec] = {
     "camera.snap": cap("camera.snap", ["camera"], risk="medium"),   # control action -> needs consent
     "lights.on": cap("lights.on"),                                   # no permissions, low -> free
     "confirm.me": cap("confirm.me", confirm=True),                   # manifest asks for confirmation
-    "shell.exec": cap("shell.exec", ["shell"], risk="critical"),     # blocked by system restrictions
-    "files.read": cap("files.read", ["filesystem"]),                 # no filesystem roots -> denied
+    "danger.exec": cap("danger.exec", ["system"], risk="critical"),     # blocked by system restrictions
+    "files.read": cap("files.read", ["filesystem"],                  # no filesystem roots -> denied
+                      params={"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}),
 }
 SCHEMAS = {
     "lights.on": {"type": "object", "properties": {"level": {"type": "integer"},

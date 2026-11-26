@@ -4,16 +4,18 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
-from pai.api.dependencies import get_current_admin, get_current_user
+from pai.api.dependencies import get_current_admin, get_current_user, get_source_device_id
 from pai.app_context import PAIAppContext, get_app_context
 from pai.plugins.manifest import PluginManifest
 from pai.plugins.manifest_info import PluginInfo
 from pai.plugins.store import LocalArtifactStore
 from pai.plugins.updates import build_update_info, version_summary
+from pai.security.audit.models import AuditEventType
+from pai.security.remote_access import DEVICE_NOT_FOUND, remote_access_denial
 from pai.version import MANIFEST_SCHEMA_MAX, MANIFEST_SCHEMA_MIN, MIN_SUPPORTED_APP_VERSION, RUNTIME_VERSION
 
 
@@ -36,6 +38,35 @@ class PluginConfigRequest(BaseModel):
 
 class PluginDeviceRequest(BaseModel):
     device_id: Optional[str] = None
+
+
+# ============================================================
+# Authorization helpers
+# ============================================================
+
+async def _owned_device(context: PAIAppContext, user_id: str, device_id: str):
+    """The device, if it is the caller's. Someone else's device is "not found" (never confirm it exists)."""
+    device = await context.orchestrator.device_manager.get(device_id)
+    if device is None or getattr(device, "user_id", None) != user_id:
+        raise HTTPException(404, f"Device '{device_id}' not found")
+    return device
+
+
+async def _authorize_remote(
+    context: PAIAppContext, *, user_id: str, device_id: str,
+    source_device_id: Optional[str], plugin_id: Optional[str] = None, action: str = "install",
+) -> None:
+    """Owner-only, and acting on another device needs ITS "allow remote plugin install" switch."""
+    denial = await remote_access_denial(
+        context.orchestrator.device_manager, user_id=user_id, target_device_id=device_id,
+        source_device_id=source_device_id, kind="install")
+    if denial is None:
+        return
+    context.orchestrator.security_manager.audit_logger.record(
+        AuditEventType.REMOTE_INSTALL_DENIED, user_id=user_id, plugin_id=plugin_id,
+        capability=f"plugin.{action}", device_id=device_id, allowed=False, reason=denial.message)
+    raise HTTPException(404 if denial.code == DEVICE_NOT_FOUND else 403,
+                        detail={"code": denial.code, "message": denial.message})
 
 
 # ============================================================
@@ -126,6 +157,39 @@ async def plugin_updates(
             "plugins": items,
         }
     return {"runtime_version": RUNTIME_VERSION, "devices": out}
+
+
+# ============================================================
+# Operations: live status of remote installs (replaces polling)
+# ============================================================
+
+@router.get("/operations")
+async def list_operations(
+    device_id: Optional[str] = None,
+    plugin_id: Optional[str] = None,
+    active: bool = Query(False, description="only operations still running"),
+    limit: int = Query(50, ge=1, le=200),
+    context: PAIAppContext = Depends(get_app_context),
+    user_id: str = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """The caller's install/uninstall operations, newest first. The same objects are pushed live
+    as ``{"type": "plugin.operation", "operation": {...}}`` on the device WebSocket; this is for
+    first load and reconnects."""
+    ops = context.orchestrator.plugin_manager.operations
+    return {"operations": await ops.list(
+        user_id=user_id, device_id=device_id, plugin_id=plugin_id, active_only=active, limit=limit)}
+
+
+@router.get("/operations/{operation_id}")
+async def get_operation(
+    operation_id: str,
+    context: PAIAppContext = Depends(get_app_context),
+    user_id: str = Depends(get_current_user),
+) -> Dict[str, Any]:
+    op = await context.orchestrator.plugin_manager.operations.get(operation_id, user_id=user_id)
+    if op is None:
+        raise HTTPException(404, "Operation not found")
+    return op
 
 
 @router.get("/{plugin_id}/versions")
@@ -271,9 +335,18 @@ async def install_plugin(
     plugin_id: str,
     payload: PluginInstallRequest,
     context: PAIAppContext = Depends(get_app_context),
+    user_id: str = Depends(get_current_user),
+    source_device_id: Optional[str] = Depends(get_source_device_id),
 ) -> Dict[str, Any]:
+    """Ask a device to install a plugin. Returns at once with an ``operation``: follow it live
+    (``plugin.operation`` frames on the device WebSocket) or via ``GET /plugins/operations/{id}``."""
     plugin_manager = context.orchestrator.plugin_manager
     device_manager = context.orchestrator.device_manager
+
+    # ---- 0. Authorization: the user's own device, and (unless it is asking itself) the device
+    # owner's "allow remote plugin install" switch on THAT device.
+    await _authorize_remote(context, user_id=user_id, device_id=payload.device_id,
+                            source_device_id=source_device_id, plugin_id=plugin_id)
 
     # ---- 1. Resolve the target device FIRST (we need its platform) ----
     device = await device_manager.get(payload.device_id)
@@ -357,9 +430,15 @@ async def install_plugin(
             if cid:
                 capabilities.append(cid)
 
+    operation = await plugin_manager.operations.create(
+        user_id=user_id, device_id=payload.device_id, plugin_id=plugin_id, version=version,
+        kind="install", requested_by_device=source_device_id)
+
     command = {
         "type": "plugin.install",
         "request_id": f"install:{plugin_id}:{payload.device_id}",
+        "operation_id": operation["id"],
+        "requested_by_device": source_device_id,     # the device enforces its own remote-install switch
         # Top-level mirrors for the Dart command router.
         "plugin_id": plugin_id,
         "version": version,
@@ -379,20 +458,28 @@ async def install_plugin(
     try:
         await device_manager.send(payload.device_id, command)
     except RuntimeError as exc:
+        await plugin_manager.operations.fail(
+            operation["id"], code="device_offline",
+            message="The device went offline before the request reached it.",
+            hint="Open the PAI app on that device and try again.", detail=str(exc))
         raise HTTPException(409, str(exc)) from exc
 
-    await plugin_manager.record_device_error(
-        device_id=payload.device_id,
-        plugin_id=plugin_id,
-        error="install_requested",
-    )
+    await plugin_manager.operations.mark_delivered(operation["id"])
+    context.orchestrator.security_manager.audit_logger.record(
+        AuditEventType.REMOTE_INSTALL_REQUESTED, user_id=user_id, plugin_id=plugin_id,
+        capability="plugin.install", device_id=payload.device_id, allowed=True,
+        reason="remote plugin install requested",
+        metadata={"version": version, "source_device_id": source_device_id,
+                  "operation_id": operation["id"]})
 
     return {
         "success": True,
         "plugin_id": plugin_id,
         "device_id": payload.device_id,
         "version": version,
-        "status": "install_requested",
+        "status": "install_requested",        # kept for older clients; follow `operation` instead
+        "operation_id": operation["id"],
+        "operation": operation,
     }
 
 
@@ -405,9 +492,14 @@ async def uninstall_plugin(
     plugin_id: str,
     payload: PluginUninstallRequest,
     context: PAIAppContext = Depends(get_app_context),
+    user_id: str = Depends(get_current_user),
+    source_device_id: Optional[str] = Depends(get_source_device_id),
 ) -> Dict[str, Any]:
     pm = context.orchestrator.plugin_manager
     dm = context.orchestrator.device_manager
+
+    await _authorize_remote(context, user_id=user_id, device_id=payload.device_id,
+                            source_device_id=source_device_id, plugin_id=plugin_id, action="uninstall")
 
     try:
         plugin = pm.require_plugin(plugin_id)
@@ -425,11 +517,21 @@ async def uninstall_plugin(
         device_id=payload.device_id, plugin_id=plugin_id, enabled=False,
     )
 
+    operation = await pm.operations.create(
+        user_id=user_id, device_id=payload.device_id, plugin_id=plugin_id, version=plugin.version,
+        kind="uninstall", requested_by_device=source_device_id)
     command = await pm.build_uninstall_request(plugin_id, payload.device_id)
+    command["operation_id"] = operation["id"]
+    command["requested_by_device"] = source_device_id
     try:
         await dm.send(payload.device_id, command)
     except RuntimeError as exc:
+        await pm.operations.fail(
+            operation["id"], code="device_offline",
+            message="The device went offline before the request reached it.",
+            hint="Open the PAI app on that device and try again.", detail=str(exc))
         raise HTTPException(409, str(exc)) from exc
+    await pm.operations.mark_delivered(operation["id"])
 
     return {
         "success": True,
@@ -437,6 +539,8 @@ async def uninstall_plugin(
         "device_id": payload.device_id,
         "version": plugin.version,
         "status": "uninstall_requested",
+        "operation_id": operation["id"],
+        "operation": operation,
     }
 
 
@@ -447,6 +551,7 @@ async def uninstall_plugin(
 class PluginInstallReport(BaseModel):
     device_id: str
     version: str
+    operation_id: Optional[str] = None
     success: bool
     artifact_sha256: Optional[str] = None
     error: Optional[str] = None
@@ -454,6 +559,7 @@ class PluginInstallReport(BaseModel):
 
 class PluginUninstallReport(BaseModel):
     device_id: str
+    operation_id: Optional[str] = None
     success: bool
     error: Optional[str] = None
 
@@ -463,8 +569,10 @@ async def report_install(
     plugin_id: str,
     payload: PluginInstallReport,
     context: PAIAppContext = Depends(get_app_context),
+    user_id: str = Depends(get_current_user),
 ) -> Dict[str, Any]:
     pm = context.orchestrator.plugin_manager
+    await _owned_device(context, user_id, payload.device_id)      # only the owner's device reports
 
     if payload.success:
         await pm.mark_installed_on_device(
@@ -480,6 +588,13 @@ async def report_install(
             error=payload.error or "install_failed",
         )
 
+    op_id = payload.operation_id or await pm.operations.active_for(payload.device_id, plugin_id)
+    if op_id:
+        await pm.operations.progress(
+            op_id, device_id=payload.device_id,
+            status="succeeded" if payload.success else "failed",
+            error=payload.error or "install_failed", version=payload.version)
+
     return {"ok": True, "plugin_id": plugin_id, "device_id": payload.device_id}
 
 
@@ -488,10 +603,18 @@ async def report_uninstall(
     plugin_id: str,
     payload: PluginUninstallReport,
     context: PAIAppContext = Depends(get_app_context),
+    user_id: str = Depends(get_current_user),
 ) -> Dict[str, Any]:
     pm = context.orchestrator.plugin_manager
+    await _owned_device(context, user_id, payload.device_id)
     if payload.success:
         await pm.mark_uninstalled_on_device(payload.device_id, plugin_id)
+    op_id = payload.operation_id or await pm.operations.active_for(payload.device_id, plugin_id)
+    if op_id:
+        await pm.operations.progress(
+            op_id, device_id=payload.device_id,
+            status="succeeded" if payload.success else "failed",
+            error=payload.error or "uninstall_failed")
     return {"ok": True}
 
 
@@ -531,7 +654,9 @@ async def report_device_permissions(
 async def list_installed_on_device(
     device_id: str,
     context: PAIAppContext = Depends(get_app_context),
+    user_id: str = Depends(get_current_user),
 ) -> Dict[str, Any]:
+    await _owned_device(context, user_id, device_id)
     pm = context.orchestrator.plugin_manager
     return {"device_id": device_id, "plugins": await pm.list_device_plugins(device_id)}
 
@@ -545,9 +670,13 @@ async def enable_plugin(
     plugin_id: str,
     payload: PluginDeviceRequest = PluginDeviceRequest(),
     user_id: str = Depends(get_current_user),
+    source_device_id: Optional[str] = Depends(get_source_device_id),
     context: PAIAppContext = Depends(get_app_context),
 ) -> Dict[str, Any]:
     pm = context.orchestrator.plugin_manager
+    if payload.device_id:        # changing a device's plugins: the user's own device, remote => opt-in
+        await _authorize_remote(context, user_id=user_id, device_id=payload.device_id,
+                                source_device_id=source_device_id, plugin_id=plugin_id, action="enable")
 
     try:
         await pm.enable(user_id=user_id, plugin_id=plugin_id)
@@ -574,9 +703,13 @@ async def disable_plugin(
     plugin_id: str,
     payload: PluginDeviceRequest = PluginDeviceRequest(),
     user_id: str = Depends(get_current_user),
+    source_device_id: Optional[str] = Depends(get_source_device_id),
     context: PAIAppContext = Depends(get_app_context),
 ) -> Dict[str, Any]:
     pm = context.orchestrator.plugin_manager
+    if payload.device_id:        # changing a device's plugins: the user's own device, remote => opt-in
+        await _authorize_remote(context, user_id=user_id, device_id=payload.device_id,
+                                source_device_id=source_device_id, plugin_id=plugin_id, action="disable")
 
     try:
         await pm.disable(user_id=user_id, plugin_id=plugin_id)

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from select import select
-from typing import AsyncIterator
+from typing import AsyncIterator, Optional
 
 from sqlalchemy import select
 from fastapi import Depends, Request
@@ -59,3 +59,16 @@ async def get_current_admin(
     if not await user_is_admin(session, user_id):
         raise HTTPException(status_code=403, detail="Admin access required")
     return user_id
+
+
+SOURCE_DEVICE_HEADER = "X-PAI-Device-Id"
+
+
+async def get_source_device_id(request: Request) -> Optional[str]:
+    """The device this request comes FROM (clients send it on every call), or None (web, scripts).
+
+    Only used to tell "a device acting on itself" (local) from "acting on another device"
+    (remote, needs the target's opt-in). It is never trusted for ownership: the target device is
+    always checked against the logged-in user separately.
+    """
+    return (request.headers.get(SOURCE_DEVICE_HEADER) or "").strip() or None

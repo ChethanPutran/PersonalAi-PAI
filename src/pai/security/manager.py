@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from pai.event_bus.bus import EventBus
 from pai.observability.tracer import get_tracer
 from pai.plugins.manifest import PluginManifest
+from pai.security.remote_access import remote_access_denial
 from pai.security.audit.logger import AuditLogger
 from pai.common.enums.permission import (
     ConsentScope, Origin, PermissionAction, PermissionResource, PrincipalType, RiskLevel,
@@ -36,7 +37,7 @@ from .policies.repository import PolicyRepository
 from .policies.evaluator import PolicyEvaluator
 from .policies.combining import PolicyCombiner
 from .consent.manager import ConsentManager
-from .consent.binding import DEFAULT_BINDING, preview_parameters
+from .consent.binding import DEFAULT_BINDING, default_binding_for, preview_parameters, required_keys
 from .consent import limits
 from .consent.models import (
     ConfirmationInfo, ConsentError, ConsentGrant, GrantRequest, PreflightDecision, PreflightResult,
@@ -45,6 +46,7 @@ from .policies.builtin.approval_policy import ApprovalPolicy
 from .audit.models import AuditEventType
 from .consent.repository import InMemoryConsentRepository, SqlConsentGrantRepository
 from .scopes.evaluator import ScopeEvaluator
+from .scopes.filesystem import PATH_KEYS, request_paths
 from .risk.classifier import RiskClassifier
 from .risk.registry import RiskRegistry
 from .audit.logger import AuditLogger
@@ -91,13 +93,27 @@ def build_authorization_manager(authz_config: Any = None, grant_repository: Any 
 _RISK_ORDER = [RiskLevel.LOW, RiskLevel.MEDIUM, RiskLevel.HIGH, RiskLevel.CRITICAL]
 
 
+def _manifest_filesystem_roots(plugin_manifest: Any) -> list[str]:
+    """The plugin's own declared ``metadata.allowedRoots`` (trusted: it comes from the installed manifest).
+
+    ``~`` is expanded by the scope evaluator. Without this nothing ever filled
+    ``ScopeContext.filesystem_roots`` and every ``files.*`` call was denied with
+    "No filesystem roots configured".
+    """
+    meta = getattr(plugin_manifest, "metadata", None) or {}
+    roots = meta.get("allowedRoots") if isinstance(meta, dict) else None
+    return [r for r in roots if isinstance(r, str) and r.strip()] if isinstance(roots, list) else []
+
+
 def _resource_id(res_type: PermissionResource, parameters: dict[str, Any]) -> str | None:
     """Instance id of the target, taken from the call parameters.
 
     The scope evaluators then validate it, and the issued token binds to it.
     """
-    key = {PermissionResource.FILESYSTEM: "path", PermissionResource.NETWORK: "url"}.get(res_type)
-    value = parameters.get(key) if key else None
+    if res_type == PermissionResource.FILESYSTEM:
+        paths = request_paths(parameters)
+        return paths[0] if paths else None
+    value = parameters.get("url") if res_type == PermissionResource.NETWORK else None
     return str(value) if value else None
 
 class SecurityManager(Manager):
@@ -244,6 +260,18 @@ class SecurityManager(Manager):
                     res_span.set_attribute("error", "plugin not enabled for user")
                     return _deny("Plugin is not enabled for this user.")
 
+                # 1b. Remote access: acting on a device from outside it needs the owner's opt-in
+                # on THAT device (and the device must be the caller's). Covers every path that
+                # authorizes a plugin run: chat plans, schedules, agents, the plugin tester.
+                device_manager = getattr(self, "device_manager", None)
+                if device_manager is not None:
+                    denial = await remote_access_denial(
+                        device_manager, user_id=user_id, target_device_id=device_id,
+                        source_device_id=source_device_id, kind="invoke")
+                    if denial is not None:
+                        res_span.set_attribute("error", denial.code)
+                        return _deny(denial.message)
+
                 # 2. Required permissions from the trusted manifest.
                 # Fail closed: a plugin capability without a manifest entry is denied.
                 cap_spec = plugin_manifest.get_capability(capability) if plugin_manifest else None
@@ -274,6 +302,16 @@ class SecurityManager(Manager):
                         return _deny(f"No registered permission for manifest resource '{resource}'.")
                     requirements.append(PermissionRequirement(resource, declaration.actions[0], plugin_id))
 
+                scope = scope or ScopeContext()
+                required = set(getattr(cap_spec.parameters, "required", None) or [])
+                if not required.intersection(PATH_KEYS) and not scope.filesystem_path_optional:
+                    scope = scope.model_copy(update={"filesystem_path_optional": True})
+                if not scope.filesystem_roots:
+                    # Caller-supplied roots (trusted server code) win; otherwise the manifest's own.
+                    manifest_roots = _manifest_filesystem_roots(plugin_manifest)
+                    if manifest_roots:
+                        scope = scope.model_copy(update={"filesystem_roots": manifest_roots})
+
                 for req_ in requirements:
                     res_type = PermissionResource(req_.permission)
                     chain = [Actor(PrincipalType.USER, user_id)]
@@ -290,7 +328,7 @@ class SecurityManager(Manager):
                         source_device_id=source_device_id,
                         target_device_id=device_id,
                         parameters=parameters or {},
-                        context=(scope or ScopeContext()).model_dump(),
+                        context=scope.model_dump(),
                         origin=origin,
                         session_id=session_id,
                         trace_id=trace_id,
@@ -455,7 +493,8 @@ class SecurityManager(Manager):
             parameters_summary=preview_parameters(params),
             allowed_scopes=limits.allowed_scopes(
                 risk, getattr(cap_spec, "maxGrantScope", None), self._always_approve(cap_spec)),
-            can_bind_params=bool(params), default_binding=DEFAULT_BINDING,
+            can_bind_params=bool(params), default_binding=default_binding_for(capability),
+            required_binding_keys=list(required_keys(capability)),
             reason=reason or (cap_spec.confirmationReason if cap_spec is not None else None),
         )
 

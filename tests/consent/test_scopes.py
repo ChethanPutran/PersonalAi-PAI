@@ -238,9 +238,9 @@ async def test_concurrent_confirmations_store_one_grant(kit):
 async def test_admin_pre_approval_skips_only_the_prompt(kit):
     t = await kit.run("act.low", {"a": 1}, pre_approved=True)
     assert t.status == TaskStatus.COMPLETED and t.confirmation is None
-    denied = await kit.run("shell.exec", {}, pre_approved=True)
+    denied = await kit.run("danger.exec", {}, pre_approved=True)
     assert denied is None or denied.status in (TaskStatus.FAILED, TaskStatus.CANCELLED)   # DENY still blocks
-    assert not any(i["capability"] == "shell.exec" for i in kit.invokes if "capability" in i)
+    assert not any(i["capability"] == "danger.exec" for i in kit.invokes if "capability" in i)
     assert any(e.event_type == AuditEventType.CONSENT_AUTO_APPROVED for e in kit.sec.audit_logger.repository.events)
 
 

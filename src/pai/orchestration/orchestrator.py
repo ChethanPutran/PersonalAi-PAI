@@ -46,6 +46,7 @@ from pai.orchestration.commands import (
 from pai.orchestration.idempotency import IdempotencyPolicy, IdempotencyRegistry
 from pai.orchestration.streaming import ChatDeltaEvent, ChatReplyDoneEvent, ReplySink
 from pai.planning.dag_models import DagResult, DagStatus
+from pai.tasks.user_errors import explain_error
 from pai.security.guards.stream_guard import StreamingSanitizer
 from pai.planning.dag_scheduler import DAGScheduler
 from pai.planning.planner import Planner
@@ -415,6 +416,7 @@ class TaskOrchestrator(Manager):
                 "session_id": execution_context.session_id,
                 "source_device_id": source_device_id,
                 "goal": goal[:500],
+                "mode": str((context or {}).get("mode") or ""),     # "voice" for spoken turns: shown in the admin Traces list
             },
         ) as trace_session:
 
@@ -671,10 +673,18 @@ class TaskOrchestrator(Manager):
                         status=DagStatus.FAILED,
                         failed=[self._get_id(t) for t in tool_tasks],
                     )
+                    # The chat reply is written from these results: without entries it would
+                    # have nothing to say about a plan that never ran.
+                    all_results.extend({
+                        "task_id": self._get_id(t), "status": "failed",
+                        "capability": self._to_dict(t).get("capability"),
+                        "error": str(exc) or type(exc).__name__,
+                    } for t in tool_tasks)
 
                 # Seam: the plan-level result is still the legacy dict shape
                 # (consumed by chat routes / memory), so convert here once.
                 all_results.extend(r.model_dump(mode="json") for r in dag_result.results)
+                self._explain_failures(all_results)
                 all_completed.extend(dag_result.completed)
                 all_failed.extend(dag_result.failed + dag_result.skipped)
                 tools_span.set_attribute("completed", len(all_completed))
@@ -717,6 +727,7 @@ class TaskOrchestrator(Manager):
 
         # ---------- Phase 3: publish result ----------
         status = "failed" if all_failed else "completed"
+        self._explain_failures(all_results)
         result = {
             "request_id": context.request_id,
             "plan_id": self._get_id(plan),
@@ -725,6 +736,12 @@ class TaskOrchestrator(Manager):
             "session_id": context.session_id, 
             "completed": all_completed,
             "failed": all_failed,
+            # What went wrong, in plain words, for every step that did not succeed.
+            "errors": [
+                {"task_id": r.get("task_id"), "capability": r.get("capability"),
+                 "message": r.get("user_message"), "hint": r.get("hint"), "kind": r.get("error_kind")}
+                for r in all_results if r.get("user_message")
+            ],
         }
 
         await self._publish(
@@ -737,6 +754,26 @@ class TaskOrchestrator(Manager):
         # =============================================================
     # CHAT HANDLING
     # =============================================================
+
+    @staticmethod
+    def _explain_failures(results: list) -> None:
+        """Add ``user_message`` / ``hint`` / ``error_kind`` to every result that did not succeed.
+
+        These are what the chat reply is told to report, and what clients show: a failed or
+        skipped step is never summarised as "done", and the user always learns why.
+        """
+        for r in results:
+            if not isinstance(r, dict) or r.get("user_message"):
+                continue
+            failed = r.get("success") is False or r.get("status") in ("failed", "skipped", "cancelled")
+            if not failed:
+                continue
+            if r.get("status") == "skipped":
+                r["user_message"] = "Skipped because an earlier step it depends on did not succeed."
+                r["error_kind"] = "failed"
+                continue
+            info = explain_error(r.get("error"), r.get("capability"))
+            r["user_message"], r["hint"], r["error_kind"] = info.message, info.hint, info.kind
 
     @classmethod
     def _is_chat_task(cls, task: Any) -> bool:

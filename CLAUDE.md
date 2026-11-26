@@ -16,7 +16,10 @@ uv sync
 .venv/bin/pai
 # or
 .venv/bin/uvicorn pai.server.app:create_app --factory --reload
-# (`pai-server` is the DEVICE AGENT entry point, not the API)
+# (`pai-server` / `pai-device` is the DEVICE AGENT entry point, not the API)
+
+# Device agent tests (separate package, `device/`)
+.venv/bin/python -m pytest device/tests -q
 
 # Run all tests (use the venv python)
 .venv/bin/python -m pytest tests/ -q
@@ -82,11 +85,16 @@ src/pai/
   prompts/          — PromptRegistry (versioned Jinja2), PromptVersionTracker
   scheduler/        — SchedulerService (cron, interval, one-shot)
   security/         — SecurityManager, JWT auth, PromptGuard, PluginGuard, AuditLogger
-  server/           — FastAPI app factory, lifespan, CLI, embedded agent
+  server/           — FastAPI app factory, lifespan, shutdown (backend only)
   session/          — AsyncSession management
   storage/          — SQLAlchemy ORM models, async database, repositories
   tasks/            — TaskManager, state machine, TaskStore
   utils/            — Logger helpers, error hierarchy, misc utilities
+
+device/               — SEPARATE installable package `pai-device` (import name `pai_device`): the device agent
+  src/pai_device/   — agent/, sandbox/, transport (HTTP/WS client), plugins, config, cli, _entry. Imports NOTHING from `pai`;
+                      it only speaks the backend's public API. Install it alone on a device: `pip install ./device`
+  tests/            — device tests (run with the device package alone)
 
 prompts/
   chat/reply/       — v1.0.0.j2, v1.1.0.j2 (current), _meta.yaml
@@ -274,9 +282,14 @@ were deleted; every remaining file collects. Two files still fail because they c
 - `requires_confirmation` on `TaskSpec` is **always read from the capability manifest**, never from LLM output — an adversarial LLM cannot skip confirmation gates
 - `PromptGuard` sanitizes all memory/history before it enters the planning prompt
 - Shell plugin capabilities enforce a whitelist prefix check at both plan validation time and plugin invoke time
+- `shell.exec` is HIGH risk, not hard-denied: it asks **every time** ("once"), or once per **session** for that exact command. Never "always", never "any command": `consent.binding.BOUND_PARAMETERS` makes the server refuse (`binding_too_broad`) and ignore any grant that doesn't pin `command`, and the dialog hides "Any parameters" (`required_binding_keys`). It can't be scheduled (nobody to approve; `ScheduleValidator.preflight`). Hard denies are now only `SystemRestrictionsPolicy.BLOCKED` and CRITICAL-risk actions (e.g. `system.execute`).
 - All authorization decisions are written to the audit log
 - Device-reported permissions are **advisory**: the app reports, per installed plugin, what the user allowed on that device (`POST /plugins/device/{id}/permissions`, owner only, stored in `device_plugins.permissions`). The router stops offering capabilities whose declared permission is `denied`/`pending` there and explains why (`permission_not_allowed_on_device`). The device still re-checks before every invoke; an unreported permission is unknown and blocks nothing. Only Linux reports so far (Android prompts on request, so it has no read-only query; other platforms have no `permissionStatus` yet).
 - Keyboard/mouse control (`input` plugin) can only be approved **once per action** by default. `security.authorization.input_grant_scope: session` (config.yaml) additionally offers "approve for this session" (never "always" for high-risk actions). It is enforced server-side from one derived set (`ApprovalPolicy.always_approve_for`, via `always_approve_from_config`); camera control stays once-only either way. A capability that declares the `input` permission always asks, so `input.status`/`input.stop` deliberately declare no permission (ending control must never need a prompt).
+
+- **Remote access is per device and off by default.** Acting on a device from OUTSIDE it (another of the user's devices, the web, a schedule, an agent) needs the owner's switch on THAT device: `allow_remote_install` (install/uninstall/enable/disable plugins) and `allow_remote_invoke` (run plugin capabilities). One rule, `pai.security.remote_access.remote_access_denial`, fail-closed (someone else's/unknown device = "not found"); it runs in `SecurityManager.authorize` (every plugin run: chat, schedules, agents, the tester) and in the `/plugins/*` install/uninstall/enable/disable routes. "From the device itself" = the request's `X-PAI-Device-Id` header (`get_source_device_id`) equals the target; every client must send it. The device re-checks on its own side (the `connected` frame and `device.remote_access` frames carry its switches; it fails closed until told; invoke frames carry `source_device_id`, install commands `requested_by_device`). Owner-only `GET/PUT /devices/{id}/remote-access`, audited. `/plugins/{id}/report-*` and `/plugins/device/{id}/installed` are owner-only too.
+- **Remote installs are tracked operations, not polling.** `POST /plugins/{id}/install|uninstall` returns an `operation` (`pai.plugins.operations.PluginOperations`: requested → delivered → downloading → verifying → installing [→ awaiting_permission] → succeeded | failed(code, message, hint)). The target device sends `plugin.progress` WS frames (and the final `report-install`); every change is pushed to the owner's connected devices as `{"type": "plugin.operation", "operation": ...}` and on the event bus; a watchdog fails operations whose device went offline or silent; `GET /plugins/operations[/{id}]` is for first load/reconnect. Raw device text stays in `error_detail`; clients see the stable code + plain message + hint.
+- **User Settings page:** `GET /api/v1/account/settings` (alias `/settings`), a static shell; profile/password/devices/plugins/activity come from `/account/*`.
 
 ---
 

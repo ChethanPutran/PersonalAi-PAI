@@ -48,4 +48,4 @@ def test_the_users_real_permissions_file_is_never_touched(binary, tmp_path):
 def test_decisions_file_records_what_the_user_chose(binary, tmp_path):
     run(binary, tmp_path)
     text = (tmp_path / "pai" / "permissions.json").read_text()
-    assert '"input"' in text and '"allow"' in text and '"screen"' in text and '"deny"' in text
+    assert "pai.input/input" in text and "\"allow\"" in text and "pai.screen/screen" in text and "\"deny\"" in text

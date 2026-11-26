@@ -3,8 +3,9 @@ from pai.common.enums.permission import RiskLevel
 
 
 CAPABILITY_RISK_REGISTRY: dict[str, RiskLevel] = {
-    # Shell — always CRITICAL (command execution)
-    "shell.exec": RiskLevel.CRITICAL,
+    # Shell — HIGH: never runs without the user's approval, remembered at most for the session and
+    # only for that exact command (consent.binding.BOUND_PARAMETERS). Not CRITICAL: that is a hard deny.
+    "shell.exec": RiskLevel.HIGH,
 
     # Files
     "files.delete": RiskLevel.HIGH,

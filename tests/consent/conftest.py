@@ -45,7 +45,7 @@ CAPS = {c.id: c for c in [
     cap("act.free", confirm=False),
     cap("camera.snap", ["camera"], risk="medium"),         # ApprovalPolicy always-approve -> once only
     cap("input.silent", ["input"], risk="high", confirm=False),  # declares input but never asks (the policy must still gate it)
-    cap("shell.exec", ["shell"], risk="critical"),          # blocked by system restrictions (DENY)
+    cap("danger.exec", ["system"], risk="critical"),          # blocked by system restrictions (DENY)
 ]}
 # The input plugin's capabilities exactly as shipped (real risk / confirmation / permissions), so the tests
 # cannot drift from the manifest.
@@ -54,6 +54,9 @@ INPUT_CAPS = {c.id: c for c in load_manifest_file(_INPUT_MANIFEST).capabilities}
 CAPS.update(INPUT_CAPS)
 _SCREEN_MANIFEST = Path(__file__).resolve().parents[2] / "plugin_registry" / "plugins" / "screen" / "1.1.0" / "linux" / "manifest.json"
 CAPS.update({c.id: c for c in load_manifest_file(_SCREEN_MANIFEST).capabilities})
+# The shell plugin exactly as shipped (risk comes from the pipeline; the manifest only asks for confirmation).
+_SHELL_MANIFEST = Path(__file__).resolve().parents[2] / "plugin_registry" / "plugins" / "shell" / "1.0.0" / "linux" / "manifest.json"
+CAPS.update({c.id: c for c in load_manifest_file(_SHELL_MANIFEST).capabilities})
 MANIFEST = SimpleNamespace(get_capability=lambda c: CAPS.get(c))
 
 

@@ -196,7 +196,7 @@ async def test_tester_admin_skips_prompt_but_is_a_real_audited_task(api):
 
 async def test_tester_deny_policy_blocks_even_admin(api):
     await api.make_admin()
-    r = await api.post(f"/api/v1/devices/{DEVICE}/invoke", json=invoke_body("shell.exec"))
+    r = await api.post(f"/api/v1/devices/{DEVICE}/invoke", json=invoke_body("danger.exec"))
     assert r.status_code == 403
     assert not api.kit.invokes
 
@@ -235,7 +235,7 @@ async def test_preflight_decisions(api):
     assert (await api.post("/api/v1/authorize/preflight", json=pf())).json()["decision"] == "allow"
     assert (await api.post("/api/v1/authorize/preflight", json=pf(parameters={"a": 2}))).json()["decision"] == "confirm"
 
-    assert (await api.post("/api/v1/authorize/preflight", json=pf(capability="shell.exec"))).json()["decision"] == "deny"
+    assert (await api.post("/api/v1/authorize/preflight", json=pf(capability="danger.exec"))).json()["decision"] == "deny"
     assert any(e.event_type == AuditEventType.PREFLIGHT_DECISION for e in api.kit.sec.audit_logger.repository.events)
 
 
@@ -255,7 +255,7 @@ async def test_preflight_admin_cannot_be_faked_and_offline_rules(api, monkeypatc
     assert r.json()["decision"] == "confirm"
     await api.make_admin()
     assert (await api.post("/api/v1/authorize/preflight", json=pf())).json()["decision"] == "allow"
-    assert (await api.post("/api/v1/authorize/preflight", json=pf(capability="shell.exec"))).json()["decision"] == "deny"
+    assert (await api.post("/api/v1/authorize/preflight", json=pf(capability="danger.exec"))).json()["decision"] == "deny"
 
     async def offline(device_id): return False
     monkeypatch.setattr(api.kit.rig.dm, "is_connected", offline)

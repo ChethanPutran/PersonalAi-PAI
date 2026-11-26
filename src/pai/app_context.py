@@ -148,6 +148,7 @@ def create_app_context(config: Config) -> PAIAppContext:
 
     # ── Wire router into managers for cache invalidation ──
     plugin_manager.set_capability_router(capability_router)
+    plugin_manager.attach_operations(device_manager)
     # SecurityManager is built before these exist; it refuses to initialize without them.
     security_manager.plugin_manager = plugin_manager
     security_manager.device_manager = device_manager

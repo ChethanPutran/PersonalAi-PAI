@@ -23,6 +23,10 @@
   "deviceTypes": ["desktop"],
   "permissions": ["camera", "microphone", "filesystem"],
 
+  "metadata": {
+    "allowedRoots": ["~/Pictures", "~/Videos", "~/Desktop", "/tmp/pai", "/data/pai"]
+  },
+
   "capabilities": [
     {
       "id": "camera.capture",

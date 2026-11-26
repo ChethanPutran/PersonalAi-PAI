@@ -89,6 +89,7 @@ class DeviceMessageType(StrEnum):
 
     # ── Events (device → backend) ──
     EVENT = "event"
+    PLUGIN_PROGRESS = "plugin.progress"   # device → backend: progress of a plugin install/uninstall
 
     # ── Task / plan events (backend → device) ──
     TASK_CREATED = "task.created"

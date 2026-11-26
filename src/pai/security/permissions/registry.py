@@ -81,7 +81,7 @@ class PermissionRegistry:
             PermissionDeclaration("network.request", "Make network requests", ("request",), "medium", ("network",)),
             PermissionDeclaration("device.control", "Control connected devices", ("control",), "high", ("device",)),
             PermissionDeclaration("system.execute", "Execute system commands", ("execute",), "critical", ("generic",)),
-            PermissionDeclaration("shell.execute", "Run shell commands", ("execute",), "critical", ("generic",)),
+            PermissionDeclaration("shell.execute", "Run shell commands", ("execute",), "high", ("generic",)),
             PermissionDeclaration("camera.control", "Control the camera", ("control",), "medium", ("device",)),
             PermissionDeclaration("microphone.control", "Record from the microphone", ("control",), "high", ("device",)),
             PermissionDeclaration("screen.read", "Capture the screen", ("read",), "high", ("device",)),

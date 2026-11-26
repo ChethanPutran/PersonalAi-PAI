@@ -34,11 +34,13 @@ class SecurityTests(unittest.TestCase):
         d=self.authz(self.req(rtype=R.SYSTEM,action=A.EXECUTE))
         self.assertEqual(d.effect.value,'deny')
 
-    def test_shell_execute_always_denied_even_with_consent(self):
+    def test_shell_execute_asks_every_time_even_with_a_standing_consent(self):
+        # Not denied any more, but a permission-level consent can never make it silent: only the
+        # confirmation gate (once, or a grant bound to the exact command) resolves it.
         self.security.authorization.consent_manager.grant('user:test','test-plugin','shell.execute')
         d=self.authz(self.req(rtype=R.SHELL,action=A.EXECUTE))
-        self.assertEqual(d.effect.value,'deny')
-        self.assertIn('system-restrictions', d.policy_ids)
+        self.assertEqual(d.effect.value,'approval_required')
+        self.assertIn('risk-policy', d.policy_ids)
 
     def test_camera_control_requires_approval_even_with_consent(self):
         self.security.authorization.consent_manager.grant('user:test','test-plugin','camera.control')

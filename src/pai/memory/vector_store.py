@@ -38,6 +38,7 @@ class VectorStore:
         self.embed_fn = None
 
         self._fallback_documents: List[Dict[str, Any]] = []
+        self._embed_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -59,33 +60,12 @@ class VectorStore:
                     settings=Settings(anonymized_telemetry=False),
                 )
 
-                embedding_fn_class = getattr(
-                    embedding_functions,
-                    "SentenceTransformerEmbeddingFunction",
-                    None,
-                )
-                if embedding_fn_class:
-                    # Prefer the local HuggingFace cache: no network round-trips (and no
-                    # "unauthenticated request" warnings) on every start. Download only
-                    # the first time, when the model is not cached yet.
-                    try:
-                        self.embed_fn = embedding_fn_class(
-                            model_name=self.embedding_model, local_files_only=True,
-                        )
-                    except Exception as exc:
-                        logger.info(
-                            "Embedding model {} not cached locally ({}); downloading",
-                            self.embedding_model, type(exc).__name__,
-                        )
-                        self.embed_fn = embedding_fn_class(
-                            model_name=self.embedding_model
-                        )
-                else:
-                    self.embed_fn = embedding_functions.DefaultEmbeddingFunction()
-
+                # No embedding model here: loading it (torch + weights) takes tens of seconds and
+                # is only needed to embed text. count/get/delete work without it, so it is loaded
+                # on the first add_document()/search() (see _ensure_embedder).
                 self.collection = self.client.get_or_create_collection(
                     name=self.collection_name,
-                    embedding_function=self.embed_fn,
+                    embedding_function=None,
                 )
 
                 elapsed_ms = (time.perf_counter() - t0) * 1000
@@ -122,6 +102,49 @@ class VectorStore:
                 )
 
         # ------------------------------------------------------------------
+    # Lazy embedding model
+    # ------------------------------------------------------------------
+
+    def _load_embedder(self) -> None:
+        """Blocking: build the embedding function and rebind the collection to it."""
+        embedding_fn_class = getattr(
+            embedding_functions, "SentenceTransformerEmbeddingFunction", None,
+        )
+        if embedding_fn_class:
+            # Prefer the local HuggingFace cache: no network round-trips on a start. Download
+            # only the first time, when the model is not cached yet.
+            try:
+                fn = embedding_fn_class(
+                    model_name=self.embedding_model, local_files_only=True,
+                )
+            except Exception as exc:
+                logger.info(
+                    "Embedding model {} not cached locally ({}); downloading",
+                    self.embedding_model, type(exc).__name__,
+                )
+                fn = embedding_fn_class(model_name=self.embedding_model)
+        else:
+            fn = embedding_functions.DefaultEmbeddingFunction()
+        self.collection = self.client.get_or_create_collection(
+            name=self.collection_name, embedding_function=fn,
+        )
+        self.embed_fn = fn
+
+    async def _ensure_embedder(self) -> None:
+        """Load the embedding model once, off the event loop, on first use."""
+        if self.embed_fn is not None or self.client is None:
+            return
+        async with self._embed_lock:
+            if self.embed_fn is not None:
+                return
+            t0 = time.perf_counter()
+            await asyncio.to_thread(self._load_embedder)
+            logger.info(
+                "Embedding model {} loaded on first use ({:.0f}ms)",
+                self.embedding_model, (time.perf_counter() - t0) * 1000,
+            )
+
+    # ------------------------------------------------------------------
     # Batch delete
     # ------------------------------------------------------------------
 
@@ -387,6 +410,7 @@ class VectorStore:
                 return document_id
 
             try:
+                await self._ensure_embedder()
                 await asyncio.to_thread(
                     self.collection.add,
                     documents=[text],
@@ -444,6 +468,11 @@ class VectorStore:
             except Exception:
                 index_size = None
 
+            if index_size == 0:
+                # Nothing indexed: no result is possible, so don't load the embedding model.
+                span.set_attribute("result_count", 0)
+                return []
+
             effective_limit = limit
             if index_size is not None and index_size > 0:
                 effective_limit = min(limit, index_size)
@@ -455,6 +484,7 @@ class VectorStore:
 
             t0 = time.perf_counter()
             try:
+                await self._ensure_embedder()
                 results = await asyncio.to_thread(
                     self.collection.query,
                     query_texts=[query],

@@ -33,9 +33,17 @@ MIGRATIONS: List[AddColumn] = [
     AddColumn("schedules", "last_run_status", "VARCHAR(24)"),
     AddColumn("schedules", "last_run_error", "TEXT"),
     AddColumn("schedules", "last_task_id", "VARCHAR"),
+    AddColumn("schedules", "misfire_grace_seconds", "INTEGER"),
     # what the user allowed on the device for each installed plugin (device-reported, advisory)
     AddColumn("device_plugins", "permissions", "JSON"),
     AddColumn("device_plugins", "permissions_reported_at", "DATETIME"),
+    # user profile
+    AddColumn("users", "display_name", "VARCHAR(80)"),
+    AddColumn("users", "timezone", "VARCHAR(64)"),
+    AddColumn("users", "locale", "VARCHAR(16)"),
+    # per-device switches for remote plugin install / invocation (off by default)
+    AddColumn("devices", "allow_remote_install", "BOOLEAN NOT NULL DEFAULT 0"),
+    AddColumn("devices", "allow_remote_invoke", "BOOLEAN NOT NULL DEFAULT 0"),
 ]
 
 

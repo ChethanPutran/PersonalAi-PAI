@@ -40,6 +40,7 @@ from pai.tasks.models import (
     get_task_timeout,
     utc_now,
 )
+from pai.tasks.user_errors import error_fields
 from pai.tasks.store import TaskStoreProtocol
 from pai.tasks.store import TaskStore
 from pai.common.manager import Manager
@@ -328,6 +329,18 @@ class TaskManager(Manager):
         await self.store.save(task)
         await self._publish("task.failed", task.to_dict())
 
+    async def _publish(self, event_type: str, data: Optional[Dict[str, Any]] = None, **kw: Any) -> None:
+        """Every ``task.*`` event carries the same plain-language ``error_info`` as the REST views."""
+        if isinstance(data, dict) and str(event_type).startswith("task.") and data.get("id") \
+                and "error_info" not in data:
+            status = str(data.get("status") or "")
+            raw = data.get("error") or data.get("last_error")
+            if status == "cancelled" and not raw:
+                raw = "cancelled"
+            if raw or status == "failed":
+                data = {**data, "error_info": error_fields(raw, data.get("capability"))}
+        await super()._publish(event_type, data, **kw)
+
     def _spawn_recovery(self, task_id: str) -> None:
         async def _go() -> None:
             try:
@@ -428,6 +441,9 @@ class TaskManager(Manager):
             task.confirmation_reason = (
                 task.confirmation_reason or decision.confirmation_reason or decision.reason
             )
+            # The store hands back a fresh copy when the task runs (DB-backed), so what was just
+            # decided must be persisted, or the confirmation gate never sees it and the action runs.
+            await self.store.save(task)
             return
         grant_id = getattr(decision, "consent_grant_id", None)
         if grant_id and hasattr(self.authorizer, "record_grant_use"):
@@ -443,6 +459,7 @@ class TaskManager(Manager):
         task.authorization.tokens = list(decision.tokens)
         # Capabilities needing no permissions get no token; the decision itself gated them.
         task.authorization.required = bool(decision.tokens)
+        await self.store.save(task)
 
     async def run(
         self,
@@ -1102,7 +1119,8 @@ class TaskManager(Manager):
                 span.set_error(f"{type(exc).__name__}: {exc}")
                 # Authorization failures are decisions, not glitches: never retry them.
                 return await self._handle_failure(
-                    task, str(exc), retryable=not isinstance(exc, PermissionError))
+                    task, str(exc) or f"{type(exc).__name__} (no details)",
+                    retryable=not isinstance(exc, PermissionError))
 
             finally:
                 self._running_tasks.pop(task_id, None)

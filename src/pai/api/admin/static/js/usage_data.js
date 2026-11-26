@@ -44,6 +44,18 @@ export function llmCallsFromEvents(events) {
   return calls.sort((x, y) => x.ts - y.ts);
 }
 
+/** Speech steps of a voice trace (voice.stt / voice.tts spans): billed per second of audio / per character, not per token. */
+export function speechStepsFromEvents(events) {
+  const steps = [];
+  for (const e of events || []) {
+    if (e.kind !== 'span.end' || (e.name !== 'voice.stt' && e.name !== 'voice.tts')) continue;
+    const a = e.attributes || {};
+    steps.push({ ts: e.timestamp, kind: e.name === 'voice.stt' ? 'STT' : 'TTS', model: a.model || a.provider || '', units: a.units == null ? null : Number(a.units),
+      unit: a.unit || (e.name === 'voice.stt' ? 'seconds' : 'characters'), cost_usd: a.cost_usd == null ? null : Number(a.cost_usd), duration_ms: e.duration_ms ?? null, error: e.error || null });
+  }
+  return steps.sort((x, y) => x.ts - y.ts);
+}
+
 /** Label for one call on a chart axis: "1 · planner" (position + role, else span, else model). */
 export function callLabel(call, index) {
   const what = call.route || (call.span ? String(call.span).split('.').pop() : '') || call.model || 'call';

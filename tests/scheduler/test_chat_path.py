@@ -59,7 +59,7 @@ async def test_nothing_typed_or_said_can_grant_consent(create, session_factory):
 
 async def test_the_same_validation_applies(create):
     base = {"title": "x", "repeat": "interval", "interval_seconds": 3600}
-    for bad, needle in (({"capability": "shell.exec"}, "cannot be scheduled"),
+    for bad, needle in (({"capability": "danger.exec"}, "cannot be scheduled"),
                         ({"capability": "schedule.create"}, "cannot create, change or delete"),
                         ({"capability": "nope.nothing"}, "not available"),
                         ({"capability": "lights.on", "parameters": {}}, "missing required parameter"),

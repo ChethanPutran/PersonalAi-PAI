@@ -56,7 +56,7 @@ async def test_capabilities_endpoint_matches_the_contract(api):
                                         "requires_consent", "risk", "schedulable", "blocked_reason"}
     assert caps["camera.snap"]["requires_consent"] is True and caps["camera.snap"]["risk"] == "high"
     assert caps["lights.on"]["parameters_schema"]["required"] == ["level"]
-    assert caps["shell.exec"]["schedulable"] is False and caps["shell.exec"]["blocked_reason"]
+    assert caps["danger.exec"]["schedulable"] is False and caps["danger.exec"]["blocked_reason"]
 
 
 # ----------------------------------------------------------------------- create / read
@@ -125,7 +125,7 @@ async def test_consent_bounds_and_error_codes(api, session_factory):
     # 422: the schedule can no longer be scheduled (e.g. its capability became blocked)
     async with session_factory() as s:
         row = await ScheduleRepository(s).get(sid)
-        row.capability = "shell.exec"
+        row.capability = "danger.exec"
         await s.commit()
     r = await api.post(f"/api/v1/schedules/{sid}/consent", json={})
     assert r.status_code == 422 and "cannot be scheduled" in r.json()["detail"]["errors"][0]["message"]
@@ -145,7 +145,7 @@ async def test_editing_what_was_approved_revokes_consent_but_cosmetic_edits_do_n
 
 async def test_patch_validates_and_leaves_the_row_untouched_on_error(api):
     sid = (await api.post("/api/v1/schedules", json=body())).json()["id"]
-    r = await api.patch(f"/api/v1/schedules/{sid}", json={"capability": "shell.exec", "parameters": {}})
+    r = await api.patch(f"/api/v1/schedules/{sid}", json={"capability": "danger.exec", "parameters": {}})
     assert r.status_code == 422
     assert (await api.get("/api/v1/schedules")).json()[0]["capability"] == "camera.snap"
 
@@ -186,3 +186,17 @@ async def test_a_legacy_schedule_that_needs_approval_can_be_approved_and_is_flag
     sid2 = await make_row(session_factory, requires_consent=False)               # never fired yet
     r = await api.post(f"/api/v1/schedules/{sid2}/consent", json={})             # not a wrong 409
     assert r.status_code == 200 and r.json()["consent"]["active"] and r.json()["requires_consent"] is True
+
+
+async def test_misfire_grace_roundtrips_and_can_be_cleared(api):
+    r = await api.post("/api/v1/schedules", json={**body(), "catch_up": "all", "misfire_grace_seconds": 600})
+    assert r.status_code == 201 or r.status_code == 200
+    sid = r.json()["id"]
+    assert r.json()["misfire_grace_seconds"] == 600 and r.json()["catch_up"] == "all"
+    r = await api.patch(f"/api/v1/schedules/{sid}", json={"misfire_grace_seconds": 60})
+    assert r.json()["misfire_grace_seconds"] == 60
+    r = await api.patch(f"/api/v1/schedules/{sid}", json={"title": "x"})          # untouched
+    assert r.json()["misfire_grace_seconds"] == 60
+    r = await api.patch(f"/api/v1/schedules/{sid}", json={"misfire_grace_seconds": None})
+    assert r.json()["misfire_grace_seconds"] is None                               # explicit null clears
+    assert (await api.post("/api/v1/schedules", json={**body(), "misfire_grace_seconds": -1})).status_code == 422

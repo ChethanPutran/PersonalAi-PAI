@@ -29,6 +29,7 @@ class DeviceMessage(BaseModel):
     timestamp: Optional[float] = None # An optional timestamp indicating when the request was created or processed.
     idempotency_key: Optional[str] = None # Stable across retries/recovery: a device that already ran this key must not run it again.
     attempt: int = 0 # 0 for the first send; increments on each retry/recovery re-send.
+    source_device_id: Optional[str] = None # Device the request came from (None: web/schedule/agent). A device that has remote use switched off refuses invokes whose source is not itself.
 
 
 class DeviceFrame(BaseModel):
@@ -141,6 +142,11 @@ class DeviceInfo(BaseModel):
 
     # Executor identifier, if the device is associated with one.
     executor_id: Optional[str] = None
+
+    # Owner-controlled switches (default off): may OTHER devices / scheduled and agent runs
+    # install plugins on, or invoke plugins on, this device? See DeviceManager.set_remote_access.
+    allow_remote_install: bool = False
+    allow_remote_invoke: bool = False
 
     def has_capability(self, capability: str) -> bool:
         """Return whether the device exposes a capability."""

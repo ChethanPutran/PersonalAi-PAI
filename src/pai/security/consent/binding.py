@@ -77,6 +77,29 @@ class ParamBinding(BaseModel):
 
 DEFAULT_BINDING = ParamBinding(mode=BindingMode.EXACT)
 
+# Capabilities whose remembered approval must name these parameters: approving `ls` for a session
+# must never approve `rm`. Enforced where grants are created AND where they are matched.
+BOUND_PARAMETERS: dict[str, tuple[str, ...]] = {"shell.exec": ("command",)}
+
+
+def required_keys(capability: Optional[str]) -> tuple[str, ...]:
+    return BOUND_PARAMETERS.get(capability or "", ())
+
+
+def binding_allowed(capability: Optional[str], binding: "ParamBinding") -> bool:
+    """False when ``binding`` would let a bound capability vary the parameters it must pin."""
+    need = required_keys(capability)
+    if not need:
+        return True
+    if binding.mode == BindingMode.EXACT:
+        return True                                   # pins everything, including the command
+    return binding.mode == BindingMode.KEYS and set(need) <= set(binding.keys)
+
+
+def default_binding_for(capability: Optional[str]) -> "ParamBinding":
+    need = required_keys(capability)
+    return ParamBinding(mode=BindingMode.KEYS, keys=list(need)) if need else DEFAULT_BINDING
+
 
 _SENSITIVE = re.compile(r"(token|password|passwd|secret|api[_-]?key|authorization|credential|cookie|private[_-]?key)", re.I)
 PREVIEW_MAX = 120

@@ -50,6 +50,8 @@ class TraceSummary:
     # Summed over the trace's LLM calls. cost_usd counts only calls whose cost is known.
     total_tokens: int = 0
     cost_usd: float = 0.0
+    goal: str = ""            # the request text (from the trace.start attributes), so the admin list can show it
+    mode: str = ""            # how the request arrived: "voice" for a spoken turn, else "" (from the trace.start attributes)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

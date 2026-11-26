@@ -28,6 +28,7 @@
 .card-body.flush { padding: 0; }
 .grid { display: grid; gap: var(--s-4); }
 .grid.stats { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+.grid.side { grid-template-columns: repeat(2, minmax(0, 1fr)); }   /* always side by side (cost | tokens) */
 .grid.two { grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); }
 
 /* ---- Stat cards ---- */

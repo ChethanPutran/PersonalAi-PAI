@@ -59,6 +59,9 @@ class MeResponse(BaseModel):
     email: str
     is_admin: bool = False
     created_at: Optional[str] = None
+    display_name: Optional[str] = None
+    timezone: Optional[str] = None
+    locale: Optional[str] = None
 
 
 # ============================================================
@@ -268,4 +271,7 @@ async def me(
             email=user.email,
             is_admin=user.is_admin,
             created_at=user.created_at.isoformat() if user.created_at else None,
+            display_name=user.display_name,
+            timezone=user.timezone,
+            locale=user.locale,
         )

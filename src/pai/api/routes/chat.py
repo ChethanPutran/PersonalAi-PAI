@@ -112,6 +112,23 @@ def _format_chat_message(
             lines.append(f"  {marker} {cap} on {dev}")
         return "\n".join(lines)
 
+    # A failed plan still gets the reply the assistant wrote for the user (it explains what went
+    # wrong); never replace it with a bare "task failed".
+    chat_replies = [r["reply"] for r in results
+                    if r.get("capability") == CHAT_CAPABILITY and r.get("reply")]
+    if chat_replies:
+        return "\n\n".join(chat_replies)
+
+    # No reply: say, in plain words, what each failed step ran into (computed once, server-side).
+    reasons = []
+    for r in results:
+        msg = r.get("user_message")
+        if msg and r.get("status") != "completed":
+            hint = r.get("hint")
+            reasons.append(f"{msg} {hint}".strip() if hint else msg)
+    if reasons:
+        return "\n\n".join(dict.fromkeys(reasons))      # de-duplicated, order kept
+
     if failed:
         return (
             f"I ran into an error. {len(failed)} task(s) failed: "

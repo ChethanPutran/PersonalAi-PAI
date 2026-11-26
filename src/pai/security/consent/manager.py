@@ -6,7 +6,7 @@ from loguru import logger
 
 from pai.common.enums.permission import ConsentScope
 
-from .binding import BindingMode, ParamBinding, preview_parameters
+from .binding import BindingMode, ParamBinding, binding_allowed, preview_parameters
 from .limits import (
     DEFAULT_ALWAYS_DAYS, MAX_ACTIVE_GRANTS_PER_USER, MAX_ALWAYS_DAYS, SESSION_TTL,
 )
@@ -66,7 +66,8 @@ class ConsentManager:
             return None
         covering = [
             g for g in candidates
-            if g.covers(user_id=user_id, plugin_id=plugin_id, capability=capability,
+            if binding_allowed(capability, g.binding)       # never trust a stored over-broad grant
+            and g.covers(user_id=user_id, plugin_id=plugin_id, capability=capability,
                         device_id=device_id, session_id=session_id, parameters=params)
         ]
         # Prefer the most specific grant (a parameter-bound one over "any"), then the newest.
@@ -102,6 +103,10 @@ class ConsentManager:
                                f"'{scope.value}' is broader than this action allows "
                                f"(allowed: {[s.value for s in allowed_scopes]})")
         params = dict(parameters or {})
+        if not binding_allowed(capability, binding):
+            raise ConsentError("binding_too_broad",
+                               f"an approval for {capability} must be tied to the exact command, "
+                               "not to every call")
         unknown = binding.unknown_keys(params)
         if unknown:
             raise ConsentError("binding_invalid", f"unknown parameter(s) to bind: {unknown}")

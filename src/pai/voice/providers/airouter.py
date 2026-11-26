@@ -16,6 +16,7 @@ from typing import Any, AsyncIterator, Optional
 import httpx
 from loguru import logger
 
+from pai.voice import usage as voice_usage
 from pai.voice.audio import frame_bytes, resample
 from pai.voice.providers.errors import VoiceProviderError
 from pai.voice.providers.openai_stt import OpenAIBatchSTT
@@ -42,12 +43,13 @@ class AIRouterSTT(OpenAIBatchSTT):
         self._tracker, self._per_minute = cost_tracker, cost_per_minute_usd
 
     def _after_request(self, *, audio_seconds: float, payload: dict) -> None:
-        if self._tracker is None:
-            return
         try:
             billed = (payload.get("usage") or {}).get("seconds")
             seconds = float(billed) if isinstance(billed, (int, float)) and billed >= 0 else audio_seconds
             cost = None if self._per_minute is None else seconds / 60.0 * self._per_minute
+            voice_usage.report(model=self._model, units=round(seconds, 3), unit="seconds", cost_usd=cost)
+            if self._tracker is None:
+                return
             self._tracker.record_metered(provider="airouter", model=self._model, route=ROUTE_STT,
                                          units=round(seconds, 3), unit="seconds", cost_usd=cost)
         except Exception as exc:                       # accounting must never break a voice turn
@@ -109,12 +111,13 @@ class AIRouterTTS:
     def _account(self, text: str, resp: httpx.Response) -> None:
         """Billed per input character: AIRouter reports what it billed in `X-AIRouter-Characters` (providers count
         differently: Fish Audio counts UTF-8 bytes), else the length of the text we sent."""
-        if self._tracker is None:
-            return
         try:
             raw = resp.headers.get("x-airouter-characters", "")
             chars = int(raw) if raw.strip().isdigit() else len(text)
             cost = None if self._per_1k is None else chars / 1000.0 * self._per_1k
+            voice_usage.report(model=self._model, units=chars, unit="characters", cost_usd=cost)
+            if self._tracker is None:
+                return
             self._tracker.record_metered(provider="airouter", model=self._model, route=ROUTE_TTS, units=chars,
                                          unit="characters", cost_usd=cost)
         except Exception as exc:

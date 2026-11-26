@@ -155,10 +155,10 @@ async def test_expired_consent_does_not_run(scheduler, tm, session_factory):
 
 # ------------------------------------------------------- approval never overrides a DENY
 
-async def test_approved_never_overrides_a_deny_shell_stays_blocked_even_with_consent(
+async def test_approved_never_overrides_a_deny_critical_stays_blocked_even_with_consent(
         scheduler, tm, session_factory, security):
-    # A legacy/tampered row: shell.exec with a perfectly valid consent (creation would have refused it).
-    sid = await make_row(session_factory, capability="shell.exec", consent=True)
+    # A legacy/tampered row: a critical action with a perfectly valid consent (creation would have refused it).
+    sid = await make_row(session_factory, capability="danger.exec", consent=True)
     await tick(scheduler)
     assert tm.runs == []
     row = await load(session_factory, sid)
@@ -166,11 +166,11 @@ async def test_approved_never_overrides_a_deny_shell_stays_blocked_even_with_con
     assert len(audit(security, AuditEventType.SCHEDULE_DENIED, sid)) == 1
 
 
-async def test_the_real_pipeline_denies_shell_even_when_approved(security):
+async def test_the_real_pipeline_denies_a_critical_action_even_when_approved(security):
     from pai.security.authorization.context import ScopeContext
     from support import MANIFEST
     d = await security.authorize(
-        user_id=USER, plugin_id="p1", capability="shell.exec", device_id=DEV, plugin_manifest=MANIFEST,
+        user_id=USER, plugin_id="p1", capability="danger.exec", device_id=DEV, plugin_manifest=MANIFEST,
         parameters={}, scope=ScopeContext(allowed_devices=[DEV]), origin=Origin.SCHEDULED, approved=True)
     assert d.effect.value == "deny"
 

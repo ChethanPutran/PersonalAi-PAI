@@ -208,6 +208,23 @@ class Tracer:
             self.store, trace_id or uuid.uuid4().hex, name, attributes or {},
         )
 
+    def record_span(
+        self, trace_id: str, name: str, *, start: float, end: Optional[float] = None,
+        attributes: Optional[Dict[str, Any]] = None, error: Optional[str] = None, parent_span_id: str = "root",
+    ) -> None:
+        """Record an already finished span under a trace by id, for work that happens outside the request's own
+        task (voice speech-to-text before the turn starts, text-to-speech while it streams out)."""
+        if self.store is None:
+            return
+        end = time.time() if end is None else end
+        span_id = uuid.uuid4().hex[:16]
+        attrs = truncate(redact(dict(attributes or {})))
+        self.store.append(TraceEvent(trace_id=trace_id, span_id=span_id, parent_span_id=parent_span_id,
+                                     kind=EventKind.SPAN_START.value, name=name, timestamp=start, attributes=attrs))
+        self.store.append(TraceEvent(trace_id=trace_id, span_id=span_id, parent_span_id=parent_span_id,
+                                     kind=EventKind.SPAN_END.value, name=name, timestamp=end,
+                                     duration_ms=max(0.0, (end - start) * 1000), attributes=attrs, error=error))
+
     # -------- span --------
 
     def span(self, name: str, **attributes: Any) -> Span | NoOpSpan:

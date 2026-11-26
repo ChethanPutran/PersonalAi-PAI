@@ -1,0 +1,637 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>PAI Settings</title>
+<style>
+:root {
+  --bg: #f5f6f8; --surface: #ffffff; --surface-2: #f0f2f5; --line: #e3e6ec;
+  --text: #171a21; --muted: #5f6877; --faint: #8a93a3;
+  --accent: #4f46e5; --accent-hover: #4338ca; --accent-soft: #eceafd; --on-accent: #ffffff;
+  --ok: #138a4b; --ok-soft: #e3f6ec; --warn: #a15c00; --warn-soft: #fff2dc;
+  --bad: #c2362b; --bad-soft: #fde8e6; --off: #c5cad4;
+  --shadow: 0 1px 2px rgba(16,24,40,.05), 0 4px 16px rgba(16,24,40,.04);
+  --radius: 14px; --radius-sm: 9px;
+  --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1115; --surface: #171a21; --surface-2: #1e222b; --line: #2a2f3a;
+    --text: #eceef3; --muted: #a4acbb; --faint: #7b8394;
+    --accent: #8b85ff; --accent-hover: #a29dff; --accent-soft: #232246; --on-accent: #14122e;
+    --ok: #4cc88a; --ok-soft: #12291f; --warn: #f0b04c; --warn-soft: #2d2412;
+    --bad: #ff7d72; --bad-soft: #321a18; --off: #444b5a;
+    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 6px 20px rgba(0,0,0,.25);
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f1115; --surface: #171a21; --surface-2: #1e222b; --line: #2a2f3a;
+  --text: #eceef3; --muted: #a4acbb; --faint: #7b8394;
+  --accent: #8b85ff; --accent-hover: #a29dff; --accent-soft: #232246; --on-accent: #14122e;
+  --ok: #4cc88a; --ok-soft: #12291f; --warn: #f0b04c; --warn-soft: #2d2412;
+  --bad: #ff7d72; --bad-soft: #321a18; --off: #444b5a;
+  --shadow: 0 1px 2px rgba(0,0,0,.4), 0 6px 20px rgba(0,0,0,.25);
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 var(--font); }
+button, input, select { font: inherit; color: inherit; }
+[hidden] { display: none !important; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+
+/* ---------- sign-in ---------- */
+.auth { min-height: 100vh; display: grid; place-items: center; padding: 24px 16px; }
+.auth-card { width: 100%; max-width: 400px; background: var(--surface); border: 1px solid var(--line);
+  border-radius: 18px; padding: 32px 28px; box-shadow: var(--shadow); }
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 650; font-size: 17px; letter-spacing: -.01em; }
+.logo { width: 32px; height: 32px; border-radius: 9px; display: grid; place-items: center;
+  background: linear-gradient(135deg, var(--accent), #7c5cff); color: #fff; font-weight: 700; font-size: 15px; }
+.auth h1 { margin: 22px 0 4px; font-size: 22px; letter-spacing: -.02em; }
+.auth p.sub { margin: 0 0 22px; color: var(--muted); }
+
+/* ---------- shell ---------- */
+.shell { display: grid; grid-template-columns: 252px minmax(0, 1fr); min-height: 100vh; }
+.side { position: sticky; top: 0; height: 100vh; padding: 22px 14px; display: flex; flex-direction: column; gap: 22px;
+  border-right: 1px solid var(--line); background: var(--surface); }
+.side .brand { padding: 0 10px; }
+.nav { display: flex; flex-direction: column; gap: 2px; }
+.nav a { display: flex; align-items: center; gap: 11px; padding: 9px 12px; border-radius: 10px; color: var(--muted);
+  text-decoration: none; font-weight: 500; cursor: pointer; }
+.nav a:hover { background: var(--surface-2); color: var(--text); }
+.nav a[aria-current="true"] { background: var(--accent-soft); color: var(--accent); }
+.nav svg { width: 18px; height: 18px; flex: none; }
+.side-foot { margin-top: auto; display: flex; align-items: center; gap: 10px; padding: 10px; border-radius: 12px; background: var(--surface-2); }
+.side-foot .who { min-width: 0; flex: 1; line-height: 1.25; }
+.side-foot .who b { display: block; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.side-foot .who span { font-size: 12.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
+.avatar { width: 38px; height: 38px; border-radius: 50%; display: grid; place-items: center; flex: none; font-weight: 650; font-size: 14px;
+  color: var(--accent); background: var(--accent-soft); letter-spacing: .02em; }
+.avatar.lg { width: 64px; height: 64px; font-size: 22px; }
+
+.main { padding: 36px clamp(16px, 4vw, 48px) 80px; max-width: 920px; width: 100%; }
+.page-title { margin: 0 0 4px; font-size: 26px; letter-spacing: -.025em; }
+.page-sub { margin: 0 0 26px; color: var(--muted); max-width: 62ch; }
+section.panel { scroll-margin-top: 20px; margin-bottom: 42px; }
+.panel > h2 { margin: 0 0 4px; font-size: 18px; letter-spacing: -.015em; }
+.panel > p.lead { margin: 0 0 16px; color: var(--muted); }
+
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); }
+.card + .card { margin-top: 14px; }
+.pad { padding: 20px 22px; }
+.row { display: flex; align-items: center; gap: 14px; }
+.row.between { justify-content: space-between; }
+.grow { flex: 1; min-width: 0; }
+
+/* ---------- forms ---------- */
+.field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px; }
+.field label { font-weight: 600; font-size: 13.5px; }
+.field .hint { color: var(--muted); font-size: 13px; }
+.input, select.input { width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: var(--surface); transition: border-color .15s, box-shadow .15s; }
+.input:hover { border-color: var(--off); }
+.input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.input[readonly] { background: var(--surface-2); color: var(--muted); }
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 9px 16px; border-radius: var(--radius-sm);
+  border: 1px solid var(--line); background: var(--surface); cursor: pointer; font-weight: 600; transition: background .15s, border-color .15s, transform .05s; }
+.btn:hover { background: var(--surface-2); }
+.btn:active { transform: translateY(1px); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.btn.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+.btn.danger { color: var(--bad); }
+.btn.danger:hover { background: var(--bad-soft); border-color: var(--bad); }
+.btn.ghost { border-color: transparent; background: transparent; color: var(--muted); }
+.btn.ghost:hover { background: var(--surface-2); color: var(--text); }
+.btn[disabled] { opacity: .55; cursor: not-allowed; }
+.btn.sm { padding: 6px 11px; font-size: 13.5px; }
+.actions { display: flex; gap: 10px; align-items: center; margin-top: 4px; }
+
+/* ---------- switch ---------- */
+.switch { position: relative; width: 42px; height: 24px; flex: none; border-radius: 999px; border: none; padding: 0;
+  background: var(--off); cursor: pointer; transition: background .18s; }
+.switch::after { content: ""; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%;
+  background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.3); transition: transform .18s; }
+.switch[aria-checked="true"] { background: var(--accent); }
+.switch[aria-checked="true"]::after { transform: translateX(18px); }
+.switch[disabled] { opacity: .5; cursor: progress; }
+.setting { display: flex; gap: 16px; align-items: flex-start; padding: 14px 0; }
+.setting + .setting { border-top: 1px solid var(--line); }
+.setting .t { font-weight: 600; }
+.setting .d { color: var(--muted); font-size: 13.5px; margin-top: 2px; max-width: 56ch; }
+
+/* ---------- chips / dots ---------- */
+.chip { display: inline-flex; align-items: center; gap: 6px; padding: 2px 9px; border-radius: 999px; font-size: 12.5px; font-weight: 600;
+  background: var(--surface-2); color: var(--muted); white-space: nowrap; }
+.chip.ok { background: var(--ok-soft); color: var(--ok); }
+.chip.warn { background: var(--warn-soft); color: var(--warn); }
+.chip.bad { background: var(--bad-soft); color: var(--bad); }
+.chip.accent { background: var(--accent-soft); color: var(--accent); }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--off); flex: none; }
+.dot.on { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }
+
+/* ---------- devices ---------- */
+.device-head { display: flex; align-items: center; gap: 14px; padding: 18px 22px; }
+.device-icon { width: 42px; height: 42px; border-radius: 11px; display: grid; place-items: center; background: var(--surface-2); color: var(--muted); flex: none; }
+.device-icon svg { width: 22px; height: 22px; }
+.device-name { font-weight: 650; font-size: 16px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.meta { color: var(--muted); font-size: 13px; }
+.device-body { padding: 4px 22px 6px; border-top: 1px solid var(--line); }
+.device-foot { display: flex; gap: 8px; align-items: center; padding: 12px 22px 16px; border-top: 1px solid var(--line); flex-wrap: wrap; }
+.callout { display: flex; gap: 12px; padding: 14px 16px; border-radius: var(--radius-sm); background: var(--accent-soft); color: var(--text);
+  border: 1px solid transparent; margin-bottom: 16px; font-size: 14px; }
+.callout svg { width: 20px; height: 20px; color: var(--accent); flex: none; margin-top: 1px; }
+.installed { margin: 8px 0 14px; display: grid; gap: 6px; }
+.installed .it { display: flex; gap: 10px; align-items: center; padding: 8px 10px; border-radius: 8px; background: var(--surface-2); font-size: 13.5px; }
+
+/* ---------- lists ---------- */
+.list-item { display: flex; gap: 14px; align-items: center; padding: 14px 20px; }
+.list-item + .list-item { border-top: 1px solid var(--line); }
+.search { max-width: 320px; margin-bottom: 14px; }
+.op-err { color: var(--bad); font-size: 13.5px; margin-top: 3px; }
+.op-err i { color: var(--muted); font-style: normal; }
+
+/* ---------- states ---------- */
+.skeleton { height: 76px; border-radius: var(--radius); background: linear-gradient(90deg, var(--surface-2), var(--surface), var(--surface-2));
+  background-size: 200% 100%; animation: sk 1.3s ease-in-out infinite; }
+.skeleton + .skeleton { margin-top: 12px; }
+@keyframes sk { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+.empty { padding: 34px 20px; text-align: center; color: var(--muted); }
+.empty b { display: block; color: var(--text); margin-bottom: 4px; }
+.banner { padding: 12px 14px; border-radius: var(--radius-sm); margin-bottom: 14px; font-size: 14px; }
+.banner.bad { background: var(--bad-soft); color: var(--bad); }
+.seg { display: inline-flex; padding: 3px; border-radius: 11px; background: var(--surface-2); gap: 2px; }
+.seg button { border: none; background: transparent; padding: 7px 16px; border-radius: 8px; cursor: pointer; font-weight: 600; color: var(--muted); }
+.seg button[aria-pressed="true"] { background: var(--surface); color: var(--text); box-shadow: var(--shadow); }
+
+#toasts { position: fixed; right: 18px; bottom: 18px; display: flex; flex-direction: column; gap: 10px; z-index: 50; }
+.toast { background: var(--text); color: var(--bg); padding: 11px 16px; border-radius: 11px; box-shadow: 0 8px 30px rgba(0,0,0,.25);
+  max-width: 340px; font-size: 14px; animation: pop .18s ease-out; }
+.toast.bad { background: var(--bad); color: #fff; }
+@keyframes pop { from { opacity: 0; transform: translateY(8px); } }
+dialog { border: 1px solid var(--line); border-radius: 16px; background: var(--surface); color: var(--text); padding: 24px; max-width: 420px; width: calc(100% - 32px); box-shadow: 0 20px 60px rgba(0,0,0,.35); }
+dialog::backdrop { background: rgba(10,12,18,.55); }
+dialog h3 { margin: 0 0 6px; }
+dialog p { margin: 0 0 18px; color: var(--muted); }
+
+/* ---------- mobile ---------- */
+@media (max-width: 860px) {
+  .shell { grid-template-columns: 1fr; }
+  .side { position: static; height: auto; flex-direction: row; align-items: center; gap: 8px; padding: 10px 12px; border-right: none; border-bottom: 1px solid var(--line); overflow-x: auto; }
+  .side .brand span, .side-foot .who { display: none; }
+  .side .brand { padding: 0; }
+  .nav { flex-direction: row; }
+  .nav a { padding: 8px 12px; white-space: nowrap; }
+  .nav a span { display: none; }
+  .side-foot { margin: 0 0 0 auto; padding: 4px; background: transparent; }
+  .two { grid-template-columns: 1fr; }
+  .main { padding-top: 24px; }
+}
+@media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+</head>
+<body>
+
+<!-- ============ sign-in ============ -->
+<div class="auth" id="auth" hidden>
+  <form class="auth-card" id="login-form" autocomplete="on">
+    <div class="brand"><div class="logo">P</div><span>PAI</span></div>
+    <h1>Sign in to your settings</h1>
+    <p class="sub">Use the same account as your PAI apps.</p>
+    <div class="banner bad" id="login-error" role="alert" hidden></div>
+    <div class="field"><label for="email">Email</label>
+      <input class="input" id="email" type="email" autocomplete="username" required></div>
+    <div class="field"><label for="password">Password</label>
+      <input class="input" id="password" type="password" autocomplete="current-password" required></div>
+    <button class="btn primary" style="width:100%" id="login-btn">Sign in</button>
+  </form>
+</div>
+
+<!-- ============ app ============ -->
+<div class="shell" id="app" hidden>
+  <aside class="side">
+    <div class="brand"><div class="logo">P</div><span>Settings</span></div>
+    <nav class="nav" id="nav" aria-label="Settings sections"></nav>
+    <div class="side-foot">
+      <div class="avatar" id="side-avatar">?</div>
+      <div class="who"><b id="side-name">…</b><span id="side-email"></span></div>
+      <button class="btn ghost sm" id="signout" title="Sign out" aria-label="Sign out">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/></svg>
+      </button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <h1 class="page-title">Settings</h1>
+    <p class="page-sub">Your profile, the devices connected to your assistant, and what is allowed to run on them.</p>
+    <div id="global-error" class="banner bad" role="alert" hidden></div>
+
+    <!-- Profile -->
+    <section class="panel" id="profile">
+      <h2>Profile</h2>
+      <p class="lead">How you appear in PAI, and the time zone and language it uses for you.</p>
+      <div class="card pad">
+        <div class="row" style="margin-bottom:20px">
+          <div class="avatar lg" id="p-avatar">?</div>
+          <div class="grow"><div style="font-weight:650;font-size:17px" id="p-title">…</div>
+            <div class="meta" id="p-since"></div></div>
+          <span class="chip accent" id="p-admin" hidden>Admin</span>
+        </div>
+        <form id="profile-form">
+          <div class="two">
+            <div class="field"><label for="p-name">Display name</label>
+              <input class="input" id="p-name" maxlength="80" placeholder="Your name">
+              <span class="hint">Shown to you in the apps.</span></div>
+            <div class="field"><label for="p-email">Email</label>
+              <input class="input" id="p-email" readonly>
+              <span class="hint">Your sign-in. It can't be changed here.</span></div>
+          </div>
+          <div class="two">
+            <div class="field"><label for="p-tz">Time zone</label>
+              <select class="input" id="p-tz"></select>
+              <span class="hint">Used for reminders and schedules.</span></div>
+            <div class="field"><label for="p-locale">Language</label>
+              <select class="input" id="p-locale"></select></div>
+          </div>
+          <div class="actions"><button class="btn primary" id="p-save" disabled>Save changes</button>
+            <button type="button" class="btn ghost" id="p-reset" hidden>Discard</button></div>
+        </form>
+      </div>
+    </section>
+
+    <!-- Devices -->
+    <section class="panel" id="devices">
+      <h2>Devices</h2>
+      <p class="lead">Each device decides for itself what other devices may do to it.</p>
+      <div class="callout">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        <div><b>Remote access is off by default.</b> Until you switch it on for a device, nothing outside that device
+          (your other devices, the web, schedules or agents) can install plugins on it or run plugins on it.</div>
+      </div>
+      <div id="devices-list"></div>
+    </section>
+
+    <!-- Plugins -->
+    <section class="panel" id="plugins">
+      <h2>Plugins</h2>
+      <p class="lead">Turn plugins on or off for your account. A plugin also has to be installed on a device before it can run there.</p>
+      <input class="input search" id="plugin-search" type="search" placeholder="Search plugins" aria-label="Search plugins">
+      <div class="card" id="plugins-list"></div>
+    </section>
+
+    <!-- Activity -->
+    <section class="panel" id="activity">
+      <h2>Recent remote activity</h2>
+      <p class="lead">Plugin installs and removals requested on your devices, and how they went.</p>
+      <div class="card" id="activity-list"></div>
+    </section>
+
+    <!-- Security -->
+    <section class="panel" id="security">
+      <h2>Security</h2>
+      <p class="lead">Change your password.</p>
+      <div class="card pad">
+        <form id="pw-form" autocomplete="off">
+          <div class="banner bad" id="pw-error" role="alert" hidden></div>
+          <div class="field"><label for="pw-cur">Current password</label>
+            <input class="input" id="pw-cur" type="password" autocomplete="current-password" required></div>
+          <div class="two">
+            <div class="field"><label for="pw-new">New password</label>
+              <input class="input" id="pw-new" type="password" autocomplete="new-password" minlength="8" maxlength="72" required>
+              <span class="hint">8 to 72 characters.</span></div>
+            <div class="field"><label for="pw-new2">Repeat new password</label>
+              <input class="input" id="pw-new2" type="password" autocomplete="new-password" minlength="8" maxlength="72" required></div>
+          </div>
+          <div class="actions"><button class="btn primary" id="pw-save">Update password</button></div>
+        </form>
+      </div>
+    </section>
+
+    <!-- Appearance -->
+    <section class="panel" id="appearance">
+      <h2>Appearance</h2>
+      <p class="lead">Applies to this page in this browser.</p>
+      <div class="card pad"><div class="seg" id="theme-seg" role="group" aria-label="Theme">
+        <button data-theme="system">System</button><button data-theme="light">Light</button><button data-theme="dark">Dark</button></div></div>
+    </section>
+  </main>
+</div>
+
+<div id="toasts" aria-live="polite"></div>
+<dialog id="confirm"><h3 id="c-title"></h3><p id="c-body"></p>
+  <div class="actions" style="justify-content:flex-end"><button class="btn" id="c-no">Cancel</button><button class="btn danger" id="c-yes">Confirm</button></div></dialog>
+
+<script>
+"use strict";
+const API = "/api/v1";
+const $ = (s, r = document) => r.querySelector(s);
+const TOKEN_KEY = "pai.settings.token", THEME_KEY = "pai.settings.theme";
+const store = {
+  get(k) { try { return sessionStorage.getItem(k) || localStorage.getItem(k); } catch { return null; } },
+  set(k, v, persist) { try { (persist ? localStorage : sessionStorage).setItem(k, v); } catch {} },
+  del(k) { try { sessionStorage.removeItem(k); localStorage.removeItem(k); } catch {} },
+};
+
+/* ---- tiny DOM helper: text only, never HTML from the server ---- */
+function h(tag, attrs, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v == null || v === false) continue;
+    if (k === "class") el.className = v;
+    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else if (v === true) el.setAttribute(k, "");
+    else el.setAttribute(k, v);
+  }
+  for (const k of kids.flat()) if (k != null && k !== false) el.append(k.nodeType ? k : document.createTextNode(String(k)));
+  return el;
+}
+const ICON = {
+  user: '<circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-6 8-6s8 2 8 6"/>',
+  device: '<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/>',
+  phone: '<rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/>',
+  plug: '<path d="M9 2v6M15 2v6M7 8h10v4a5 5 0 0 1-10 0V8zM12 17v5"/>',
+  clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+  lock: '<rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>',
+  sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5 19 19M5 19l1.5-1.5M17.5 6.5 19 5"/>',
+};
+function icon(name) {
+  const s = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  s.setAttribute("viewBox", "0 0 24 24"); s.setAttribute("fill", "none"); s.setAttribute("stroke", "currentColor");
+  s.setAttribute("stroke-width", "2"); s.setAttribute("stroke-linecap", "round"); s.setAttribute("stroke-linejoin", "round");
+  s.innerHTML = ICON[name];           // constant strings above, never server data
+  return s;
+}
+
+/* ---- API ---- */
+class ApiError extends Error { constructor(status, message) { super(message); this.status = status; } }
+function errText(body) {
+  const d = body && body.detail;
+  if (typeof d === "string") return d;
+  if (d && d.message) return d.message;
+  if (Array.isArray(d) && d.length) return d.map(x => (x.msg || "").replace(/^Value error, /, "")).filter(Boolean).join(". ");
+  return "Something went wrong.";
+}
+async function api(path, opts = {}) {
+  const token = store.get(TOKEN_KEY);
+  let res;
+  try {
+    res = await fetch(API + path, {
+      method: opts.method || "GET",
+      headers: { "Content-Type": "application/json", ...(token ? { Authorization: "Bearer " + token } : {}) },
+      body: opts.body ? JSON.stringify(opts.body) : undefined,
+    });
+  } catch { throw new ApiError(0, "Can't reach the server. Check your connection."); }
+  if (res.status === 401 && token) { signOut(true); throw new ApiError(401, "Your session ended. Please sign in again."); }
+  let data = null; try { data = await res.json(); } catch {}
+  if (!res.ok) throw new ApiError(res.status, errText(data));
+  return data;
+}
+
+/* ---- UI helpers ---- */
+function toast(msg, bad) {
+  const t = h("div", { class: "toast" + (bad ? " bad" : ""), role: bad ? "alert" : "status" }, msg);
+  $("#toasts").append(t); setTimeout(() => t.remove(), bad ? 6000 : 3200);
+}
+function confirmDialog(title, body, yes) {
+  return new Promise(resolve => {
+    const d = $("#confirm"); $("#c-title").textContent = title; $("#c-body").textContent = body; $("#c-yes").textContent = yes || "Confirm";
+    const done = v => { d.close(); resolve(v); };
+    $("#c-yes").onclick = () => done(true); $("#c-no").onclick = () => done(false); d.oncancel = () => resolve(false);
+    d.showModal();
+  });
+}
+const initials = s => (s || "?").trim().split(/[\s@._-]+/).filter(Boolean).slice(0, 2).map(x => x[0].toUpperCase()).join("") || "?";
+function ago(iso) {
+  if (!iso) return "never";
+  const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
+  if (s < 45) return "just now"; if (s < 3600) return Math.round(s / 60) + " min ago";
+  if (s < 86400) return Math.round(s / 3600) + " h ago"; if (s < 86400 * 30) return Math.round(s / 86400) + " d ago";
+  return new Date(iso).toLocaleDateString();
+}
+const skeleton = n => Array.from({ length: n }, () => h("div", { class: "skeleton" }));
+function empty(title, body) { return h("div", { class: "empty" }, h("b", {}, title), body); }
+function setBusy(btn, busy, label) { btn.disabled = busy; if (label) btn.dataset.label = btn.dataset.label || btn.textContent; btn.textContent = busy ? label : (btn.dataset.label || btn.textContent); }
+function sw(on, label, onchange) {
+  const b = h("button", { class: "switch", role: "switch", "aria-checked": String(!!on), "aria-label": label, type: "button" });
+  b.addEventListener("click", async () => {
+    const next = b.getAttribute("aria-checked") !== "true";
+    b.disabled = true; b.setAttribute("aria-checked", String(next));
+    try { await onchange(next); }
+    catch (e) { b.setAttribute("aria-checked", String(!next)); toast(e.message, true); }
+    finally { b.disabled = false; }
+  });
+  return b;
+}
+
+/* ---- sections / nav ---- */
+const SECTIONS = [["profile", "Profile", "user"], ["devices", "Devices", "device"], ["plugins", "Plugins", "plug"],
+  ["activity", "Activity", "clock"], ["security", "Security", "lock"], ["appearance", "Appearance", "sun"]];
+function buildNav() {
+  const nav = $("#nav"); nav.replaceChildren();
+  for (const [id, label, ic] of SECTIONS) {
+    nav.append(h("a", { href: "#" + id, "data-id": id, onclick: e => { e.preventDefault(); document.getElementById(id).scrollIntoView({ behavior: "smooth" }); history.replaceState(null, "", "#" + id); } }, icon(ic), h("span", {}, label)));
+  }
+  const io = new IntersectionObserver(es => {
+    for (const e of es) if (e.isIntersecting) for (const a of nav.children) a.setAttribute("aria-current", String(a.dataset.id === e.target.id));
+  }, { rootMargin: "-20% 0px -70% 0px" });
+  SECTIONS.forEach(([id]) => io.observe(document.getElementById(id)));
+}
+
+/* ---- profile ---- */
+let profile = null;
+const LANGS = [["", "Default"], ["en", "English"], ["en-IN", "English (India)"], ["hi", "हिन्दी"], ["kn", "ಕನ್ನಡ"], ["ta", "தமிழ்"], ["te", "తెలుగు"],
+  ["es", "Español"], ["fr", "Français"], ["de", "Deutsch"], ["pt", "Português"], ["ja", "日本語"], ["zh", "中文"]];
+function fillSelects() {
+  const tzs = (Intl.supportedValuesOf ? Intl.supportedValuesOf("timeZone") : ["UTC"]);
+  const browser = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const tz = $("#p-tz"); tz.replaceChildren(h("option", { value: "" }, "Not set" + (browser ? ` (this browser: ${browser})` : "")));
+  for (const z of tzs) tz.append(h("option", { value: z }, z.replace(/_/g, " ")));
+  const lc = $("#p-locale"); lc.replaceChildren(...LANGS.map(([v, l]) => h("option", { value: v }, l)));
+}
+function renderProfile(p) {
+  profile = p;
+  const name = p.display_name || p.email.split("@")[0];
+  $("#p-name").value = p.display_name || ""; $("#p-email").value = p.email;
+  const tz = $("#p-tz"); if (p.timezone && ![...tz.options].some(o => o.value === p.timezone)) tz.append(h("option", { value: p.timezone }, p.timezone));
+  tz.value = p.timezone || "";
+  const lc = $("#p-locale"); if (p.locale && ![...lc.options].some(o => o.value === p.locale)) lc.append(h("option", { value: p.locale }, p.locale));
+  lc.value = p.locale || "";
+  $("#p-avatar").textContent = $("#side-avatar").textContent = initials(name);
+  $("#p-title").textContent = $("#side-name").textContent = name; $("#side-email").textContent = p.email;
+  $("#p-since").textContent = p.created_at ? "Member since " + new Date(p.created_at).toLocaleDateString(undefined, { year: "numeric", month: "long" }) : "";
+  $("#p-admin").hidden = !p.is_admin; syncDirty();
+}
+function dirty() { return profile && ($("#p-name").value.trim() !== (profile.display_name || "") || $("#p-tz").value !== (profile.timezone || "") || $("#p-locale").value !== (profile.locale || "")); }
+function syncDirty() { const d = dirty(); $("#p-save").disabled = !d; $("#p-reset").hidden = !d; }
+function wireProfile() {
+  ["#p-name", "#p-tz", "#p-locale"].forEach(s => $(s).addEventListener("input", syncDirty));
+  $("#p-reset").addEventListener("click", () => renderProfile(profile));
+  $("#profile-form").addEventListener("submit", async e => {
+    e.preventDefault(); const b = $("#p-save"); setBusy(b, true, "Saving…");
+    try {
+      renderProfile(await api("/account/profile", { method: "PATCH", body: { display_name: $("#p-name").value.trim(), timezone: $("#p-tz").value, locale: $("#p-locale").value } }));
+      toast("Profile saved");
+    } catch (err) { toast(err.message, true); } finally { setBusy(b, false); syncDirty(); }
+  });
+}
+
+/* ---- devices ---- */
+let deviceNames = {};
+const PLATFORM = { android: "Android", ios: "iOS", linux: "Linux", macos: "macOS", windows: "Windows", web: "Web" };
+async function loadDevices() {
+  const box = $("#devices-list"); box.replaceChildren(...skeleton(2));
+  try {
+    const { devices } = await api("/account/devices");
+    deviceNames = Object.fromEntries(devices.map(d => [d.id, d.name || "Unnamed device"]));
+    if (!devices.length) { box.replaceChildren(h("div", { class: "card" }, empty("No devices yet", "Sign in from the PAI app or run the device agent to add one."))); return; }
+    box.replaceChildren(...devices.map(deviceCard));
+  } catch (e) { box.replaceChildren(h("div", { class: "banner bad" }, e.message)); }
+}
+function deviceCard(d) {
+  const mobile = ["android", "ios"].includes(d.platform);
+  const setting = (key, title, desc) => h("div", { class: "setting" },
+    h("div", { class: "grow" }, h("div", { class: "t" }, title), h("div", { class: "d" }, desc)),
+    sw(d[key], `${title} on ${d.name}`, async v => {
+      const r = await api(`/devices/${encodeURIComponent(d.id)}/remote-access`, { method: "PUT", body: { [key]: v } });
+      d[key] = r[key]; toast(`${title}: ${v ? "on" : "off"} for ${d.name}`);
+    }));
+  const installedBox = h("div", { class: "installed", hidden: true });
+  const toggleInstalled = h("button", { class: "btn sm", type: "button" }, "Installed plugins");
+  toggleInstalled.addEventListener("click", async () => {
+    if (!installedBox.hidden) { installedBox.hidden = true; return; }
+    installedBox.hidden = false; installedBox.replaceChildren(h("div", { class: "meta" }, "Loading…"));
+    try {
+      const { plugins } = await api(`/plugins/device/${encodeURIComponent(d.id)}/installed`);
+      const items = plugins.filter(p => p.is_installed);
+      installedBox.replaceChildren(...(items.length ? items.map(p => h("div", { class: "it" }, h("b", {}, p.plugin_id), h("span", { class: "meta" }, "v" + (p.version || "?")),
+        h("span", { class: "chip " + (p.enabled_on_device ? "ok" : "") }, p.enabled_on_device ? "enabled" : "disabled"))) : [h("div", { class: "meta" }, "Nothing installed on this device.")]));
+    } catch (e) { installedBox.replaceChildren(h("div", { class: "meta" }, e.message)); }
+  });
+  const remove = h("button", { class: "btn sm danger", type: "button" }, "Remove device");
+  remove.addEventListener("click", async () => {
+    if (!await confirmDialog(`Remove ${d.name}?`, "It will be disconnected and forgotten. You can add it again by signing in from it.", "Remove")) return;
+    try { await api(`/devices/${encodeURIComponent(d.id)}`, { method: "DELETE" }); toast("Device removed"); loadDevices(); loadActivity(); }
+    catch (e) { toast(e.message, true); }
+  });
+  const foot = [toggleInstalled];
+  if (d.connected) {
+    const dc = h("button", { class: "btn sm", type: "button" }, "Disconnect");
+    dc.addEventListener("click", async () => { try { await api(`/devices/${encodeURIComponent(d.id)}/disconnect`, { method: "POST" }); toast("Disconnected"); loadDevices(); } catch (e) { toast(e.message, true); } });
+    foot.push(dc);
+  }
+  foot.push(h("span", { class: "grow" }), remove);
+  return h("div", { class: "card" },
+    h("div", { class: "device-head" },
+      h("div", { class: "device-icon" }, icon(mobile ? "phone" : "device")),
+      h("div", { class: "grow" },
+        h("div", { class: "device-name" }, d.name || "Unnamed device",
+          h("span", { class: "chip " + (d.connected ? "ok" : "") }, h("span", { class: "dot " + (d.connected ? "on" : "") }), d.connected ? "Online" : "Offline")),
+        h("div", { class: "meta" }, [PLATFORM[d.platform] || d.platform, d.os_version, d.app_version && "app " + d.app_version, "seen " + ago(d.last_seen)].filter(Boolean).join(" · ")))),
+    h("div", { class: "device-body" },
+      setting("allow_remote_install", "Allow remote plugin install", "Let your other devices (and the web) install, update and remove plugins on this device."),
+      setting("allow_remote_invoke", "Allow remote plugin use", "Let your other devices, schedules and agents run plugins on this device, like taking a photo or opening a file.")),
+    h("div", { class: "device-foot" }, ...foot),
+    h("div", { style: "padding:0 22px" }, installedBox));
+}
+
+/* ---- plugins ---- */
+let allPlugins = [];
+async function loadPlugins() {
+  const box = $("#plugins-list"); box.replaceChildren(...skeleton(2));
+  try { allPlugins = (await api("/account/plugins")).plugins; renderPlugins(); }
+  catch (e) { box.replaceChildren(h("div", { class: "banner bad" }, e.message)); }
+}
+function renderPlugins() {
+  const q = $("#plugin-search").value.trim().toLowerCase();
+  const list = allPlugins.filter(p => !q || (p.name + " " + p.id + " " + p.description).toLowerCase().includes(q));
+  const box = $("#plugins-list");
+  if (!list.length) { box.replaceChildren(empty(q ? "No match" : "No plugins available", q ? "Try another search." : "")); return; }
+  box.replaceChildren(...list.map(p => h("div", { class: "list-item" },
+    h("div", { class: "grow" },
+      h("div", { style: "font-weight:650" }, p.name, " ", h("span", { class: "meta" }, "v" + p.version)),
+      h("div", { class: "meta" }, p.description || p.id),
+      h("div", { style: "margin-top:6px;display:flex;gap:6px;flex-wrap:wrap" }, ...p.platforms.map(x => h("span", { class: "chip" }, PLATFORM[x] || x)),
+        p.requires_confirmation && h("span", { class: "chip warn" }, "asks before acting"))),
+    sw(p.enabled, `${p.name} (${p.id})`, async v => {
+      await api(`/plugins/${encodeURIComponent(p.id)}/${v ? "enable" : "disable"}`, { method: "POST", body: {} });
+      p.enabled = v; toast(`${p.name} ${v ? "enabled" : "disabled"}`);
+    }))));
+}
+
+/* ---- activity ---- */
+const STATUS = { requested: ["Requested", ""], delivered: ["Sent to device", "accent"], downloading: ["Downloading", "accent"], verifying: ["Verifying", "accent"],
+  installing: ["Installing", "accent"], awaiting_permission: ["Needs permission", "warn"], succeeded: ["Done", "ok"], failed: ["Failed", "bad"] };
+async function loadActivity() {
+  const box = $("#activity-list"); box.replaceChildren(...skeleton(1));
+  try {
+    const { operations } = await api("/account/activity?limit=30");
+    if (!operations.length) { box.replaceChildren(empty("Nothing yet", "Installs and removals you request will show up here.")); return; }
+    box.replaceChildren(...operations.map(o => {
+      const [label, cls] = STATUS[o.status] || [o.status, ""];
+      return h("div", { class: "list-item" },
+        h("div", { class: "grow" },
+          h("div", { style: "font-weight:600" }, (o.kind === "uninstall" ? "Remove " : "Install ") + o.plugin_id + (o.version ? " v" + o.version : ""), " on ", deviceNames[o.device_id] || "a device"),
+          h("div", { class: "meta" }, ago(o.updated_at || o.created_at)),
+          o.error && h("div", { class: "op-err" }, o.error.message, o.error.hint && h("i", {}, " " + o.error.hint))),
+        h("span", { class: "chip " + cls }, label));
+    }));
+  } catch (e) { box.replaceChildren(h("div", { class: "banner bad" }, e.message)); }
+}
+
+/* ---- security ---- */
+function wirePassword() {
+  $("#pw-form").addEventListener("submit", async e => {
+    e.preventDefault(); const err = $("#pw-error"); err.hidden = true;
+    if ($("#pw-new").value !== $("#pw-new2").value) { err.textContent = "The new passwords don't match."; err.hidden = false; return; }
+    const b = $("#pw-save"); setBusy(b, true, "Updating…");
+    try { await api("/account/password", { method: "POST", body: { current_password: $("#pw-cur").value, new_password: $("#pw-new").value } });
+      $("#pw-form").reset(); toast("Password updated"); }
+    catch (x) { err.textContent = x.message; err.hidden = false; } finally { setBusy(b, false); }
+  });
+}
+
+/* ---- appearance ---- */
+function applyTheme(t) {
+  if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; else delete document.documentElement.dataset.theme;
+  for (const b of $("#theme-seg").children) b.setAttribute("aria-pressed", String(b.dataset.theme === (t || "system")));
+}
+function wireTheme() {
+  const saved = (() => { try { return localStorage.getItem(THEME_KEY); } catch { return null; } })() || "system";
+  applyTheme(saved);
+  for (const b of $("#theme-seg").children) b.addEventListener("click", () => { try { localStorage.setItem(THEME_KEY, b.dataset.theme); } catch {} applyTheme(b.dataset.theme); });
+}
+
+/* ---- session ---- */
+function showAuth(msg) {
+  $("#app").hidden = true; $("#auth").hidden = false;
+  const e = $("#login-error"); e.hidden = !msg; e.textContent = msg || "";
+}
+function signOut(expired) { store.del(TOKEN_KEY); profile = null; showAuth(expired ? "Your session ended. Please sign in again." : ""); }
+async function start() {
+  $("#auth").hidden = true; $("#app").hidden = false;
+  try {
+    renderProfile(await api("/account/profile"));
+  } catch (e) { if (e.status !== 401) { $("#global-error").textContent = e.message; $("#global-error").hidden = false; } return; }
+  await loadDevices(); loadPlugins(); loadActivity();
+}
+$("#login-form").addEventListener("submit", async e => {
+  e.preventDefault(); const b = $("#login-btn"); setBusy(b, true, "Signing in…"); $("#login-error").hidden = true;
+  try {
+    const r = await fetch(API + "/auth/login", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: $("#email").value.trim(), password: $("#password").value }) });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(errText(data));
+    store.set(TOKEN_KEY, data.access_token); $("#password").value = ""; await start();
+  } catch (x) { showAuth(x.message === "Failed to fetch" ? "Can't reach the server." : x.message); }
+  finally { setBusy(b, false); }
+});
+$("#signout").addEventListener("click", () => signOut(false));
+$("#plugin-search").addEventListener("input", renderPlugins);
+document.addEventListener("visibilitychange", () => { if (!document.hidden && store.get(TOKEN_KEY) && !$("#app").hidden) { loadDevices(); loadActivity(); } });
+
+fillSelects(); buildNav(); wireProfile(); wirePassword(); wireTheme();
+if (store.get(TOKEN_KEY)) start(); else showAuth();
+</script>
+</body>
+</html>

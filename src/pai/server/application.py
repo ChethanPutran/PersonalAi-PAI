@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pai.api.middleware.auth import AuthMiddleware
 from pai.api.middleware.logging import LoggingMiddleware
+from pai.api.routes import account as account_routes
 from pai.api.routes import agents as agents_routes
 from pai.api.routes import auth, chat, devices, plugins, system, tasks
 from pai.api.routes import consents as consents_routes
@@ -56,6 +57,7 @@ def create_app(config: Config, context: PAIAppContext) -> FastAPI:
 
     # Routers
     app.include_router(auth.router, prefix=config.api.prefix)
+    app.include_router(account_routes.router, prefix=config.api.prefix)
     app.include_router(devices.router, prefix=config.api.prefix)
     app.include_router(plugins.router, prefix=config.api.prefix)
     app.include_router(tasks.router, prefix=config.api.prefix)
@@ -72,6 +74,13 @@ def create_app(config: Config, context: PAIAppContext) -> FastAPI:
     app.include_router(observability_routes.router, prefix=config.api.prefix)
     app.include_router(schedules_router, prefix=config.api.prefix)
     app.include_router(push_tokens_router, prefix=config.api.prefix)
+
+    # Short link to the user's Settings page (a static shell; its API calls need a login).
+    from fastapi.responses import RedirectResponse
+
+    @app.get("/settings", include_in_schema=False)
+    async def _settings_alias() -> RedirectResponse:
+        return RedirectResponse(f"{config.api.prefix}/account/settings")
 
     return app
 

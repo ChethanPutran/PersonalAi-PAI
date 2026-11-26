@@ -147,7 +147,7 @@ async def create_schedule(
     row = ScheduleModel(
         user_id=user_id, title=payload.title, body=payload.body, kind=payload.kind,
         cron=payload.cron, interval_seconds=payload.interval_seconds, timezone=payload.timezone,
-        catch_up=payload.catch_up, enabled=True)
+        catch_up=payload.catch_up, misfire_grace_seconds=payload.misfire_grace_seconds, enabled=True)
     _apply_validated(row, validated)
 
     scheduler = context.orchestrator.scheduler_service
@@ -191,6 +191,8 @@ async def update_schedule(
     for field in ("title", "body", "kind", "cron", "interval_seconds", "timezone", "catch_up"):
         if field in sent:
             setattr(row, field, sent[field])
+    if "misfire_grace_seconds" in payload.model_fields_set:      # an explicit null means "no limit"
+        row.misfire_grace_seconds = payload.misfire_grace_seconds
     if "fire_at" in sent and not touches_action:
         row.fire_at = sent["fire_at"]
     if payload.enabled is not None:

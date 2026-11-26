@@ -82,6 +82,8 @@ def build_schedule_capabilities(
                         if capability == REMINDER_CAPABILITY
                         else dict(plugin_params)),
             catch_up=params.get("catch_up", "once"),
+            misfire_grace_seconds=(int(params["misfire_grace_seconds"])
+                                   if params.get("misfire_grace_seconds") is not None else None),
             enabled=True,
             fire_at=fire_at,
             interval_seconds=int(params["interval_seconds"]) if kind == "interval" and params.get("interval_seconds") else None,

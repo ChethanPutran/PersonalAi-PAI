@@ -182,7 +182,7 @@ export async function mount(container) {
     const gb = goalBars(traces);
     const perGoal = h('div', { class: 'card' }, h('h3', { class: 'card-title' }, 'Cost and tokens per goal'),
       h('p', { class: 'faint' }, 'Each bar is one goal (trace) with every LLM call made for it — planner, chat, agents and tool-triggered calls. Hover for the goal; open Traces for the call-by-call view.'),
-      gb.ids.length ? h('div', { class: 'grid two' },
+      gb.ids.length ? h('div', { class: 'grid side' },
         h('div', {}, h('div', { class: 'faint' }, 'Cost'), barChart({ labels: gb.labels, titles: gb.titles, ariaLabel: 'Cost per goal', fmt: fmtCost, series: [{ name: 'Cost', values: gb.cost, cls: 'ch-s3' }] })),
         h('div', {}, h('div', { class: 'faint' }, 'Tokens'), barChart({ labels: gb.labels, titles: gb.titles, ariaLabel: 'Tokens per goal', fmt: fmtTokens, series: [{ name: 'Tokens', values: gb.tokens, cls: 'ch-s0' }] })))
         : h('div', { class: 'empty-inline' }, 'No goals with LLM usage yet'));

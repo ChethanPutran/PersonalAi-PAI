@@ -113,7 +113,12 @@ class UserModel(Base):
     is_admin: Mapped[bool] = mapped_column(
         Boolean, default=False, nullable=False, index=True,
     )
-    
+
+    # Profile (settings page / apps). All optional.
+    display_name: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
+    timezone: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)    # IANA, e.g. "Asia/Kolkata"
+    locale: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)      # e.g. "en", "hi-IN"
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False,
     )
@@ -175,6 +180,14 @@ class DeviceModel(Base):
     metadata_json: Mapped[dict[str, Any]] = mapped_column(
         "metadata", JSON, default=dict, nullable=False,
     )
+
+    # What the OWNER lets their OTHER devices (and scheduled/agent runs) do to this one.
+    # Off by default: a device only accepts remote plugin installs / invocations once its user
+    # turns the matching switch on. Enforced server-side and again on the device.
+    allow_remote_install: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0", nullable=False)
+    allow_remote_invoke: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0", nullable=False)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False,
@@ -305,6 +318,8 @@ class ScheduleModel(Base):
     )
     parameters: Mapped[dict] = mapped_column(JSON, default=dict)
     catch_up: Mapped[str] = mapped_column(String(8), default="once")
+    # How late (seconds) a missed fire may still run. NULL = no limit. See SchedulerService._fire.
+    misfire_grace_seconds: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
     enabled: Mapped[bool] = mapped_column(
         Boolean, default=True, index=True,
@@ -495,3 +510,36 @@ class ConsentGrantModel(Base):
     __table_args__ = (
         Index("ix_consent_lookup", "user_id", "plugin_id", "capability", "device_id"),
     )
+
+
+class PluginOperationModel(Base):
+    """One remote plugin install / uninstall, from request to outcome.
+
+    The row is the single source of truth for "what is happening to plugin P on device D":
+    the device reports progress frames, the server moves ``status`` forward (never back) and
+    pushes every change to the user's connected devices, so no client has to poll.
+    """
+
+    __tablename__ = "plugin_operations"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
+    device_id: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
+    plugin_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    version: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)          # install | uninstall
+    # requested | delivered | downloading | verifying | installing | awaiting_permission
+    #   | succeeded | failed
+    status: Mapped[str] = mapped_column(String(24), default="requested", nullable=False, index=True)
+    requested_by_device: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+
+    error_code: Mapped[Optional[str]] = mapped_column(String(48), nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)   # plain words, for the user
+    error_hint: Mapped[Optional[str]] = mapped_column(Text, nullable=True)      # what to do about it
+    error_detail: Mapped[Optional[str]] = mapped_column(Text, nullable=True)    # raw text, for logs/support
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (Index("ix_plugin_op_target", "device_id", "plugin_id"),)

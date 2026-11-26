@@ -187,6 +187,20 @@ class DeviceRepository(BaseRepository[DeviceModel]):
             span.set_attribute("found", True)
             return True
 
+    async def set_remote_access(
+        self, device_id: str, *, install: Optional[bool] = None, invoke: Optional[bool] = None,
+    ) -> Optional[DeviceModel]:
+        """Set the remote-access switches (``None`` = leave as is). Returns the row, or None."""
+        record = await self.get(device_id)
+        if record is None:
+            return None
+        if install is not None:
+            record.allow_remote_install = bool(install)
+        if invoke is not None:
+            record.allow_remote_invoke = bool(invoke)
+        await self.session.flush()
+        return record
+
     async def touch(self, device_id: str) -> bool:
         """Update last_seen without changing status.
 

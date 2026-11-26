@@ -27,6 +27,8 @@ _PUBLIC_PATHS: set[str] = {
     f"{API_PREFIX}/auth/refresh",
     f"{API_PREFIX}/auth/forgot-password",
     f"{API_PREFIX}/auth/reset-password",
+    "/settings",                                  # alias redirecting to the page below
+    f"{API_PREFIX}/account/settings",             # the Settings page shell (no data; its API calls need a token)
     f"{API_PREFIX}/system/admin",
     f"{API_PREFIX}/system/admin/legacy",
 }

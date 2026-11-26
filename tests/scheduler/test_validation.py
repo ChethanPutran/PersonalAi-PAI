@@ -67,7 +67,7 @@ async def test_a_schedule_cannot_manage_schedules_or_tasks(validator, capability
 
 
 async def test_blocked_by_system_restrictions_is_not_schedulable_and_says_why(validator):
-    msg = (await errors_for(validator, capability="shell.exec", parameters={}))["capability"]
+    msg = (await errors_for(validator, capability="danger.exec", parameters={}))["capability"]
     assert "cannot be scheduled" in msg and "blocked" in msg.lower()
 
 
@@ -149,8 +149,15 @@ async def test_capabilities_catalog(validator):
     assert cat["lights.on"].schedulable and not cat["lights.on"].requires_consent
     assert cat["lights.on"].parameters_schema["required"] == ["level"] and cat["lights.on"].device_ids == [DEV]
     assert cat["camera.snap"].requires_consent and cat["camera.snap"].risk == "high"
-    assert not cat["shell.exec"].schedulable and "blocked" in cat["shell.exec"].blocked_reason.lower()
-    assert cat["shell.exec"].risk == "critical"
+    assert not cat["danger.exec"].schedulable and "blocked" in cat["danger.exec"].blocked_reason.lower()
+    assert cat["danger.exec"].risk == "critical"
     assert not cat["files.read"].schedulable
     assert "schedule.create" not in cat                                         # management caps hidden
     assert cat["server.job"].device_ids == ["server"]
+
+
+async def test_shell_can_never_be_scheduled_it_needs_approval_every_time(validator):
+    """shell.exec is approved per command (once / session). A schedule has nobody to ask."""
+    pre = await validator.preflight(user_id=USER, capability="shell.exec", plugin_id="p1", device_id=DEV,
+                                    executor_id="device_executor", parameters={"command": "ls"})
+    assert pre.blocked and "every time" in pre.blocked_reason

@@ -15,6 +15,10 @@ class AuditEventType(StrEnum):
     EXECUTION_COMPLETED = "execution_completed"
     EXECUTION_FAILED = "execution_failed"
 
+    DEVICE_REMOTE_ACCESS_CHANGED = "device_remote_access_changed"
+    REMOTE_INSTALL_REQUESTED = "remote_install_requested"
+    REMOTE_INSTALL_DENIED = "remote_install_denied"
+
     AUTHENTICATION_SUCCESS = "authentication_success"
     AUTHENTICATION_FAILURE = "authentication_failure"
 

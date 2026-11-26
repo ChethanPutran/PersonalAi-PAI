@@ -24,7 +24,9 @@ from loguru import logger
 from pydantic import BaseModel
 
 from pai.config.models.voice import VoiceConfig
+from pai.observability import get_tracer
 from pai.orchestration.streaming import ReplySink
+from pai.voice import usage as voice_usage
 from pai.voice.audio import pcm_duration_ms
 from pai.voice.chunker import SpeechChunker, speakable
 from pai.voice.models import (
@@ -78,6 +80,7 @@ class _Utterance:
         self.stream = stream
         self.started_in = started_in          # state when the user began (SPEAKING => maybe echo)
         self.barged = False
+        self.started_at = time.time()        # for the STT span in the turn's trace
         self.partials_task: Optional[asyncio.Task] = None
 
 
@@ -266,8 +269,11 @@ class VoiceSession:
         self._spawn(self._finalize(utt), "voice.finalize")
 
     async def _finalize(self, utt: _Utterance) -> None:
+        stt_usage: dict = {}
         try:
-            text = (await utt.stream.finish()).strip()
+            with voice_usage.collect() as used:
+                text = (await utt.stream.finish()).strip()
+            stt_usage = voice_usage.summarize(used)
         except Exception as exc:
             logger.warning("STT finish failed: {}", exc)
             text = ""
@@ -283,6 +289,8 @@ class VoiceSession:
             if self.state == VoiceState.LISTENING:
                 await self._set_state(VoiceState.IDLE)
             return
+        self._trace_span(utt.turn_id, "voice.stt", start=utt.started_at, provider=getattr(self.stt, "name", type(self.stt).__name__),
+                         chars=len(text), **stt_usage)
         await self._emit(TranscriptFinal(turn_id=utt.turn_id, text=text))
         await self._start_turn(text, reason=InterruptReason.NEW_INPUT, turn_id=utt.turn_id)
 
@@ -350,6 +358,13 @@ class VoiceSession:
         if not turn.audio_started and not turn.finished:
             segments.put_nowait(self.config.thinking_filler)
 
+    def _trace_span(self, turn_id: str, name: str, *, start: float, error: Optional[str] = None, **attributes: object) -> None:
+        """Record a voice step (STT / TTS) in the turn's trace (its id is the turn id). Never breaks the call."""
+        try:
+            get_tracer().record_span(turn_id, name, start=start, attributes={"user_id": self.user_id, **attributes}, error=error)
+        except Exception as exc:
+            logger.debug("voice trace span failed: {}", exc)
+
     async def _speak(self, turn: _Turn, segments: "asyncio.Queue[Optional[str]]") -> None:
         started = False
         try:
@@ -360,6 +375,8 @@ class VoiceSession:
                 text = speakable(seg)
                 if not text:
                     continue
+                t0 = time.time(); nbytes = 0; first_ms: Optional[float] = None; err: Optional[str] = None
+                used_cm = voice_usage.collect(); used = used_cm.__enter__()
                 try:
                     # aclosing: cancelling between chunks must still close the upstream stream
                     async with contextlib.aclosing(
@@ -373,12 +390,24 @@ class VoiceSession:
                                 await self._set_state(VoiceState.SPEAKING, turn.turn_id)
                             if text not in turn.spoken:
                                 turn.spoken.append(text)
+                            if first_ms is None:
+                                first_ms = (time.time() - t0) * 1000
+                            nbytes += len(pcm)
                             await self._send_audio(pcm)
                 except asyncio.CancelledError:
+                    err = "interrupted (barge-in or cancel)"
                     raise
                 except Exception as exc:
+                    err = f"{type(exc).__name__}: {exc}"
                     logger.warning("TTS failed for a segment: {}", exc)
                     await self._emit(ErrorEvent(code="tts_failed", message="could not speak part of the reply"))
+                finally:
+                    used_cm.__exit__(None, None, None)
+                    self._trace_span(turn.turn_id, "voice.tts", start=t0, error=err,
+                                     provider=getattr(self.tts, "name", type(self.tts).__name__), chars=len(text),
+                                     audio_ms=round(pcm_duration_ms(nbytes, self.tts.sample_rate)),
+                                     first_audio_ms=None if first_ms is None else round(first_ms),
+                                     **voice_usage.summarize(used))
         finally:
             if started:
                 with contextlib.suppress(Exception):

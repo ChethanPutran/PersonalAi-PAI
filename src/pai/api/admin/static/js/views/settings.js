@@ -5,6 +5,7 @@ import { h, clear } from '../dom.js';
 import { icon } from '../icons.js';
 import { get, post, api } from '../api.js';
 import { btn, busy, toast, confirmDialog, errorState, pageHead, callout, skeletonRows } from '../ui.js';
+import { modelPicker, describe } from '../model_picker.js';
 import { fieldsOf, leaves, effective, defaultFor, isOverridden, parseInput, toInput, showDefault, buildChange, matches, errorsByPath, sameValue, getAt } from '../settings_model.js';
 
 const RISKY = ['security.', 'api.', 'admin.', 'database.', 'redis.'];
@@ -16,6 +17,7 @@ export async function mount(container, ctx) {
   let edits = {}; let resets = new Set(); let clientErrors = {}; let serverErrors = {};
   let section = null; let query = ''; let lastReload = null;
   let suggestions = [];                                            // model ids from models.yaml, offered by the open-enum (model) fields
+  let models = [];                                                 // the full registry rows (price, context, capabilities) behind the model picker
 
   const page = h('div', { class: 'page settings-page' });
   container.append(page);
@@ -33,7 +35,7 @@ export async function mount(container, ctx) {
   async function load() {
     try {
       snap = await get('/system/settings');
-      try { suggestions = ((await get('/system/models')).llm || []).map((m) => m.name); } catch { suggestions = []; }     // optional
+      try { models = (await get('/system/models')).llm || []; suggestions = models.map((m) => m.name); } catch { models = []; suggestions = []; }     // optional
       tree = fieldsOf(snap.schema, snap.secret_paths);
       fields = new Map(tree.flatMap((s) => leaves(s.children)).map((f) => [f.path, f]));
       start = {};
@@ -53,6 +55,37 @@ export async function mount(container, ctx) {
     saveBtn.querySelector('span').textContent = n ? `Save ${n} change${n === 1 ? '' : 's'}` : 'Save changes';
     discardBtn.disabled = n === 0;
     reloadBtn.querySelector('span').textContent = (snap?.pending || []).length ? `Reload system (${snap.pending.length} saved)` : 'Reload system';
+  }
+
+  /** A model id field: type, pick from suggestions (with price/context), or "Browse by cost". */
+  function modelInput({ id, value, options = [], onChange, placeholder = 'type or pick a model id' }) {
+    const listId = `${id}-list`;
+    const byName = new Map(models.map((m) => [m.name, m]));
+    const names = [...new Set([...(options || []).map(String), ...suggestions])];
+    const input = h('input', { class: 'input', id, list: listId, value: value ?? '', autocomplete: 'off', spellcheck: 'false',
+      placeholder, oninput: (e) => onChange(e.target.value) });
+    const datalist = h('datalist', { id: listId }, names.map((n) => h('option', { value: n }, byName.has(n) ? describe(byName.get(n)) : '')));
+    if (!models.length) return h('div', { class: 'combo' }, input, datalist);
+    let picker = null;
+    const toggle = btn('Browse by cost', { ic: 'search', title: 'Compare every model by input / output / total price and context size', onclick: () => {
+      if (picker) { picker.remove(); picker = null; toggle.setAttribute('aria-expanded', 'false'); return; }
+      picker = modelPicker({ models, getCurrent: () => String(input.value), onPick: (name) => { input.value = name; onChange(name); } });
+      wrap.append(picker); toggle.setAttribute('aria-expanded', 'true');
+    } });
+    toggle.setAttribute('aria-expanded', 'false');
+    const wrap = h('div', { class: 'combo-wrap' }, h('div', { class: 'combo' }, input, toggle), datalist);
+    return wrap;
+  }
+
+  /** llm_routes as one model field per role. A blank role is left out, so it uses llm_provider.model. */
+  const ROLES = [['planner', 'Planner (goal decomposition)'], ['chat', 'Chat replies and voice'], ['agent', 'Agents (ReAct)']];
+  function routesControl(id, cur, onValue) {
+    const value = { ...(cur && typeof cur === 'object' ? cur : {}) };
+    const roles = [...ROLES, ...Object.keys(value).filter((k) => !ROLES.some(([r]) => r === k)).map((k) => [k, k])];
+    const set = (role, v) => { const t = String(v).trim(); if (t) value[role] = t; else delete value[role]; onValue({ ...value }); };
+    return h('div', { class: 'routes' }, roles.map(([role, label]) => h('div', { class: 'route-row' },
+      h('label', { class: 'set-desc', for: `${id}-${role}` }, label, h('code', { class: 'set-path' }, role)),
+      modelInput({ id: `${id}-${role}`, value: value[role] || '', onChange: (v) => set(role, v), placeholder: 'blank = keep config.yaml’s value (or the default model)' }))));
   }
 
   // ------------------------------------------------------------------ one field
@@ -80,13 +113,8 @@ export async function mount(container, ctx) {
         orphan ? h('option', { value: String(cur), selected: true }, `${cur} (current)`) : null,
         f.options.map((o) => h('option', { value: String(o), selected: String(o) === String(cur) }, String(o))));
     }
-    if (f.kind === 'combo') {
-      const listId = `${id}-list`;
-      const names = [...new Set([...(f.options || []).map(String), ...suggestions])];
-      return h('div', { class: 'combo' }, h('input', { class: 'input', id, list: listId, value: toInput(f, cur), autocomplete: 'off', spellcheck: 'false',
-        placeholder: 'type or pick a model id', oninput: (e) => onValue(e.target.value) }),
-        h('datalist', { id: listId }, names.map((n) => h('option', { value: n }))));
-    }
+    if (f.kind === 'combo') return modelInput({ id, value: toInput(f, cur), options: f.options, onChange: onValue });
+    if (f.path === 'llm_routes') return routesControl(id, cur, onValue);
     if (f.kind === 'bool') {
       return h('label', { class: 'switch', for: id }, h('input', { type: 'checkbox', id, checked: Boolean(cur), onchange: (e) => onValue(e.target.checked) }), h('span', { class: 'knob' }),
         h('span', { class: 'switch-label' }, Boolean(cur) ? 'on' : 'off'));
@@ -167,7 +195,7 @@ export async function mount(container, ctx) {
     clear(nav);
     for (const s of tree) {
       const { mod, saved } = sectionCounts(s);
-      nav.append(h('button', { class: 'set-nav-item', type: 'button', 'aria-current': String(section === s.key), 'data-section': s.key, onclick: () => { section = s.key; renderBody(); renderNav(); } },
+      nav.append(h('button', { class: 'set-nav-item', type: 'button', 'aria-current': String(section === s.key), 'data-section': s.key, onclick: () => { const switched = section !== s.key; section = s.key; renderBody(); if (switched) scrollParents(content).forEach((n) => { n.scrollTop = 0; }); renderNav(); } },
         h('span', {}, s.label), mod ? h('span', { class: 'badge hot' }, String(mod)) : saved ? h('span', { class: 'badge' }, String(saved)) : null));
     }
   }
@@ -182,7 +210,17 @@ export async function mount(container, ctx) {
     }
     return out;
   }
+  function scrollParents(el) {                                     // every scrollable ancestor: rebuilding the form must not throw the user back to the top
+    const out = [];
+    for (let n = el.parentElement; n; n = n.parentElement) if (n.scrollHeight > n.clientHeight && /auto|scroll/.test(getComputedStyle(n).overflowY)) out.push(n);
+    return out;
+  }
   function renderBody() {
+    const saved = scrollParents(content).map((n) => [n, n.scrollTop]);
+    renderBodyNow();
+    for (const [n, top] of saved) n.scrollTop = top;
+  }
+  function renderBodyNow() {
     rows.clear(); clear(content);
     if (query) {                                                   // search spans every section
       const hits = tree.flatMap((s) => renderGroup(s.children, 0));

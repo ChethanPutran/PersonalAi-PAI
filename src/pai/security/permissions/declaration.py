@@ -54,49 +54,56 @@ def permissions_from_manifest_strings(strings: list[str]) -> frozenset[Permissio
 
 
 
-_system_permission_cache: "PermissionSet | None" = None
+_system_permission_cache: "dict[tuple[str, str | None], PermissionSet]" = {}
 
 
-def load_system_permissions(config_path: str | None = None) -> "PermissionSet":
+def load_system_permissions(config_path: str | None = None, plugin: str | None = None) -> "PermissionSet":
     from .registry import PermissionSet
-    """Load user-granted permissions from ~/.config/pai/permissions.json.
+    """Load what the user granted ONE plugin from ~/.config/pai/permissions.json.
 
-    The file format is: {"camera": "allow", "shell": "allow", ...}
-    Only entries with value "allow" are included.
+    The device agent stores every decision per plugin: {"pai.camera/camera": "allow", ...} (key =
+    "<native module>/<permission>"). Only "allow" entries of the named ``plugin`` are included, so one
+    plugin's grant is never another's. Without a plugin, or for the flat entries older releases wrote
+    ("camera": "allow", shared by everyone), nothing is granted: fail closed.
 
-    Result is cached for the process lifetime.
+    Result is cached per (file, plugin) for the process lifetime.
     """
-    global _system_permission_cache
-    if _system_permission_cache is not None:
-        return _system_permission_cache
-
     import json
     import os
 
     path = config_path or os.path.expanduser("~/.config/pai/permissions.json")
+    key = (path, plugin)
+    cached = _system_permission_cache.get(key)
+    if cached is not None:
+        return cached
+    if not plugin:
+        _system_permission_cache[key] = PermissionSet()
+        return _system_permission_cache[key]
     try:
         with open(path) as f:
             data = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         # No config — grant nothing
-        _system_permission_cache = PermissionSet()
-        return _system_permission_cache
+        _system_permission_cache[key] = PermissionSet()
+        return _system_permission_cache[key]
 
+    prefix = f"{plugin}/"
     granted: set[PermissionResource] = set()
-    for key, value in data.items():
+    for name, value in data.items():
+        if not str(name).startswith(prefix):
+            continue                                   # another plugin's decision, or a legacy shared one
         if str(value).lower() in ("allow", "true", "yes", "1"):
-            perm = MANIFEST_PERMISSION_MAP.get(key.lower())
+            perm = MANIFEST_PERMISSION_MAP.get(str(name)[len(prefix):].lower())
             if perm is not None:
                 granted.add(perm)
 
-    _system_permission_cache = PermissionSet(permissions=frozenset(granted))
-    return _system_permission_cache
+    _system_permission_cache[key] = PermissionSet(permissions=frozenset(granted))
+    return _system_permission_cache[key]
 
 
 def clear_system_permission_cache() -> None:
     """Force a reload on next call to load_system_permissions()."""
-    global _system_permission_cache
-    _system_permission_cache = None
+    _system_permission_cache.clear()
     
 @dataclass(frozen=True)
 class PermissionDeclaration:

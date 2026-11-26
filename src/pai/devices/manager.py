@@ -161,6 +161,8 @@ class DeviceManager(Manager):
                             r.architecture) if r.architecture else DeviceArchitecture.UNKNOWN,
                         hostname=r.hostname or "",
                         capabilities=r.capabilities or [],
+                        allow_remote_install=bool(r.allow_remote_install),
+                        allow_remote_invoke=bool(r.allow_remote_invoke),
                     )
                     await self.registry.register(info)
                     loaded.append({
@@ -353,6 +355,41 @@ class DeviceManager(Manager):
                 capabilities=getattr(device, "capabilities", []) or [],
             )
         await self._with_session(_do)
+
+    async def set_remote_access(
+        self, device_id: str, *, install: Optional[bool] = None, invoke: Optional[bool] = None,
+    ) -> Optional[DeviceInfo]:
+        """Change what other devices may do to ``device_id``. The caller (the API route) has
+        already checked that the user owns it. Persisted first, then mirrored in memory; the
+        router cache is dropped so the change takes effect on the next request."""
+        async def _do(session: AsyncSession):
+            return await DeviceRepository(session).set_remote_access(
+                device_id, install=install, invoke=invoke)
+
+        record = await self._with_session(_do)
+        if record is None:
+            return None
+        device = await self.registry.get(device_id)
+        if device is not None:
+            device.allow_remote_install = bool(record.allow_remote_install)
+            device.allow_remote_invoke = bool(record.allow_remote_invoke)
+        await self._publish(EventType.DEVICE_REMOTE_ACCESS_CHANGED, {
+            "device_id": device_id, "user_id": record.user_id,
+            "allow_remote_install": bool(record.allow_remote_install),
+            "allow_remote_invoke": bool(record.allow_remote_invoke),
+        })
+        self._invalidate_router(record.user_id)
+        # Tell the device itself right away, so its own enforcement never lags behind the owner.
+        try:
+            if await self.is_connected(device_id):
+                await self.send(device_id, {
+                    "type": "device.remote_access",
+                    "remote_access": {"install": bool(record.allow_remote_install),
+                                      "invoke": bool(record.allow_remote_invoke)},
+                })
+        except Exception as exc:
+            logger.debug("remote-access push to {} failed: {}", device_id, exc)
+        return device
 
     async def unregister(self, device_id: str) -> bool:
         tracer = get_tracer()

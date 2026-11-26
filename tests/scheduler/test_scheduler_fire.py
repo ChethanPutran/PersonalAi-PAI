@@ -28,7 +28,7 @@ async def test_fire_creates_a_scheduled_task_and_submits_it(task_manager):
     advanced, submitted = [], []
 
     async def resolve(sched): return "self"
-    async def advance(sched, repo, now): advanced.append(sched.id)
+    async def advance(sched, repo, now, due_at=None): advanced.append(sched.id)
     real_submit = task_manager.submit
     async def spy_submit(task_id, **kw):
         submitted.append(task_id)
@@ -39,7 +39,8 @@ async def test_fire_creates_a_scheduled_task_and_submits_it(task_manager):
     sched = SimpleNamespace(
         id="862e263a", title="Call Mom", body="at noon", capability="system.notifications.show",
         kind="one_shot", target_device_id=None, last_run_status=None,
-        user_id="u1", parameters={"repeat": "one_shot"})
+        user_id="u1", parameters={"repeat": "one_shot"},
+        catch_up="once", misfire_grace_seconds=None, next_fire_at=None)
     now = datetime(2026, 11, 23, 12, 0, tzinfo=timezone.utc)
     await svc._fire(sched, repo=repo, now=now)
     await asyncio.sleep(0.2)                                   # let the background run settle

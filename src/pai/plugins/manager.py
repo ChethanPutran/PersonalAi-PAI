@@ -6,6 +6,7 @@ from typing import Any, Callable, Dict, List, Optional, TypeVar
 from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from pai.plugins.operations import PluginOperations
 from pai.event_bus.bus import EventBus
 from pai.event_bus.events import EventType
 from pai.observability.tracer import get_tracer
@@ -37,6 +38,8 @@ class PluginManager(Manager):
         self.registry = PluginRegistry(plugin_registry_dir,artifact_store,packager)
         self._catalog: Dict[str, PluginInfo] = {}
         self._capability_router: Any = None
+        # Tracked remote install/uninstall operations; attached once the device manager exists.
+        self.operations: Optional[PluginOperations] = None
 
         if isinstance(plugin_registry_dir, str):
             plugin_registry_dir = Path(plugin_registry_dir)
@@ -50,7 +53,15 @@ class PluginManager(Manager):
 
             # Initialize the plugin registry
             await self.registry.initialize()
+            if self.operations is not None:
+                await self.operations.start()
             self._emit(EventType.PLUGIN_MANAGER_INITIALIZED,{})
+
+    def attach_operations(self, device_manager: Any) -> PluginOperations:
+        """Create the operation tracker (needs the device manager to push updates)."""
+        self.operations = PluginOperations(
+            sessions=self._sessions, device_manager=device_manager, event_bus=self._event_bus)
+        return self.operations
 
     async def get_plugin_index_for_device(
         self, device_platform: str, device_architecture: str, device_type: Optional[str] = None,
@@ -86,6 +97,8 @@ class PluginManager(Manager):
             self._capability_router.invalidate(user_id)
 
     async def shutdown(self) -> None:
+        if self.operations is not None:
+            await self.operations.stop()
         self._initialized = False
 
     # ------------------------------------------------------------------

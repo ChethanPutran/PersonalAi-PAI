@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from loguru import logger
 
@@ -212,6 +212,15 @@ class DeviceExecutor(BaseExecutor):
         )
         return False
 
+    @staticmethod
+    def _source_device_of(task: Task) -> Optional[str]:
+        """The device the request came from, as recorded on the task (trusted server data)."""
+        auth = getattr(task, "authorization", None)
+        src = getattr(auth, "source_device_id", None)
+        if not src:
+            src = (getattr(task, "metadata", None) or {}).get("source_device_id")
+        return src or None
+
     async def execute_task(self, task: Task) -> TaskResult:
         capability = task.capability
         device_id = task.device_id
@@ -253,6 +262,7 @@ class DeviceExecutor(BaseExecutor):
                 parameters=params,
                 idempotency_key=task.idempotency_key or task.id,
                 attempt=task.retry_count + task.recovery_count,
+                source_device_id=self._source_device_of(task),
             )
 
             timeout = get_task_timeout(task)

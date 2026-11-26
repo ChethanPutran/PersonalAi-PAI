@@ -279,6 +279,11 @@ class TraceStore:
             )
             self._summaries[event.trace_id] = s
 
+        if event.kind == "trace.start" and s.name == s.trace_id:
+            s.name = event.name                       # voice STT spans are recorded before the trace itself starts
+        if event.kind == "trace.start" and not s.mode:
+            s.mode = str(event.attributes.get("mode") or "")
+            s.goal = str(event.attributes.get("goal") or "")[:200]
         s.event_count += 1
         if event.error:
             s.error_count += 1
@@ -286,6 +291,10 @@ class TraceStore:
             s.has_llm = True
         if event.kind == "tool.call":
             s.has_tool = True
+        if event.kind == "span.end" and event.name in ("voice.stt", "voice.tts"):
+            cost = event.attributes.get("cost_usd")          # speech is billed per second / character, not per token
+            if isinstance(cost, (int, float)):
+                s.cost_usd = round(s.cost_usd + float(cost), 8)
         if event.kind == "llm.response":
             tokens, cost = event.attributes.get("total_tokens"), event.attributes.get("cost_usd")
             if isinstance(tokens, (int, float)):

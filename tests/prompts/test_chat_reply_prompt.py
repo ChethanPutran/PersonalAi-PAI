@@ -97,3 +97,14 @@ def test_clarify_section_only_for_clarify_intent():
     out = _render("text", "clarify", "Which camera?", "front, back")
     assert "## CLARIFICATION" in out and "<<<BEGIN_CLARIFICATION>>>" in out
     assert "Which camera?" in out and "front, back" in out
+
+
+def test_failed_tool_results_must_be_reported_not_summarized_as_done():
+    registry = _registry()
+    kw = dict(goal="take a photo", capability_block="", memory_block="", history_block="",
+              tone="friendly", is_retry=False, modality="text", intent="reply",
+              clarify_question="", clarify_options="")
+    out = registry.get("chat.reply").render(prior_results_block='{"success": false, "user_message": "x"}', **kw)
+    assert "REPORTING PROBLEMS" in out and '"user_message"' in out and '"hint"' in out
+    assert "did NOT happen" in out
+    assert "REPORTING PROBLEMS" not in registry.get("chat.reply").render(prior_results_block="", **kw)   # chat-only turn

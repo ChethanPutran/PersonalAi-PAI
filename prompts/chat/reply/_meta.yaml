@@ -1,5 +1,5 @@
 id: chat.reply
-current: v1.2.1
+current: v1.3.0
 description: >
   Conversational reply. Now uses spotlighted boundaries around all
   user-controlled blocks so injection attempts in memory, history, or
@@ -60,3 +60,11 @@ versions:
       section (boundary-wrapped, treated as data) makes the reply a single question asking the
       user for the missing/ambiguous parameter (e.g. front or back camera). Any other intent
       renders byte-identical to v1.2.0.
+
+  v1.3.0:
+    created_at: "2026-11-25"
+    notes: >
+      Adds a mandatory REPORTING PROBLEMS rule for turns with tool results: a failed / skipped /
+      cancelled result is never reported as done; the reply states what did not happen and why
+      from the result's `user_message`, with its `hint` as the next step. No new variables.
+      Turns without tool results render byte-identical to v1.2.1.
