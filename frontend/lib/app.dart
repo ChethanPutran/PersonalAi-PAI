@@ -33,6 +33,7 @@ import 'plugins/plugin_registry.dart';
 import 'plugins/plugin_command_handler.dart';
 import 'plugins/plugin_command_router.dart';
 import 'plugins/remote_lifecycle.dart';
+import 'ui/profile/server_section.dart';
 import 'device/remote_access.dart';
 import 'plugins/runtime/plugin_runtime.dart';
 
@@ -63,10 +64,14 @@ class PaiApp extends StatefulWidget {
 }
 
 class _PaiAppState extends State<PaiApp> {
-  late final AuthService auth;
-  late final ApiClient api;
-  late final BuiltinPluginsController _builtinPlugins;
-  late final AccountService _accountService;
+  // Not final: changing the server in Profile builds fresh clients for the new address (see _applyServer).
+  late AuthService auth;
+  late ApiClient api;
+  late BuiltinPluginsController _builtinPlugins;
+  late AccountService _accountService;
+
+  /// Shown once on the sign-in screen after the server address changed (why the user was signed out).
+  String? _serverNotice;
   String? deviceId;
     final GlobalKey<NavigatorState> _navigatorKey =
     GlobalKey<NavigatorState>();
@@ -925,6 +930,42 @@ Future<void> _refreshDevicesAfterConnect() async {
   }
 
   // ----------------------------------------------------------------
+  // Server address (Profile > PAI server, and the sign-in screen)
+  // ----------------------------------------------------------------
+
+  Widget _serverSection({required bool signedIn}) => ServerSection(
+        currentUrl: AppConfig.baseUrl,
+        defaultUrl: AppConfig.defaultBaseUrl,
+        usingCustom: AppConfig.hasCustomServer,
+        signedIn: signedIn,
+        onApply: _applyServer,
+      );
+
+  /// Saves the new address (null = back to the default) and moves the whole app to it: the WebSocket, the
+  /// live task feed and every API client are rebuilt for the new base URL. Tokens belong to a server, so a
+  /// signed-in user is signed out first (from the OLD server, so its push registration is removed there).
+  Future<void> _applyServer(String? url) async {
+    final before = AppConfig.baseUrl;
+    await AppConfig.saveServer(url);
+    final after = AppConfig.baseUrl;
+    if (before == after) return;
+    final wasSignedIn = auth.isAuthenticated;
+    // Sign out against the old clients, then swap them.
+    if (wasSignedIn) await _logout();
+    _builtinPlugins.dispose();
+    auth = AuthService(baseUrl: after);
+    api = ApiClient(baseUrl: after, auth: auth);
+    _builtinPlugins = BuiltinPluginsController(api: api);
+    _accountService = AccountService(api: api);
+    if (!mounted) return;
+    setState(() {
+      _serverNotice = wasSignedIn
+          ? 'You were signed out because the server changed to $after. Accounts belong to one server: sign in again with the account you have there.'
+          : null;
+    });
+  }
+
+  // ----------------------------------------------------------------
   // Dispose
   // ----------------------------------------------------------------
 
@@ -964,7 +1005,11 @@ Future<void> _refreshDevicesAfterConnect() async {
         darkTheme: PaiTheme.dark(),
         themeMode: ThemeMode.dark,
         home: LoginScreen(
+          // A new key per server: the form and its auth service belong to that server.
+          key: ValueKey('login-${AppConfig.baseUrl}'),
           auth: auth,
+          notice: _serverNotice,
+          serverSection: _serverSection(signedIn: false),
           onAuthenticated: () {
             if (!mounted) return;
             setState(() {});
@@ -1065,6 +1110,7 @@ Future<void> _refreshDevicesAfterConnect() async {
         remoteAccess: _remoteAccess,
         account: _accountService,
         onLogout: _logout,
+        serverSection: _serverSection(signedIn: true),
       ),
       if (kDebugMode)
         TestTaskScreen(

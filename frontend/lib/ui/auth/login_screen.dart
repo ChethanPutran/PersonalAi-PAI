@@ -8,10 +8,18 @@ class LoginScreen extends StatefulWidget {
   final AuthService auth;
   final VoidCallback onAuthenticated;
 
+  /// Plain-words note shown above the form (for example why the user was just signed out).
+  final String? notice;
+
+  /// The "PAI server" editor, shown under the form so a wrong address can be fixed before signing in.
+  final Widget? serverSection;
+
   const LoginScreen({
     super.key,
     required this.auth,
     required this.onAuthenticated,
+    this.notice,
+    this.serverSection,
   });
 
   @override
@@ -95,6 +103,18 @@ class _LoginScreenState extends State<LoginScreen> {
                     textAlign: TextAlign.center,
                     style: text.labelMedium?.copyWith(color: scheme.onSurfaceVariant, letterSpacing: 4),
                   ),
+                  if (widget.notice != null) ...[
+                    const SizedBox(height: PaiSpacing.lg),
+                    Container(
+                      key: const Key('login-notice'),
+                      padding: const EdgeInsets.all(PaiSpacing.md),
+                      decoration: BoxDecoration(
+                        color: scheme.tertiaryContainer.withValues(alpha: 0.5),
+                        borderRadius: BorderRadius.circular(PaiRadii.sm),
+                      ),
+                      child: Text(widget.notice!, style: text.bodySmall),
+                    ),
+                  ],
                   const SizedBox(height: PaiSpacing.xl),
                   HudPanel(
                     blur: true,
@@ -171,6 +191,18 @@ class _LoginScreenState extends State<LoginScreen> {
                       textAlign: TextAlign.center,
                     ),
                   ),
+                  if (widget.serverSection != null)
+                    Theme(
+                      data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+                      child: ExpansionTile(
+                        key: const Key('login-server-tile'),
+                        tilePadding: EdgeInsets.zero,
+                        leading: const Icon(Icons.dns_outlined, size: 18),
+                        title: Text('PAI server', style: text.labelLarge),
+                        childrenPadding: EdgeInsets.zero,
+                        children: [widget.serverSection!],
+                      ),
+                    ),
                 ],
               ),
             ),

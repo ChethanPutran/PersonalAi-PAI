@@ -22,6 +22,9 @@ class ProfileScreen extends StatefulWidget {
   /// Editable "About you", "This device" name and "Personalization" sections. When null they are hidden.
   final AccountService? account;
 
+  /// The "PAI server" editor. Shown even when the profile cannot load (a wrong address is the usual reason).
+  final Widget? serverSection;
+
   const ProfileScreen({
     super.key,
     required this.service,
@@ -30,6 +33,7 @@ class ProfileScreen extends StatefulWidget {
     this.currentDeviceId,
     this.remoteAccess,
     this.account,
+    this.serverSection,
   });
 
   @override
@@ -185,13 +189,18 @@ class _ProfileScreenState extends State<ProfileScreen> {
         builder: (context, box) => ListView(
           children: [
             SizedBox(
-              height: box.maxHeight,
+              height: widget.serverSection == null ? box.maxHeight : box.maxHeight * 0.5,
               child: HudErrorState(
                 title: 'Failed to load profile',
                 details: _error,
                 onRetry: _load,
               ),
             ),
+            if (widget.serverSection != null) ...[
+              _SectionHeader('PAI server'),
+              widget.serverSection!,
+              const SizedBox(height: PaiSpacing.xl),
+            ],
           ],
         ),
       );
@@ -220,6 +229,11 @@ class _ProfileScreenState extends State<ProfileScreen> {
           ],
           _SectionHeader('Personalization'),
           PersonalizationSection(service: widget.account!),
+        ],
+
+        if (widget.serverSection != null) ...[
+          _SectionHeader('PAI server'),
+          widget.serverSection!,
         ],
 
         _SectionHeader('My Devices (${_devices.length})'),
