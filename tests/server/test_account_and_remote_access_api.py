@@ -133,3 +133,28 @@ def test_the_settings_page_is_served_without_data_and_the_api_needs_a_login(worl
     assert client.get("/settings", follow_redirects=False).status_code in (302, 307)
     assert client.get("/api/v1/account/profile").status_code == 401
     assert client.get("/api/v1/account/devices").status_code == 401
+
+
+def test_a_device_id_that_belongs_to_someone_else_is_never_reused(world):
+    """An app keeps its device id across logins. A different account on the same install must get its OWN
+    device (a new id), and must not move the first user's device or end up with 'Not your device'."""
+    client, alice, mallory, dev = world
+    r = client.post("/api/v1/devices/register", json={"device": DEVICE, "device_id": dev}, headers=mallory)
+    assert r.status_code == 200, r.text
+    new_id = r.json()["device_id"]
+    assert new_id != dev                                              # a fresh device for the second user
+
+    # the original owner keeps theirs ...
+    assert client.get(f"/api/v1/devices/{dev}/remote-access", headers=alice).status_code == 200
+    assert client.get(f"/api/v1/devices/{dev}/remote-access", headers=mallory).status_code == 404
+    # ... and the second user owns the new one, so the app's follow-up calls work
+    assert client.get(f"/api/v1/devices/{new_id}/remote-access", headers=mallory).status_code == 200
+    push = client.post(f"/api/v1/devices/{new_id}/push-token",
+                       json={"token": "x" * 20, "platform": "android"}, headers=mallory)
+    assert push.status_code == 200, push.text
+    assert client.post(f"/api/v1/devices/{dev}/push-token", json={"token": "y" * 20, "platform": "android"},
+                       headers=mallory).status_code == 403                # still not theirs
+
+    # the same user re-registering with their own id keeps it (the normal app restart)
+    again = client.post("/api/v1/devices/register", json={"device": DEVICE, "device_id": new_id}, headers=mallory)
+    assert again.json()["device_id"] == new_id

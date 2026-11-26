@@ -230,6 +230,19 @@ class DeviceManager(Manager):
         the WebSocket endpoint does that later via `attach_connection`.
         """
 
+        # ---------- A device id that belongs to someone else is never reused ----------
+        # An app keeps its device id across logins. If a DIFFERENT account signs in on the same install
+        # it sends the old id: reusing it would hand this user another user's device (and used to move
+        # its ownership in the database while the registry kept the old owner, so every call then said
+        # "Not your device"). Each user gets their own device record; the response carries the new id.
+        if registration.device_id:
+            other = await self.get(registration.device_id)
+            if other is not None and getattr(other, "user_id", None) != user_id:
+                logger.warning(
+                    "Device id {} belongs to another user; registering a new device for user {}",
+                    registration.device_id, user_id)
+                registration = registration.model_copy(update={"device_id": None})
+
         # ---------- Reuse existing (in-memory) device ----------
         if registration.device_id:
             existing = await self.get(registration.device_id)
@@ -860,8 +873,9 @@ class DeviceManager(Manager):
 
                     kwargs["device_id"] = device_id
 
-                    if user_id is not None:
-                        kwargs["user_id"] = user_id
+                    # Metadata refresh never changes WHO owns the device (assign_user does that,
+                    # deliberately): keep the owner the registry already has.
+                    kwargs["user_id"] = device.user_id
 
                     await repo.upsert(**kwargs)
 
