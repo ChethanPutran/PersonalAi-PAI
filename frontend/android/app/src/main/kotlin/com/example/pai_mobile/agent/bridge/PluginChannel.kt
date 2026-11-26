@@ -7,6 +7,7 @@ import com.pai.agent.plugins.DynamicLoader
 import com.pai.agent.plugins.KotlinPluginLoader
 import com.pai.agent.plugins.NativeModuleRegistry
 import com.pai.agent.plugins.PluginManager
+import com.pai.plugin.api.ConfigurablePlugin
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import kotlinx.coroutines.CoroutineScope
@@ -46,9 +47,11 @@ class PluginChannel(
                 // "kotlin" (accept the Dart enum's long form "PluginLanguage.kotlin" too)
                 val type = (call.argument<String>("type") ?: "native").substringAfterLast('.').lowercase()
                 val entrypoint = call.argument<String>("entrypoint") ?: ""
+                @Suppress("UNCHECKED_CAST")
+                val config = call.argument<Map<String, Any?>>("config")
                 scope.launch(Dispatchers.IO) {
                     val out = when (type) {
-                        "kotlin" -> installKotlinModule(path, entrypoint)
+                        "kotlin" -> installKotlinModule(path, entrypoint, config)
                         else -> installNativeModule(path)
                     }
                     Dispatchers.Main.run { result.success(out) }
@@ -109,6 +112,22 @@ class PluginChannel(
                     result.success(false)
                 }
             }
+
+            // ---- Per-device plugin settings: the effective values, pushed to a plugin that supports them ----
+            "configurePlugin" -> {
+                val name = call.argument<String>("nativeModule")!!
+                @Suppress("UNCHECKED_CAST")
+                val config = call.argument<Map<String, Any?>>("config") ?: emptyMap()
+                val mod = registry.get(name)
+                val ok = try { (mod as? ConfigurablePlugin)?.configure(config) != null } catch (t: Throwable) { false }
+                result.success(mapOf("ok" to ok, "loaded" to (mod != null)))
+            }
+
+            // ---- Files plugin: "All files access" (shared folders such as Pictures) ----
+            "allFilesAccessStatus" -> result.success(mapOf(
+                "granted" to permissionManager.allFilesAccessGranted(), "sdk" to Build.VERSION.SDK_INT))
+
+            "openAllFilesAccessSettings" -> result.success(permissionManager.openAllFilesAccessSettings())
 
             "debugRegistry" -> {
                 result.success(registry.list().associateWith { "<registered>" })
@@ -179,6 +198,7 @@ class PluginChannel(
     private suspend fun installKotlinModule(
         dexPath: String,
         className: String,
+        config: Map<String, Any?>? = null,
     ): Map<String, Any?> {
         if (className.isBlank()) {
             return mapOf("ok" to false, "error" to "missing_entrypoint_class")
@@ -199,6 +219,8 @@ class PluginChannel(
             pluginVersion = "0.0.0",
         )
         loaded.attach(ctx)
+        // Settings the user chose (install dialog / earlier session) apply from the first call.
+        if (config != null) (loaded as? ConfigurablePlugin)?.configure(config)
 
         val manifestPerms = loaded.permissions
         val permResult = permissionManager.request(manifestPerms)

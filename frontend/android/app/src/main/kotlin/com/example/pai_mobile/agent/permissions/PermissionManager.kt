@@ -125,6 +125,34 @@ class PermissionManager(private val activity: Activity) {
             )
         }
 
+    /**
+     * "All files access" (MANAGE_EXTERNAL_STORAGE): the Files plugin needs it for shared folders such as Pictures
+     * and Download. It is not a runtime-dialog permission: the user switches it on in Android Settings.
+     * Below Android 11 the ordinary storage permission is used instead.
+     */
+    fun allFilesAccessGranted(): Boolean =
+        if (Build.VERSION.SDK_INT >= 30) android.os.Environment.isExternalStorageManager()
+        else ContextCompat.checkSelfPermission(activity, Manifest.permission.READ_EXTERNAL_STORAGE) ==
+            PackageManager.PERMISSION_GRANTED
+
+    /** Opens the "All files access" screen for PAI (falls back to the list of apps, then to app details). */
+    fun openAllFilesAccessSettings(): Boolean {
+        val flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+        val attempts = buildList {
+            if (Build.VERSION.SDK_INT >= 30) {
+                add(android.content.Intent(android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                    android.net.Uri.parse("package:${activity.packageName}")))
+                add(android.content.Intent(android.provider.Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+            }
+            add(android.content.Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                android.net.Uri.parse("package:${activity.packageName}")))
+        }
+        for (i in attempts) {
+            try { activity.startActivity(i.addFlags(flags)); return true } catch (_: Exception) { }
+        }
+        return false
+    }
+
     /** Non-requesting check — used by PluginManager.invoke() before execution. */
     fun missing(logical: List<String>): List<String> =
         logical.filter { name ->
