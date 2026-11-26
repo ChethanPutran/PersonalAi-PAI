@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 from loguru import logger
@@ -150,7 +151,10 @@ class DeviceManager(Manager):
                         user_id=r.user_id,
                         device_type=DeviceType(
                             r.device_type) if r.device_type else DeviceType.UNKNOWN,
-                        status=_normalize_status(r.status),
+                        # Presence is about NOW: the stored status survives a backend restart or a
+                        # crashed agent, so trust it only for a device that is really connected.
+                        status=(_normalize_status(r.status) if r.id in self._connections
+                                else DeviceStatus.OFFLINE),
                         app_version=r.app_version or "",
                         runtime_version=r.runtime_version or "",
                         platform=DevicePlatform(
@@ -183,6 +187,16 @@ class DeviceManager(Manager):
 
             span.set_attribute("loaded", loaded)
             span.set_attribute("failed", failed)
+
+            # Same for the stored copy, so everything reading the database sees the truth.
+            try:
+                connected = list(self._connections)
+
+                async def _offline(session: AsyncSession):
+                    await DeviceRepository(session).mark_offline_except(connected)
+                await self._with_session(_offline)
+            except Exception as exc:
+                logger.warning("Could not reset stored device presence: {}", exc)
 
             logger.info(
                 "Loaded {} of {} devices from DB ({} skipped)",
@@ -258,6 +272,10 @@ class DeviceManager(Manager):
                         "skipping refresh"
                     )
 
+                # The app is alive right now: refresh presence (it may have been expired while it was away).
+                await self.registry.heartbeat(registration.device_id)
+                await self.update_status(registration.device_id, DeviceStatus.ONLINE)
+
                 logger.info(
                     "Device re-registered: %s (%s)",
                     registration.device_id, existing.name,
@@ -316,6 +334,7 @@ class DeviceManager(Manager):
                 device.user_id = user_id
 
             device.status = DeviceStatus.ONLINE
+            device.last_seen = datetime.now(timezone.utc)     # registering is a sign of life (the app connects next)
 
             span.set_attribute("device_id", device.id)
             span.set_attribute("device_type", device.device_type)
@@ -471,6 +490,8 @@ class DeviceManager(Manager):
                     logger.warning("Fallback reload failed: {}", exc)
                     span.set_attribute("reload_failed", str(exc)[:200])
 
+            await self._expire_stale_presence(devices)
+
             span.set_attribute("count", len(devices))
             span.set_attribute(
                 "devices",
@@ -480,6 +501,23 @@ class DeviceManager(Manager):
                 ],
             )
             return devices
+
+    #: A device with no live connection is "online" only while it keeps sending heartbeats (every ~20 s,
+    #: over the WebSocket or plain HTTP); after this long without one it is offline.
+    STALE_PRESENCE_SECONDS = 90.0
+
+    async def _expire_stale_presence(self, devices: List[DeviceInfo]) -> None:
+        now = datetime.now(timezone.utc)
+        for d in devices:
+            if d.status != DeviceStatus.ONLINE or d.id in self._connections:
+                continue
+            seen = d.last_seen
+            if seen is not None and seen.tzinfo is None:
+                seen = seen.replace(tzinfo=timezone.utc)
+            if seen is None or (now - seen).total_seconds() > self.STALE_PRESENCE_SECONDS:
+                logger.info("Device {} ({}) has no connection and no recent heartbeat: marking offline",
+                            d.id, d.name)
+                await self.update_status(d.id, DeviceStatus.OFFLINE)
 
     async def find(self, device_filter: DeviceFilter) -> List[DeviceInfo]:
         return await self.registry.find(device_filter)

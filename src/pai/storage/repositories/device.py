@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pai.observability.tracer import get_tracer
@@ -200,6 +200,15 @@ class DeviceRepository(BaseRepository[DeviceModel]):
             record.allow_remote_invoke = bool(invoke)
         await self.session.flush()
         return record
+
+    async def mark_offline_except(self, connected_ids: list[str]) -> int:
+        """Set every stored device that is not in ``connected_ids`` offline (presence is not durable:
+        after a restart nothing is online until it connects). Returns how many rows changed."""
+        stmt = update(DeviceModel).where(DeviceModel.status != "offline")
+        if connected_ids:
+            stmt = stmt.where(DeviceModel.id.notin_(connected_ids))
+        result = await self.session.execute(stmt.values(status="offline"))
+        return result.rowcount or 0
 
     async def touch(self, device_id: str) -> bool:
         """Update last_seen without changing status.

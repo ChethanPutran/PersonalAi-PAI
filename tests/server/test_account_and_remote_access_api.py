@@ -158,3 +158,41 @@ def test_a_device_id_that_belongs_to_someone_else_is_never_reused(world):
     # the same user re-registering with their own id keeps it (the normal app restart)
     again = client.post("/api/v1/devices/register", json={"device": DEVICE, "device_id": new_id}, headers=mallory)
     assert again.json()["device_id"] == new_id
+
+
+def test_a_device_that_is_not_connected_does_not_stay_online(world):
+    """A stale 'online' (crashed agent, backend restart) must not be shown: no connection and no recent
+    heartbeat means offline."""
+    from datetime import datetime, timedelta, timezone
+
+    client, alice, mallory, dev = world
+    dm = client.app.state.context.orchestrator.device_manager
+    me = client.get("/api/v1/auth/me", headers=alice).json()["id"]
+
+    def status_of(device_id):
+        listed = client.get(f"/api/v1/devices/list/{me}", headers=alice).json()
+        return next(d["status"] for d in listed if d["id"] == device_id)
+
+    fresh = client.post("/api/v1/devices/register", json={"device": DEVICE}, headers=alice).json()["device_id"]
+    assert status_of(fresh) == "online"                      # just registered: its heartbeat is recent
+
+    device = client.portal.call(dm.registry.get, fresh)
+    device.last_seen = datetime.now(timezone.utc) - timedelta(minutes=5)   # silent for 5 minutes, no socket
+    assert status_of(fresh) == "offline"
+    assert client.get(f"/api/v1/account/devices", headers=alice).json()["devices"]   # still listed, just offline
+
+
+def test_after_a_backend_restart_nothing_is_online_until_it_connects(tmp_path):
+    first = create_application(isolated_config(tmp_path))
+    with TestClient(first) as client:
+        auth = signup(client, "restart@example.com")
+        dev = add_device(client, auth)
+        me = client.get("/api/v1/auth/me", headers=auth).json()["id"]
+        assert next(d["status"] for d in client.get(f"/api/v1/devices/list/{me}", headers=auth).json()
+                    if d["id"] == dev) == "online"           # stored as online when the backend stops
+    second = create_application(isolated_config(tmp_path))     # same database, a fresh process
+    with TestClient(second) as client:
+        login = client.post("/api/v1/auth/login", json={"email": "restart@example.com", "password": "correct-horse-1"})
+        auth = {"Authorization": "Bearer " + login.json()["access_token"]}
+        listed = client.get(f"/api/v1/devices/list/{me}", headers=auth).json()
+        assert [d["status"] for d in listed if d["id"] == dev] == ["offline"]
