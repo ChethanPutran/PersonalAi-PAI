@@ -35,6 +35,8 @@ class TaskEventStream with WidgetsBindingObserver implements TaskLiveFeed {
     this.minRetry = const Duration(seconds: 1),
     this.maxRetry = const Duration(seconds: 30),
     this.stableAfter = const Duration(seconds: 10),
+    this.idleTimeout = const Duration(seconds: 45),
+    this.idleCheckEvery = const Duration(seconds: 5),
     Random? random,
     Future<void> Function(Duration)? delay,
     DateTime Function()? now,
@@ -57,6 +59,13 @@ class TaskEventStream with WidgetsBindingObserver implements TaskLiveFeed {
 
   /// A connection that stayed up this long counts as healthy: the backoff starts over.
   final Duration stableAfter;
+
+  /// The server sends a keep-alive every 15 s, so no bytes at all for this long means the
+  /// connection is dead without having said so (see [SseClient.get]'s `onActivity`): drop it and
+  /// reconnect, replaying what was missed from `Last-Event-ID`. Without this the feed stayed
+  /// "connected" forever after such a drop and new tasks only showed up on a manual refresh.
+  final Duration idleTimeout;
+  final Duration idleCheckEvery;
 
   final SseClient _client;
   final Random _random;
@@ -122,6 +131,13 @@ class TaskEventStream with WidgetsBindingObserver implements TaskLiveFeed {
     stop();
     await _events.close();
     await _connection.close();
+  }
+
+  /// Ask whoever shows the task list to reload it once (e.g. a push says a schedule just fired).
+  /// A second path to the same freshness as the live feed, for when the feed missed something.
+  void requestRefresh(String reason) {
+    if (!_started) return;
+    _emit(TaskStreamResync(reason: reason, latestSeq: _lastSeq ?? 0));
   }
 
   /// App went to the background: drop the connection (no battery drain, no stale socket).
@@ -230,6 +246,7 @@ class TaskEventStream with WidgetsBindingObserver implements TaskLiveFeed {
     };
 
     final lastSeq = _lastSeq;
+    var lastActivity = _now();
     final sub = _client
         .get(
           url,
@@ -237,9 +254,11 @@ class TaskEventStream with WidgetsBindingObserver implements TaskLiveFeed {
           onOpen: () {
             if (gen != _generation) return;
             attempt.opened = true;
+            lastActivity = _now();
             debugPrint('$_tag connected');
             _set(TaskStreamConnection.connected);
           },
+          onActivity: () => lastActivity = _now(),
         )
         .listen(
           (frame) {
@@ -254,7 +273,20 @@ class TaskEventStream with WidgetsBindingObserver implements TaskLiveFeed {
           cancelOnError: true,
         );
     attempt.subscription = sub;
-    return done.future.whenComplete(() => sub.cancel());
+
+    // Liveness watchdog (the stream never errors when a mobile connection silently dies).
+    final watchdog = Timer.periodic(idleCheckEvery, (_) {
+      if (done.isCompleted || gen != _generation || !attempt.opened) return;
+      final quiet = _now().difference(lastActivity);
+      if (quiet > idleTimeout) {
+        debugPrint('$_tag no data for ${quiet.inSeconds}s — connection looks dead, reconnecting');
+        done.complete('idle for ${quiet.inSeconds}s');
+      }
+    });
+    return done.future.whenComplete(() {
+      watchdog.cancel();
+      return sub.cancel();
+    });
   }
 
   void _onFrame(SseEvent frame) {

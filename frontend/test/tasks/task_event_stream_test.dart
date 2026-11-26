@@ -21,7 +21,11 @@ class _Mid implements Random {
 }
 
 class Rig {
-  Rig({Duration stableAfter = const Duration(seconds: 10)}) {
+  Rig({
+    Duration stableAfter = const Duration(seconds: 10),
+    Duration idleTimeout = const Duration(hours: 1),      // off unless a test turns it on
+    Duration idleCheckEvery = const Duration(hours: 1),
+  }) {
     stream = TaskEventStream(
       url: Uri.parse('http://backend.test/api/v1/tasks/events'),
       headers: () => {'Authorization': 'Bearer secret-token', 'Accept': 'application/json'},
@@ -29,6 +33,8 @@ class Rig {
       client: client,
       random: _Mid(),
       stableAfter: stableAfter,
+      idleTimeout: idleTimeout,
+      idleCheckEvery: idleCheckEvery,
       now: () => clock,
       delay: (d) {
         delays.add(d);
@@ -311,5 +317,81 @@ void main() {
     await r.settle();
     expect(r.events.whereType<TaskUpdated>().single.seq, 2);
     await r.stream.dispose();
+  });
+
+  group('liveness watchdog (a connection that dies silently)', () {
+    Rig watched() => Rig(idleTimeout: const Duration(seconds: 45), idleCheckEvery: const Duration(milliseconds: 5));
+
+    // Real (tiny) timer ticks drive the check; the fake clock decides how long it has been quiet.
+    Future<void> checks() => Future<void>.delayed(const Duration(milliseconds: 40));
+
+    test('no bytes for longer than the timeout: drops the connection and reconnects with Last-Event-ID', () async {
+      final r = watched();
+      final first = r.client.enqueue();
+      final second = r.client.enqueue();
+      r.stream.start(observeLifecycle: false);
+      await r.settle();
+      first.send(frame('ready', {'latest_seq': 10}));
+      first.send(frame('task.created', eventJson(mk('a'), seq: 11, event: 'task.created'), id: '11'));
+      await r.settle();
+      expect(r.client.attempts, 1);
+
+      r.tick(const Duration(seconds: 50)); // silence, no error, no close: the connection is simply dead
+      await checks();
+      await r.settle();
+
+      expect(first.cancelled, isTrue);
+      expect(r.client.attempts, 2);
+      expect(r.client.requests.last['Last-Event-ID'], '11'); // replay from where it left off
+
+      // The new connection delivers what the dead one never did.
+      second.send(frame('task.completed',
+          eventJson(mk('a', status: TaskStatus.completed), seq: 12, event: 'task.completed'), id: '12'));
+      await r.settle();
+      expect(r.events.whereType<TaskUpdated>().last.task.status, TaskStatus.completed);
+      await r.stream.dispose();
+    });
+
+    test('keep-alive comments count as life: a quiet but healthy feed is left alone', () async {
+      final r = watched();
+      final c = r.client.enqueue();
+      r.stream.start(observeLifecycle: false);
+      await r.settle();
+      for (var i = 0; i < 4; i++) {
+        r.tick(const Duration(seconds: 15));
+        c.heartbeat(); // ": keep-alive" every 15 s
+        await checks();
+      }
+      expect(r.client.attempts, 1);
+      expect(c.cancelled, isFalse);
+      await r.stream.dispose();
+    });
+
+    test('a frame also resets the timer', () async {
+      final r = watched();
+      final c = r.client.enqueue();
+      r.stream.start(observeLifecycle: false);
+      await r.settle();
+      r.tick(const Duration(seconds: 40));
+      c.send(frame('ready', {'latest_seq': 0}));
+      r.tick(const Duration(seconds: 40));
+      await checks();
+      expect(r.client.attempts, 1);
+      await r.stream.dispose();
+    });
+  });
+
+  test('requestRefresh asks the list to reload once (a push says a schedule fired)', () async {
+    final r = Rig();
+    r.client.enqueue();
+    r.stream.start(observeLifecycle: false);
+    await r.settle();
+    r.stream.requestRefresh('schedule_fired');
+    await r.settle();
+    final resyncs = r.events.whereType<TaskStreamResync>().toList();
+    expect(resyncs.length, 1);
+    expect(resyncs.single.reason, 'schedule_fired');
+    await r.stream.dispose();
+    r.stream.requestRefresh('after_stop'); // a stopped feed stays quiet
   });
 }

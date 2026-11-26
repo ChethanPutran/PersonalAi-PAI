@@ -131,7 +131,13 @@ class SseClient {
   ///
   /// [onOpen] fires once the server has accepted the connection (HTTP 200), before any event:
   /// a resumed feed can stay silent for a while, so events alone can't tell "connected".
-  Stream<SseEvent> get(Uri url, {required Map<String, String> headers, void Function()? onOpen}) {
+  ///
+  /// [onActivity] fires for every chunk of bytes the server sends, INCLUDING the `: keep-alive`
+  /// comment lines that never become events. A connection that goes silently dead (phone radio
+  /// sleep, Wi-Fi change, a NAT dropping an idle flow) never errors or closes; the only way to
+  /// notice is that the bytes stop, so the caller can watch this and reconnect.
+  Stream<SseEvent> get(Uri url,
+      {required Map<String, String> headers, void Function()? onOpen, void Function()? onActivity}) {
     final req = http.Request('GET', url)
       ..headers.addAll({
         ...headers,
@@ -139,10 +145,11 @@ class SseClient {
         'Cache-Control': 'no-cache',
       })
       ..headers.remove('Content-Type');
-    return _stream(req, onOpen: onOpen);
+    return _stream(req, onOpen: onOpen, onActivity: onActivity);
   }
 
-  Stream<SseEvent> _stream(http.Request req, {void Function()? onOpen}) async* {
+  Stream<SseEvent> _stream(http.Request req,
+      {void Function()? onOpen, void Function()? onActivity}) async* {
     final client = _clientFactory();
     try {
       final resp = await client.send(req);
@@ -151,7 +158,12 @@ class SseClient {
         throw SseHttpException(resp.statusCode, text);
       }
       onOpen?.call();
-      yield* parseSse(resp.stream);
+      yield* parseSse(onActivity == null
+          ? resp.stream
+          : resp.stream.map((chunk) {
+              onActivity();
+              return chunk;
+            }));
     } finally {
       // Cancelling the listener (or leaving the loop) closes the connection, which
       // tells the server to stop generating / to drop this subscriber.

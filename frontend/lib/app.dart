@@ -125,6 +125,15 @@ class _PaiAppState extends State<PaiApp> {
       if (mounted) setState(() => page = _remindersTabIndex);
     };
 
+    // A schedule fired while the app is open: have the task list reload once. The server finishes
+    // the task a moment after sending the push, so wait briefly. (The live feed normally delivers
+    // this by itself; this covers a feed that missed it.)
+    PushService.onScheduleFired = (_) {
+      Future<void>.delayed(const Duration(seconds: 2), () {
+        if (mounted) _taskEventStream?.requestRefresh('schedule_fired');
+      });
+    };
+
     _bootstrap();
   }
 

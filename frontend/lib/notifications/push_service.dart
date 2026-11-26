@@ -24,6 +24,10 @@ class PushService {
   /// or app-launch). Set by PaiApp to switch to the Reminders tab.
   static void Function(Map<String, dynamic> data)? onNotificationTap;
 
+  /// Called when a `schedule_reminder` push arrives while the app is open: a schedule just fired, so
+  /// the task it created exists (or changed) on the server. Set by PaiApp to refresh the task list.
+  static void Function(Map<String, dynamic> data)? onScheduleFired;
+
   static bool _initialized = false;
   static String? _currentToken;
   static String? _currentDeviceId;
@@ -86,6 +90,9 @@ class PushService {
     // Foreground: FCM does NOT show system notifications on Android/iOS
     // foreground by default — show them ourselves.
     FirebaseMessaging.onMessage.listen((msg) async {
+      if (msg.data['type'] == 'schedule_reminder') {
+        onScheduleFired?.call(Map<String, dynamic>.from(msg.data));
+      }
       final n = msg.notification;
       if (n == null) return;
       await _localNotif.show(

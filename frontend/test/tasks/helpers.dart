@@ -133,10 +133,11 @@ class ScriptedSseClient extends SseClient {
   }
 
   @override
-  Stream<SseEvent> get(Uri url, {required Map<String, String> headers, void Function()? onOpen}) {
+  Stream<SseEvent> get(Uri url,
+      {required Map<String, String> headers, void Function()? onOpen, void Function()? onActivity}) {
     requests.add(Map.of(headers));
     final conn = _queue.isNotEmpty ? _queue.removeAt(0) : Conn();
-    return conn.open(onOpen);
+    return conn.open(onOpen, onActivity);
   }
 }
 
@@ -150,14 +151,23 @@ class Conn {
   bool cancelled = false;
   bool opened = false;
 
-  Stream<SseEvent> open(void Function()? onOpen) async* {
+  void Function()? _onActivity;
+
+  Stream<SseEvent> open(void Function()? onOpen, [void Function()? onActivity]) async* {
     if (failWith != null) throw failWith!;
     opened = true;
+    _onActivity = onActivity;
     onOpen?.call();
     yield* _c.stream;
   }
 
-  void send(SseEvent e) => _c.add(e);
+  /// A `: keep-alive` comment: bytes arrive, but no event.
+  void heartbeat() => _onActivity?.call();
+
+  void send(SseEvent e) {
+    _onActivity?.call();
+    _c.add(e);
+  }
   Future<void> close() => _c.close(); // server closes the stream
   void error(Object e) => _c.addError(e);
 }
