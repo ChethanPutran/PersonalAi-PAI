@@ -12,6 +12,10 @@ import 'widgets/builtin_capabilities_section.dart';
 import 'widgets/plugin_update_sheet.dart';
 import '../../plugins/plugin_manager.dart';
 import 'capability_config_screen.dart';
+import 'plugin_settings_screen.dart';
+import 'widgets/all_files_access_notice.dart';
+import 'widgets/plugin_install_dialog.dart';
+import '../../plugins/plugin_settings.dart';
 import 'plugin_test_screen.dart';
 import '../../plugins/permissions/permissions_service.dart';
 import 'permissions/permissions_screen.dart';
@@ -141,13 +145,45 @@ Future<void> _handleInstall(String pluginId, String version) async {
   final plugin = widget.manager.get(pluginId);
   if (plugin == null) return;
 
+  // A plugin with settings asks for them first (the install dialog); without settings it installs at once.
+  final deviceId = widget.manager.deviceId;
+  PluginSettings? settings;
+  try {
+    settings = await widget.manager.loadSettings(deviceId, pluginId);
+  } catch (_) {
+    settings = null;                 // the server could not say: install with defaults, settings stay editable later
+  }
+  if (!mounted) return;
+  if (settings != null && settings.hasSettings) {
+    final done = await showPluginInstallDialog(
+      context,
+      pluginName: plugin.name,
+      targetName: widget.thisDevice?.name ?? 'this device',
+      isThisDevice: true,
+      settings: settings,
+      footer: pluginId == _filesAndroidId ? const Padding(padding: EdgeInsets.only(top: 8), child: AllFilesAccessNotice()) : null,
+      onInstall: (config) => _installLocal(plugin, version, config),
+    );
+    if (done != true) return;                 // cancelled (or installed: _installLocal already told the user)
+    return;
+  }
+  await _installLocal(plugin, version, null);
+}
+
+static const _filesAndroidId = 'files_android';
+
+/// Runs the local install and tells the user how it went. Settings problems are rethrown for the dialog.
+Future<void> _installLocal(PluginInfo plugin, String version, Map<String, dynamic>? config) async {
+  final pluginId = plugin.id;
   setState(() => _installing.add(pluginId));
   try {
-    await widget.manager.install(pluginId, version);
+    await widget.manager.install(pluginId, version, config: config);
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('Plugin installed')),
     );
+  } on PluginSettingsException {
+    rethrow;
   } on PluginPermissionDeniedException catch (e) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -479,6 +515,16 @@ Future<void> _handleInstall(String pluginId, String version) async {
                     );
                   },
                 ),
+                if (widget.manager.hasSettingsKnown(widget.manager.deviceId, plugin.id) != false)
+                  IconButton(
+                    key: Key('plugin-settings-${plugin.id}'),
+                    icon: const Icon(Icons.tune),
+                    tooltip: 'Plugin settings',
+                    onPressed: () => _openSettings(plugin,
+                        targetId: widget.manager.deviceId,
+                        targetName: widget.thisDevice?.name ?? 'this device',
+                        isThisDevice: true),
+                  ),
                 IconButton(
                   icon: const Icon(Icons.settings),
                   tooltip: 'Configure capabilities',
@@ -659,6 +705,13 @@ Future<void> _handleInstall(String pluginId, String version) async {
                   ? () => _openRemoteTest(plugin, device)
                   : null,
             ),
+            if (widget.manager.hasSettingsKnown(device.id, plugin.id) != false)
+              IconButton(
+                key: Key('plugin-settings-${device.id}-${plugin.id}'),
+                icon: const Icon(Icons.tune),
+                tooltip: 'Plugin settings on ${device.name}',
+                onPressed: () => _openSettings(plugin, targetId: device.id, targetName: device.name, isThisDevice: false),
+              ),
             IconButton(
               icon: const Icon(Icons.settings),
               tooltip: 'Configure capabilities',
@@ -690,16 +743,41 @@ Future<void> _handleInstall(String pluginId, String version) async {
   // ---------------------------------------------------------------------------
 
   Future<void> _installOnRemote(PluginInfo plugin, DeviceInfo device) async {
+    PluginSettings? settings;
+    try {
+      settings = await widget.manager.loadSettings(device.id, plugin.id);
+    } catch (_) {
+      settings = null;
+    }
+    if (!mounted) return;
+    if (settings != null && settings.hasSettings) {
+      await showPluginInstallDialog(
+        context,
+        pluginName: plugin.name,
+        targetName: device.name,
+        isThisDevice: false,
+        settings: settings,
+        onInstall: (config) => _requestRemoteInstall(plugin, device, config),
+      );
+      return;
+    }
+    await _requestRemoteInstall(plugin, device, null);
+  }
+
+  Future<void> _requestRemoteInstall(PluginInfo plugin, DeviceInfo device, Map<String, dynamic>? config) async {
     try {
       await widget.manager.installOnDevice(
         plugin.id,
         plugin.version,
         device.id,
+        config: config,
       );
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Install requested on ${device.name}')),
       );
+    } on PluginSettingsException {
+      rethrow;
     } catch (_) {
       // The manager already recorded a plain-language reason; the tile shows it with a Retry.
       if (!mounted) return;
@@ -724,6 +802,21 @@ Future<void> _handleInstall(String pluginId, String version) async {
         context,
       ).showSnackBar(SnackBar(content: Text(op.error ?? "Couldn't retry the install.")));
     }
+  }
+
+  Future<void> _openSettings(PluginInfo plugin, {required String targetId, required String targetName, required bool isThisDevice}) async {
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute(
+        builder: (_) => PluginSettingsScreen(
+          pluginName: plugin.name,
+          deviceName: targetName,
+          isThisDevice: isThisDevice,
+          load: () => widget.manager.loadSettings(targetId, plugin.id),
+          save: (changes) => widget.manager.saveSettings(targetId, plugin.id, changes),
+          footer: isThisDevice && plugin.id == _filesAndroidId ? const AllFilesAccessNotice() : null,
+        ),
+      ),
+    );
   }
 
   Future<void> _openConfig(PluginInfo plugin) async {

@@ -52,7 +52,7 @@ Map<String, dynamic> _info(String id, List<String> perms) => {
 class FakeService implements PluginService {
   final _installed = <String>{};
   @override
-  Future<PluginInfo> install(String id, String version, {PermissionConsentHandler? onPermissionConsent}) async {
+  Future<PluginInfo> install(String id, String version, {PermissionConsentHandler? onPermissionConsent, Map<String, dynamic>? config}) async {
     _installed.add(id);
     return PluginInfo.fromJson(_info(id, id == 'input' ? ['input'] : []));
   }

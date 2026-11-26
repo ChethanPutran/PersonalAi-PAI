@@ -10,6 +10,7 @@ import 'models/permission_consent_handler.dart';
 import 'models/plugin_info.dart';
 import 'models/plugin_state.dart';
 import 'plugin_installer.dart';
+import 'plugin_settings.dart';
 import 'plugin_registry.dart';
 import 'plugin_repository.dart';
 
@@ -65,12 +66,25 @@ class PluginService {
   final PluginRuntime runtime;
   final PluginRegistry registry;
 
+  /// The plugin settings (effective values) chosen for this device; handed to a plugin whenever it loads.
+  final PluginConfigStore configStore;
+
   PluginService({
     required this.installer,
     required this.repository,
     required this.runtime,
     required this.registry,
-  });
+    PluginConfigStore? configStore,
+  }) : configStore = configStore ?? PluginConfigStore();
+
+  /// Remembers [config] for [id] and pushes it to the plugin if it is loaded now. Returns whether a loaded
+  /// plugin took it (otherwise it applies the next time the plugin loads).
+  Future<bool> applyConfig(String id, Map<String, dynamic> config) async {
+    await configStore.save(id, config);
+    final nativeModule = registry.byId(id)?.info.runtimeSpec.nativeModule;
+    if (nativeModule == null || nativeModule.isEmpty) return false;
+    return runtime.configurePlugin(nativeModule, config);
+  }
 
   // ---------------------------------------------------------------------------
   // Install
@@ -87,8 +101,12 @@ class PluginService {
     String id,
     String version, {
     PermissionConsentHandler? onPermissionConsent,
+    Map<String, dynamic>? config,
   }) async {
     final abi = await runtime.getAbi();
+
+    // Settings chosen in the install dialog (or sent with a remote install) apply from the first load.
+    if (config != null) await configStore.save(id, config);
 
     debugPrint('[PluginService] install($id@$version), ABI=$abi');
 
@@ -689,6 +707,7 @@ class PluginService {
       capabilities: capabilities,
       permissions: permissions,
       type: type,
+      config: await configStore.get(id),
     );
 
     final rawInitialOk = result['ok'];
@@ -816,6 +835,7 @@ class PluginService {
       capabilities: capabilities,
       permissions: permissions,
       type: type,
+      config: await configStore.get(id),
     );
 
     final rawRetryOk = result['ok'];
@@ -950,6 +970,7 @@ class PluginService {
         capabilities: plugin.capabilities.map((c) => c.id).toList(),
         permissions: info.permissions,
         type: info.type.name,
+        config: await configStore.get(plugin.id),
       );
 
       return result['ok'] == true;

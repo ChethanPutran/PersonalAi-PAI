@@ -28,6 +28,7 @@ class PluginRuntime {
   required List<String> capabilities,
   required List<String> permissions,
   String type = 'native', 
+  Map<String, dynamic>? config,
 }) async {
   debugPrint('$_tag loadNativeModule:');
   debugPrint('$_tag   nativeModule = $nativeModule');
@@ -71,6 +72,8 @@ class PluginRuntime {
         'capabilities': capabilities,
         'permissions': permissions,
         'type': wireLanguage(type),
+        // The plugin's settings (effective values); a plugin without settings ignores them.
+        if (config != null) 'config': config,
       },
     );
 
@@ -346,6 +349,42 @@ Future<String> getAbi() async {
   Future<bool> openAccessibilitySettings() async {
     try {
       return await _channel.invokeMethod<bool>('openAccessibilitySettings') ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Pushes new settings to a loaded plugin. False when the module is not loaded, the plugin takes no
+  /// settings, or this platform has no such call (the settings then apply at the next load).
+  Future<bool> configurePlugin(String nativeModule, Map<String, dynamic> config) async {
+    try {
+      final r = await _channel.invokeMethod<Map<dynamic, dynamic>>(
+          'configurePlugin', {'nativeModule': nativeModule, 'config': config});
+      return r != null && r['ok'] == true;
+    } on MissingPluginException {
+      return false;
+    } on PlatformException {
+      return false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Android "All files access" (needed for shared folders such as Pictures). Null when unknown / not Android.
+  Future<bool?> allFilesAccessGranted() async {
+    try {
+      final r = await _channel.invokeMethod<Map<dynamic, dynamic>>('allFilesAccessStatus');
+      if (r == null) return null;
+      return r['granted'] == true;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Opens Android's "All files access" screen for PAI. False when it could not open.
+  Future<bool> openAllFilesAccessSettings() async {
+    try {
+      return await _channel.invokeMethod<bool>('openAllFilesAccessSettings') ?? false;
     } catch (_) {
       return false;
     }

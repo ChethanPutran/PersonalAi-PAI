@@ -14,6 +14,7 @@ import 'models/plugin_operation.dart';
 import 'models/plugin_state.dart';
 import 'permission_reporter.dart';
 import 'plugin_service.dart';
+import 'plugin_settings.dart';
 
 // ---------------------------------------------------------------------------
 // Remote operation tracking
@@ -457,7 +458,7 @@ class PluginManager extends ChangeNotifier {
   /// PluginService installs and enables the plugin on success.
   /// If permission consent is pending, the package remains installed but
   /// disabled and the manager reflects that state.
-  Future<void> install(String pluginId, String version) async {
+  Future<void> install(String pluginId, String version, {Map<String, dynamic>? config}) async {
     final info = _requireForThisDevice(pluginId);
 
     // Client-side gate (the server checks too): never install what this app can't run.
@@ -465,6 +466,14 @@ class PluginManager extends ChangeNotifier {
         ? appIncompatibility(info.runtimeSpec.minAppVersion)
         : info.incompatibleReason;
     if (blocked != null) throw StateError(blocked);
+
+    // Settings chosen in the install dialog: saved on the server first (it validates them and enforces them
+    // from now on), then handed to the plugin together with its first load.
+    Map<String, dynamic>? effectiveConfig;
+    if (config != null && config.isNotEmpty) {
+      final saved = await saveSettings(deviceId, pluginId, config, applyLocally: false);
+      effectiveConfig = saved.effective;
+    }
 
     _pluginStates[pluginId] = PluginState.installing;
     _pluginErrors[pluginId] = null;
@@ -475,6 +484,7 @@ class PluginManager extends ChangeNotifier {
         pluginId,
         version,
         onPermissionConsent: onPermissionConsent,
+        config: effectiveConfig,
       );
 
       // PluginService enables the plugin when installation succeeds.
@@ -712,9 +722,11 @@ class PluginManager extends ChangeNotifier {
   Future<void> installOnDevice(
     String pluginId,
     String version,
-    String targetDeviceId,
-  ) async {
+    String targetDeviceId, {
+    Map<String, dynamic>? config,
+  }) async {
     final key = _remoteKey(targetDeviceId, pluginId);
+    if (config != null) _remoteConfigs[key] = config;           // a Retry sends the same choices
 
     _remoteOps[key] = const RemoteOp(
       phase: RemotePhase.installing,
@@ -727,12 +739,22 @@ class PluginManager extends ChangeNotifier {
       final response = await api.post('/plugins/$pluginId/install', {
         'device_id': targetDeviceId,
         'version': version,
+        if (config != null && config.isNotEmpty) 'config': config,
       });
 
       // The push frame may already have arrived; applying the same operation twice is harmless.
       final op = PluginOperation.tryParse(response is Map ? response['operation'] : null);
       if (op != null) handleOperation(op);
     } catch (e) {
+      // The server refused a setting value: not an install failure. Back to idle, the dialog shows the reason.
+      if (e is ApiException && e.statusCode == 422) {
+        final detail = e.body is Map ? (e.body as Map)['detail'] : null;
+        if (detail is Map && detail['code'] == 'invalid_plugin_config') {
+          _remoteOps.remove(key);
+          notifyListeners();
+          throw PluginSettingsException.fromApi(e);
+        }
+      }
       final text = describeRemoteRequestError(e is ApiException ? e.body : null);
       _remoteOps[key] = RemoteOp(
         phase: RemotePhase.failed,
@@ -744,6 +766,9 @@ class PluginManager extends ChangeNotifier {
       rethrow;
     }
   }
+
+  /// The settings sent with the last install request per (device, plugin), reused by Retry.
+  final Map<String, Map<String, dynamic>> _remoteConfigs = {};
 
   /// Operations whose success was already handled (the frame can repeat, e.g. after a reconnect).
   final Set<String> _settledOps = {};
@@ -900,8 +925,9 @@ class PluginManager extends ChangeNotifier {
   Future<void> retryInstallOnDevice(
     String pluginId,
     String version,
-    String targetDeviceId,
-  ) async {
+    String targetDeviceId, {
+    Map<String, dynamic>? config,
+  }) async {
     _remoteOps.remove(
       _remoteKey(targetDeviceId, pluginId),
     );
@@ -912,6 +938,7 @@ class PluginManager extends ChangeNotifier {
       pluginId,
       version,
       targetDeviceId,
+      config: config ?? _remoteConfigs[_remoteKey(targetDeviceId, pluginId)],
     );
   }
 
@@ -943,6 +970,81 @@ class PluginManager extends ChangeNotifier {
     );
 
     await loadCatalog();
+  }
+
+  // -------------------------------------------------------------------------
+  // Plugin settings (manifest configSchema), per device
+  // -------------------------------------------------------------------------
+
+  /// Whether a plugin on a device has settings, as far as we have asked the server: null = not asked yet.
+  final Map<String, bool> _settingsKnown = {};
+  bool? hasSettingsKnown(String targetDeviceId, String pluginId) => _settingsKnown[_remoteKey(targetDeviceId, pluginId)];
+
+  /// The schema, saved values, defaults and effective values of [pluginId] on [targetDeviceId]
+  /// (this device or another one the user owns). Throws [PluginSettingsException].
+  Future<PluginSettings> loadSettings(String targetDeviceId, String pluginId) async {
+    try {
+      final r = await api.get('/plugins/device/$targetDeviceId/$pluginId/config');
+      final settings = PluginSettings.fromJson(r);
+      final key = _remoteKey(targetDeviceId, pluginId);
+      if (_settingsKnown[key] != settings.hasSettings) {
+        _settingsKnown[key] = settings.hasSettings;
+        notifyListeners();
+      }
+      return settings;
+    } catch (e) {
+      throw PluginSettingsException.fromApi(e);
+    }
+  }
+
+  /// Saves [values] (null resets a key) for [pluginId] on [targetDeviceId]. For THIS device the plugin gets
+  /// the new effective values at once; another device is told by the server (and needs its remote install
+  /// switch on: the 403 comes back as a [PluginSettingsException] with `remoteOff`).
+  Future<PluginSettings> saveSettings(
+    String targetDeviceId,
+    String pluginId,
+    Map<String, dynamic> values, {
+    bool applyLocally = true,
+  }) async {
+    try {
+      final r = await api.put('/plugins/device/$targetDeviceId/$pluginId/config', {'values': values});
+      final settings = PluginSettings.fromJson(r);
+      if (applyLocally && targetDeviceId == deviceId) {
+        await service.applyConfig(pluginId, settings.effective);
+      }
+      return settings;
+    } catch (e) {
+      throw PluginSettingsException.fromApi(e);
+    }
+  }
+
+  /// A `plugin.config` frame for this device (the caller already applied the remote-access rule).
+  Future<void> applyConfigFrame(String pluginId, Map<String, dynamic> effective) async {
+    await service.applyConfig(pluginId, effective);
+    notifyListeners();
+  }
+
+  /// After (re)connecting: the settings may have changed while the socket was down, so ask the server for
+  /// every installed plugin and hand the plugin what it says. Plugins without settings answer an empty
+  /// schema and are skipped. Never throws.
+  Future<void> syncSettingsFromServer() async {
+    for (final pluginId in _localInstalledIds.toList()) {
+      try {
+        final s = await loadSettings(deviceId, pluginId);
+        if (s.hasSettings) await service.applyConfig(pluginId, s.effective);
+      } catch (e) {
+        debugPrint('[PluginManager] settings sync for $pluginId skipped: $e');
+      }
+    }
+  }
+
+  /// Whether [pluginId] declares settings (asks the server; false on any failure).
+  Future<bool> hasSettings(String targetDeviceId, String pluginId) async {
+    try {
+      return (await loadSettings(targetDeviceId, pluginId)).hasSettings;
+    } catch (_) {
+      return false;
+    }
   }
 
   // -------------------------------------------------------------------------

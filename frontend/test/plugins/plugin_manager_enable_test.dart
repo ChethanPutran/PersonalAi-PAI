@@ -61,7 +61,7 @@ class FakeService implements PluginService {
   Object? installError;
 
   @override
-  Future<PluginInfo> install(String id, String version, {PermissionConsentHandler? onPermissionConsent}) async {
+  Future<PluginInfo> install(String id, String version, {PermissionConsentHandler? onPermissionConsent, Map<String, dynamic>? config}) async {
     if (installError != null) throw installError!;
     return PluginInfo.fromJson(_info(id));
   }

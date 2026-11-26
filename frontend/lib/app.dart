@@ -556,6 +556,9 @@ unawaited(_refreshDevicesAfterConnect());
       case 'capability.invoke':
         await _handlePluginCommand(message, commandHandler);
         return;
+      case 'plugin.config':
+        await _handlePluginConfigFrame(message);
+        return;
       case 'plugin.operation':
         // Live status of a remote install/uninstall (replaces polling).
         _pluginManager?.handleOperationFrame(message);
@@ -581,6 +584,9 @@ unawaited(_refreshDevicesAfterConnect());
 
         // Pick up installs that were running while the socket was down.
         unawaited(_pluginManager?.loadActiveOperations() ?? Future<void>.value());
+
+        // Plugin settings may have changed while the socket was down: take the server's word for them.
+        unawaited(_pluginManager?.syncSettingsFromServer() ?? Future<void>.value());
 
         unawaited(
           _reconcilePlugins().catchError((e, st) {
@@ -873,6 +879,35 @@ Future<void> _refreshDevicesAfterConnect() async {
       }
     } finally {
       if (isLifecycle) lifecycle.end();
+    }
+  }
+
+  /// `plugin.config`: new settings for a plugin on THIS device. Changing settings from another device is the
+  /// same kind of act as installing there, so it needs the owner's "Allow remote plugin install" switch
+  /// (fail closed until the backend has said what is allowed).
+  Future<void> _handlePluginConfigFrame(Map<String, dynamic> message) async {
+    final manager = _pluginManager;
+    final access = _remoteAccess;
+    if (manager == null || access == null) return;
+    final target = message['device_id']?.toString();
+    if (target != null && target != deviceId) return;               // not for this device
+    final refusal = remoteInstallRefusal(
+      requestedBy: message['requested_by_device']?.toString(),
+      thisDeviceId: deviceId,
+      access: access.value,
+    );
+    if (refusal != null) {
+      debugPrint('[PaiApp] refused plugin.config for ${message['plugin_id']}: $refusal');
+      return;
+    }
+    final pluginId = message['plugin_id']?.toString();
+    final config = message['config'];
+    if (pluginId == null || pluginId.isEmpty || config is! Map) return;
+    try {
+      await manager.applyConfigFrame(pluginId, Map<String, dynamic>.from(config));
+      debugPrint('[PaiApp] plugin settings applied: $pluginId');
+    } catch (e) {
+      debugPrint('[PaiApp] could not apply plugin settings for $pluginId: $e');
     }
   }
 

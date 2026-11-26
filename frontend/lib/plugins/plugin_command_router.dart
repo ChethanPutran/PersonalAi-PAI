@@ -43,10 +43,13 @@ PluginCommandRouter({
         final id = _requireString(message, 'plugin_id');
         final version = _requireString(message, 'version');
 
+        // The plugin's settings travel with the install (effective values: defaults and the user's choices).
+        final rawConfig = message['config'];
         final plugin = await service.install(
   id,
   version,
   onPermissionConsent: onPermissionConsent,
+  config: rawConfig is Map ? Map<String, dynamic>.from(rawConfig) : null,
 );
 
         return {
