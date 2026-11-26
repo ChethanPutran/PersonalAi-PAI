@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from pai.plugins.config_schema import ConfigError
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -30,6 +31,11 @@ logger = logging.getLogger(__name__)
 class PluginInstallRequest(BaseModel):
     device_id: str
     version: Optional[str] = None
+    config: Optional[Dict[str, Any]] = None      # plugin settings chosen in the install dialog (configSchema)
+
+
+class PluginDeviceConfigRequest(BaseModel):
+    values: Dict[str, Any]                       # a null value resets that setting to its default
 
 
 class PluginConfigRequest(BaseModel):
@@ -430,6 +436,15 @@ async def install_plugin(
             if cid:
                 capabilities.append(cid)
 
+    if payload.config is not None:
+        try:
+            await plugin_manager.set_device_config(payload.device_id, plugin_id, payload.config)
+        except ConfigError as exc:
+            raise HTTPException(422, detail={"code": "invalid_plugin_config", "errors": exc.errors}) from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+    config_state = await plugin_manager.get_device_config(payload.device_id, plugin_id)
+
     operation = await plugin_manager.operations.create(
         user_id=user_id, device_id=payload.device_id, plugin_id=plugin_id, version=version,
         kind="install", requested_by_device=source_device_id)
@@ -453,6 +468,9 @@ async def install_plugin(
             "architectures": declared_archs,
             "capabilities": capabilities,
         },
+        # The user's settings for this plugin on this device (defaults + their choices); the device applies
+        # them as part of installing and enforces them on every call.
+        "config": config_state["effective"],
     }
 
     try:
@@ -744,6 +762,56 @@ async def reload_plugins(
     pm._catalog.clear()
     await pm._on_initialize()
     return {"reloaded": True, "plugin_count": len(pm._catalog)}
+
+
+@router.get("/device/{device_id}/{plugin_id}/config")
+async def get_device_plugin_config(
+    device_id: str, plugin_id: str,
+    context: PAIAppContext = Depends(get_app_context),
+    user_id: str = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """The settings schema, what the user saved and the effective values for this plugin ON THIS DEVICE."""
+    await _owned_device(context, user_id, device_id)
+    try:
+        context.orchestrator.plugin_manager.require_plugin(plugin_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return await context.orchestrator.plugin_manager.get_device_config(device_id, plugin_id)
+
+
+@router.put("/device/{device_id}/{plugin_id}/config")
+async def set_device_plugin_config(
+    device_id: str, plugin_id: str, payload: PluginDeviceConfigRequest,
+    context: PAIAppContext = Depends(get_app_context),
+    user_id: str = Depends(get_current_user),
+    source_device_id: Optional[str] = Depends(get_source_device_id),
+) -> Dict[str, Any]:
+    """Change this plugin's settings on a device. Acting on another device needs ITS remote-install switch
+    (same rule as installing). The device is told at once and applies them before its next call."""
+    await _authorize_remote(context, user_id=user_id, device_id=device_id, source_device_id=source_device_id,
+                            plugin_id=plugin_id, action="configure")
+    pm = context.orchestrator.plugin_manager
+    try:
+        state = await pm.set_device_config(device_id, plugin_id, payload.values)
+    except ConfigError as exc:
+        raise HTTPException(422, detail={"code": "invalid_plugin_config", "errors": exc.errors}) from exc
+    except ValueError as exc:
+        raise HTTPException(404 if "Unknown plugin" in str(exc) or "not found" in str(exc).lower() else 400,
+                            str(exc)) from exc
+    context.orchestrator.security_manager.audit_logger.record(
+        AuditEventType.REMOTE_INSTALL_REQUESTED, user_id=user_id, plugin_id=plugin_id,
+        capability="plugin.config", device_id=device_id, allowed=True,
+        reason=f"settings changed: {', '.join(sorted(payload.values))}")
+    delivered = False
+    try:
+        await context.orchestrator.device_manager.send(device_id, {
+            "type": "plugin.config", "plugin_id": plugin_id, "device_id": device_id,
+            "requested_by_device": source_device_id, "config": state["effective"],
+        })
+        delivered = True
+    except Exception:                      # offline: the device fetches its settings when it reconnects
+        pass
+    return {**state, "delivered": delivered}
 
 
 @router.get("/{plugin_id}/config")

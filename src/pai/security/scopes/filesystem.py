@@ -29,6 +29,11 @@ class FilesystemScope:
             return ScopeResult(False, "No filesystem roots configured", {})
         roots = [Path(p).expanduser().resolve(strict=False) for p in allowed]
         targets = [Path(p).expanduser().resolve(strict=False) for p in paths]
+        denied = [Path(p).expanduser().resolve(strict=False) for p in request.context.get("filesystem_denied", [])]
+        blocked = [t for t in targets if any(t == d or d in t.parents for d in denied)]
+        if blocked:
+            return ScopeResult(False, "Path is in a folder you excluded in this plugin's settings",
+                               {"path": str(blocked[0]), "denied": [str(d) for d in denied]})
         outside = [t for t in targets if not any(t == r or r in t.parents for r in roots)]
         return ScopeResult(
             not outside,

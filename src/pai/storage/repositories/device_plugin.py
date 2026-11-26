@@ -174,6 +174,22 @@ class DevicePluginRepository(BaseRepository[DevicePluginModel]):
         await self.session.flush()
         return True
 
+    async def get_config(self, device_id: str, plugin_id: str) -> dict:
+        record = await self.get(device_id, plugin_id)
+        return dict(record.config or {}) if record is not None else {}
+
+    async def set_config(self, device_id: str, plugin_id: str, config: dict, *, version: str = "") -> None:
+        """Store the (already validated) configuration. It may be chosen BEFORE the plugin is installed
+        (the install dialog), so a missing row is created as "not installed"; installing keeps it."""
+        record = await self.get(device_id, plugin_id)
+        if record is None:
+            record = DevicePluginModel(device_id=device_id, plugin_id=plugin_id, version=version or "0",
+                                       is_installed=False, enabled_on_device=False, config=dict(config))
+            self.session.add(record)
+        else:
+            record.config = dict(config)
+        await self.session.flush()
+
     async def set_device_enabled(
         self, device_id: str, plugin_id: str, enabled: bool,
     ) -> DevicePluginModel | None:

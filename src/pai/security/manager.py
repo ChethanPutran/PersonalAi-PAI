@@ -90,6 +90,8 @@ def build_authorization_manager(authz_config: Any = None, grant_repository: Any 
         token_issuer=TokenIssuer(),
     )
 
+from pai.plugins.config_schema import READ_ONLY_BLOCKED, path_policy   # noqa: E402  (pure module)
+
 _RISK_ORDER = [RiskLevel.LOW, RiskLevel.MEDIUM, RiskLevel.HIGH, RiskLevel.CRITICAL]
 
 
@@ -124,6 +126,7 @@ class SecurityManager(Manager):
     the DB opens a short-lived session, builds a fresh repository from
     it, queries, and closes.
     """
+    device_config_lookup = None    # see __init__; a class default keeps bare-constructed managers working
     name = "security_manager"
 
     def __init__(
@@ -143,6 +146,9 @@ class SecurityManager(Manager):
         self.audit_logger = self.authorization.audit_logger
         self.token_issuer = self.authorization.token_issuer
         self.token_validator = TokenValidator(self.token_issuer)
+        # async (device_id, plugin_id) -> {"effective": {...}}: the user's settings for a plugin on a device.
+        # Wired by the app (PluginManager.get_device_config). None = no per-device settings enforced.
+        self.device_config_lookup = None            # (class default below keeps bare-constructed managers working)
         self.plugin_manager=plugin_manager
         self.device_manager=device_manager
 
@@ -306,9 +312,17 @@ class SecurityManager(Manager):
                 required = set(getattr(cap_spec.parameters, "required", None) or [])
                 if not required.intersection(PATH_KEYS) and not scope.filesystem_path_optional:
                     scope = scope.model_copy(update={"filesystem_path_optional": True})
+                # The user's own settings for this plugin on THIS device (allowed / denied folders, read-only).
+                policy = await self._device_path_policy(device_id, plugin_id)
+                if policy is not None:
+                    if policy["read_only"] and capability in READ_ONLY_BLOCKED:
+                        return _deny("This device's file settings are read-only; change them in the plugin's settings.")
+                    if policy["denied"]:
+                        scope = scope.model_copy(update={"filesystem_denied": policy["denied"]})
                 if not scope.filesystem_roots:
-                    # Caller-supplied roots (trusted server code) win; otherwise the manifest's own.
-                    manifest_roots = _manifest_filesystem_roots(plugin_manifest)
+                    # Caller-supplied roots (trusted server code) win; then what the user allowed for this
+                    # device; otherwise the manifest's own.
+                    manifest_roots = (policy or {}).get("allowed") or _manifest_filesystem_roots(plugin_manifest)
                     if manifest_roots:
                         scope = scope.model_copy(update={"filesystem_roots": manifest_roots})
 
@@ -402,6 +416,19 @@ class SecurityManager(Manager):
             # is not persisted, so a recovered task must be approved again.
             approved=approved or auth.pre_approved,
         )
+
+    async def _device_path_policy(self, device_id: Optional[str], plugin_id: Optional[str]) -> dict | None:
+        """Path settings the user chose for this plugin on this device, or None when it has none."""
+        if self.device_config_lookup is None or not device_id or not plugin_id:
+            return None
+        try:
+            state = await self.device_config_lookup(device_id, plugin_id)
+        except Exception:                           # settings unavailable: fall back to the manifest, never open up
+            return None
+        policy = path_policy(state.get("effective") or {})
+        if not (policy["allowed"] or policy["denied"] or policy["read_only"]):
+            return None
+        return policy
 
     def verify_task_tokens(self, task: Any) -> None:
         """Raise PermissionError unless the task carries valid tokens.

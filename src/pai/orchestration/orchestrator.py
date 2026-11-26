@@ -145,6 +145,11 @@ class TaskOrchestrator(Manager):
         self.device_manager = device_manager
         self.plugin_manager = plugin_manager
         self.security_manager = security_manager
+        if security_manager is not None and plugin_manager is not None \
+                and getattr(security_manager, "device_config_lookup", None) is None \
+                and hasattr(plugin_manager, "get_device_config"):
+            # the user's per-device plugin settings (allowed/denied folders...) are enforced on every call
+            security_manager.device_config_lookup = plugin_manager.get_device_config
         self.executor_manager = executor_manager
         self.memory_manager = memory_manager
         self.capability_router = capability_router

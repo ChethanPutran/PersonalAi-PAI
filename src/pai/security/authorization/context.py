@@ -17,6 +17,7 @@ class ScopeContext(BaseModel):
 
     allowed_devices: list[str] = []
     filesystem_roots: list[str] = []
+    filesystem_denied: list[str] = []         # always refused, even inside an allowed root
     filesystem_path_optional: bool = False   # the capability's manifest does not require a path
     network_hosts: list[str] = []
     user_roles: list[str] = []

@@ -468,6 +468,11 @@ class DevicePluginModel(Base):
         DateTime(timezone=True), nullable=True,
     )
 
+    # The user's CONFIGURATION of this plugin on this device (declared by the manifest's configSchema),
+    # e.g. {"allowedPaths": [...], "deniedPaths": [...]}. Only keys the user changed; defaults come from
+    # the schema. Validated by pai.plugins.config_schema before it is stored.
+    config: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
     installed_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True,
     )

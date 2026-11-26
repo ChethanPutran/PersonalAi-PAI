@@ -511,6 +511,50 @@ class PluginManager(Manager):
                        distributed=False)
         return {"updated": updated, "ignored": ignored}
 
+    # ------------------------------------------------------------------
+    # Per-device plugin configuration (manifest `configSchema`)
+    # ------------------------------------------------------------------
+
+    def config_schema(self, plugin_id: str, version: Optional[str] = None) -> dict:
+        manifest = self.get_manifest(plugin_id, version) or self.get_manifest(plugin_id)
+        return dict(getattr(manifest, "configSchema", None) or {}) if manifest is not None else {}
+
+    async def get_device_config(self, device_id: str, plugin_id: str) -> dict:
+        """{schema, values (what the user saved), effective (saved over defaults), defaults}."""
+        from pai.plugins import config_schema as cs
+
+        async def _do(session: AsyncSession):
+            repo = DevicePluginRepository(session)
+            rec = await repo.get(device_id, plugin_id)
+            return (rec.version if rec is not None and rec.is_installed else None), dict(rec.config or {}) if rec else {}
+
+        if self._session_factory is None:
+            stored, version = {}, None
+        else:
+            version, stored = await self._with_session(_do)
+        schema = self.config_schema(plugin_id, version)
+        return {"plugin_id": plugin_id, "device_id": device_id, "schema": schema, "values": stored,
+                "defaults": cs.defaults(schema), "effective": cs.effective(schema, stored)}
+
+    async def set_device_config(self, device_id: str, plugin_id: str, values: dict) -> dict:
+        """Validate against the manifest schema and store. Raises ConfigError / ValueError (unknown plugin)."""
+        from pai.plugins import config_schema as cs
+        self.require_plugin(plugin_id)
+        schema = self.config_schema(plugin_id)
+        if not cs.properties(schema):
+            raise ValueError(f"'{plugin_id}' has no settings")
+        current = (await self.get_device_config(device_id, plugin_id))["values"]
+        merged = {**current, **{k: v for k, v in values.items()}}
+        clean = cs.validate(schema, {k: v for k, v in merged.items() if v is not None})
+
+        async def _do(session: AsyncSession):
+            await DevicePluginRepository(session).set_config(device_id, plugin_id, clean)
+
+        await self._with_session(_do)
+        await self._publish("plugin.config_changed", {"device_id": device_id, "plugin_id": plugin_id},
+                            distributed=False)
+        return await self.get_device_config(device_id, plugin_id)
+
     async def list_device_plugins(self, device_id: str) -> list[dict]:
         if self._session_factory is None:
             return []

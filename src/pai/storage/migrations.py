@@ -37,6 +37,8 @@ MIGRATIONS: List[AddColumn] = [
     # what the user allowed on the device for each installed plugin (device-reported, advisory)
     AddColumn("device_plugins", "permissions", "JSON"),
     AddColumn("device_plugins", "permissions_reported_at", "DATETIME"),
+    # the user's configuration of the plugin on that device (configSchema values)
+    AddColumn("device_plugins", "config", "JSON"),
     # user profile
     AddColumn("users", "display_name", "VARCHAR(80)"),
     AddColumn("users", "timezone", "VARCHAR(64)"),
