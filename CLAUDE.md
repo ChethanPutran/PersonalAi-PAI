@@ -266,9 +266,9 @@ provider reports, else unknown.
 The legacy test files whose imports no longer existed (`test_agents`, `test_event_bus`, `test_executors`,
 `test_integration`, `test_integration_e2e`, `test_kernel`, `test_planning`, `test_plugins`, `llm/test_llm_providers`,
 `performance/test_load`)
-were deleted; every remaining file collects. Two files still fail because they call APIs whose signatures changed:
-`tests/memory/test_memory.py` (old store constructors) and `tests/tasks/test_task_fail_undelivered.py`
-(`TaskManager.create_initialized(input=...)`).
+were deleted; every remaining file collects. One file still fails because it calls APIs whose signatures changed:
+`tests/memory/test_memory.py` (old store constructors). Running several test directories in ONE pytest process can
+also trip `tests/consent` on a `conftest` module-name clash (it passes alone); run areas separately.
 
 **Always-runnable tests** (no broken imports, no external services):
 ```bash

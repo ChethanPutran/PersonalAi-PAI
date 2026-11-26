@@ -681,13 +681,25 @@ class TaskManager(Manager):
             )
             return task
 
-        TaskLifecycle.queue(task)
-        await self.store.save(task)
-        await self._publish("task.queued", task.to_dict())
+        # Walk forward one legal step at a time (CREATED -> INITIALIZED -> QUEUED -> RUNNING -> COMPLETED).
+        # The scheduler hands over a task that is still CREATED; going straight to QUEUED is an invalid
+        # transition, which made every delivered reminder end as "push delivered but local state update
+        # failed". Each step is guarded by the current status, like fail_undelivered does.
+        if task.status == TaskStatus.CREATED:
+            TaskLifecycle.initialize(
+                task, capability=task.capability, device_id=task.device_id, executor_id=task.executor_id)
+            await self.store.save(task)
+            await self._publish("task.initialized", task.to_dict())
 
-        TaskLifecycle.start(task)
-        await self.store.save(task)
-        await self._publish("task.started", task.to_dict())
+        if task.status in {TaskStatus.INITIALIZED, TaskStatus.RETRYING}:
+            TaskLifecycle.queue(task)
+            await self.store.save(task)
+            await self._publish("task.queued", task.to_dict())
+
+        if task.status == TaskStatus.QUEUED:
+            TaskLifecycle.start(task)
+            await self.store.save(task)
+            await self._publish("task.started", task.to_dict())
 
         result = TaskResult(
             success=True,
