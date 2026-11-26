@@ -77,7 +77,7 @@ Map<String, dynamic> _op(String status, {String id = 'op1', Map<String, dynamic>
 
 Future<(PluginManager, _Api)> _manager() async {
   final api = _Api();
-  final m = PluginManager(service: _Service(), api: api, deviceId: _me, dispatcher: _Dispatcher());
+  final m = PluginManager(service: _Service(), api: api, deviceId: _me, dispatcher: _Dispatcher())..stageHold = Duration.zero;
   await m.loadCatalog();
   api.posts.clear();
   api.gets.clear();
@@ -85,6 +85,23 @@ Future<(PluginManager, _Api)> _manager() async {
 }
 
 void main() {
+  test('fast stages each stay on screen for the hold time, in order', () async {
+    final (m, _) = await _manager();
+    m.stageHold = const Duration(milliseconds: 60);
+    for (final st in ['downloading', 'verifying', 'installing']) {
+      m.handleOperationFrame({'type': 'plugin.operation', 'operation': _op(st)});
+    }
+    // all three arrived at once: only the first is shown
+    expect(m.remoteStateFor(_other, 'camera').stageLabel, isNot(contains('Verif')));
+    final labels = <String>{m.remoteStateFor(_other, 'camera').stageLabel};
+    for (var i = 0; i < 10; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 40));
+      labels.add(m.remoteStateFor(_other, 'camera').stageLabel);
+    }
+    expect(labels.length, 3);
+    m.dispose();
+  });
+
   test('requesting an install shows the stages the device reports, live, with no polling', () async {
     final (m, api) = await _manager();
     api.installReply = {'operation_id': 'op1', 'operation': _op('delivered')};

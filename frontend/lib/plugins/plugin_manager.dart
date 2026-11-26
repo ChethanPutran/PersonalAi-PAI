@@ -759,6 +759,47 @@ class PluginManager extends ChangeNotifier {
   void handleOperation(PluginOperation op) {
     if (op.kind != 'install' || op.deviceId == deviceId) return;
     final key = _remoteKey(op.deviceId, op.pluginId);
+    if (stageHold == Duration.zero) {
+      _applyOperation(op);
+      return;
+    }
+    // A cached install passes every stage in milliseconds; show each one for at least [stageHold]
+    // so the user can see what is happening. Stages are applied in order, one per hold.
+    final queue = _heldOps.putIfAbsent(key, () => <PluginOperation>[]);
+    final last = _lastApplied[key];
+    if (queue.isEmpty && (last == null || DateTime.now().difference(last) >= stageHold)) {
+      _lastApplied[key] = DateTime.now();
+      _applyOperation(op);
+      return;
+    }
+    queue.add(op);
+    _heldTimers[key] ??= Timer(_remainingHold(key), () => _drainHeld(key));
+  }
+
+  /// How long each stage stays on screen before the next one replaces it.
+  Duration stageHold = const Duration(milliseconds: 500);
+  final Map<String, List<PluginOperation>> _heldOps = {};
+  final Map<String, DateTime> _lastApplied = {};
+  final Map<String, Timer> _heldTimers = {};
+
+  Duration _remainingHold(String key) {
+    final last = _lastApplied[key];
+    if (last == null) return Duration.zero;
+    final left = stageHold - DateTime.now().difference(last);
+    return left.isNegative ? Duration.zero : left;
+  }
+
+  void _drainHeld(String key) {
+    _heldTimers.remove(key);
+    final queue = _heldOps[key];
+    if (queue == null || queue.isEmpty) return;
+    _lastApplied[key] = DateTime.now();
+    _applyOperation(queue.removeAt(0));
+    if (queue.isNotEmpty) _heldTimers[key] = Timer(stageHold, () => _drainHeld(key));
+  }
+
+  void _applyOperation(PluginOperation op) {
+    final key = _remoteKey(op.deviceId, op.pluginId);
     final current = _remoteOps[key];
 
     // A finished operation is final, and an older operation never overwrites a newer one.
@@ -1223,6 +1264,11 @@ class PluginManager extends ChangeNotifier {
 
   @override
   void dispose() {
+    for (final t in _heldTimers.values) {
+      t.cancel();
+    }
+    _heldTimers.clear();
+    _heldOps.clear();
     _plugins.clear();
     _thisDeviceIds.clear();
     _pluginStates.clear();
