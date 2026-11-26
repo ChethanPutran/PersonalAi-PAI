@@ -57,6 +57,23 @@ const std::set<std::string> kConsentRequired = {
     "shell", "exec", "subprocess", "command", "process.spawn",
 };
 
+// A plugin whose consent gate is its OWN env var (not the shared one above): computer_control drives the
+// whole desktop, so what the user allowed for some other plugin must never count for it.
+struct PluginBridge { const char* plugin; const char* perm; const char* env; };
+const PluginBridge kPluginBridges[] = {
+    {"pai.computer_control", "input", "PAI_CC_INPUT_CONSENT"},
+    {"pai.computer_control", "screen", "PAI_CC_SCREEN_CONSENT"},
+};
+
+// True for a stored "<plugin>/<permission>" key that belongs to a plugin with its own gate.
+bool HasOwnGate(const std::string& key) {
+  for (const auto& b : kPluginBridges) {
+    const std::string prefix = std::string(b.plugin) + "/";
+    if (key.compare(0, prefix.size(), prefix) == 0) return true;
+  }
+  return false;
+}
+
 // Nothing is auto-granted any more: a plugin gets only what the user allowed for THAT plugin.
 const std::set<std::string> kAutoGranted = {};
 
@@ -249,9 +266,12 @@ void PermissionManager::ApplyBridges(bool unset_when_none_allowed) {
   };
   for (const auto& b : kBridges) {
     // Decisions are per plugin but the variable is process-wide: open while any plugin allows it.
+    // Plugins with their OWN gate (below) are left out: allowing "input" for the input plugin must not open
+    // computer_control's gate, nor the other way round.
     bool any_allow = false, any_deny = false;
     const std::string suffix = std::string("/") + b.perm;
     for (const auto& [k, v] : decisions_) {
+      if (HasOwnGate(k)) continue;
       if (k.size() > suffix.size() && k.compare(k.size() - suffix.size(), suffix.size(), suffix) == 0) {
         if (v == "allow") any_allow = true;
         else if (v == "deny") any_deny = true;
@@ -264,6 +284,14 @@ void PermissionManager::ApplyBridges(bool unset_when_none_allowed) {
       // restarted, so a plugin kept passing its own consent gate after the user said no.
       ::unsetenv(b.env);
     }
+  }
+
+  // Plugin-specific gates: the variable follows THIS plugin's decision only. Allowed -> open; denied (or
+  // forgotten on uninstall) -> closed right now.
+  for (const auto& b : kPluginBridges) {
+    auto it = decisions_.find(Key(b.plugin, b.perm));
+    if (it != decisions_.end() && it->second == "allow") ::setenv(b.env, "1", 1);
+    else if (it != decisions_.end() || unset_when_none_allowed) ::unsetenv(b.env);
   }
 }
 

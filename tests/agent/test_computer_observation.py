@@ -70,3 +70,10 @@ async def test_only_computer_observe_results_are_reformatted():
     assert "APP Settings" in await observe.run({}, ctx)
     click = CapabilityTool(Source({"status": "completed", "result": {"ok": True}, "device_id": "d1"}), "computer.click", "d")
     assert await click.run({}, ctx) == {"status": "completed", "result": {"ok": True}, "device_id": "d1"}
+
+
+def test_a_native_plugins_json_string_fields_are_decoded():
+    flat = {"app": json.dumps(OBS["app"]), "screen": json.dumps(OBS["screen"]), "observation_id": "obs9",
+            "tree": json.dumps(OBS["tree"]), "truncated": "false", "screenshot": ""}
+    out = format_observation({"status": "completed", "result": flat})
+    assert "APP Settings" in out and "[4] switch 'Bluetooth' (off, clickable)" in out and "obs9" in out

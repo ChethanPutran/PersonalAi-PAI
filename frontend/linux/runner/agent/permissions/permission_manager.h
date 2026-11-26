@@ -27,6 +27,8 @@ class PermissionManager {
 
   // Apply stored "allow" decisions as env vars that plugins gate on directly (e.g. PAI_SCREEN_CONSENT).
   // The variable is process-wide, so it is set while ANY plugin has the permission allowed.
+  // Exception: pai.computer_control has its own variables (PAI_CC_INPUT_CONSENT, PAI_CC_SCREEN_CONSENT) that
+  // follow only ITS decisions, and its decisions do not feed the shared ones.
   // Called after any grant.
   void ApplyEnvBridges();
 

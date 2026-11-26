@@ -8,6 +8,7 @@ reading-order list of the elements with their ids, roles, labels, states and pos
 """
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, Iterator, List, Optional
 
 OBSERVE_CAPABILITY = "computer.observe"
@@ -17,6 +18,25 @@ _TEXT_MAX = 70
 _BOILERPLATE_ROLES = {"other", "window", "scroll", "list", "image"}
 
 
+_STRUCTURED_FIELDS = ("app", "screen", "tree", "screenshot", "target", "missing", "features", "apps")
+
+
+def _decode(obs: Dict[str, Any]) -> Dict[str, Any]:
+    """Native (C++) plugins return flat string maps: structured fields arrive as JSON text. Decode them."""
+    out = dict(obs)
+    for key in _STRUCTURED_FIELDS:
+        value = out.get(key)
+        if isinstance(value, str) and value[:1] in ("{", "["):
+            try:
+                out[key] = json.loads(value)
+            except ValueError:
+                pass
+    for key in ("truncated",):
+        if isinstance(out.get(key), str):
+            out[key] = out[key].strip().lower() == "true"
+    return out
+
+
 def find_observation(result: Any) -> Optional[Dict[str, Any]]:
     """The observe payload inside whatever the capability call wrapped around it ({status, result: {...}})."""
     node = result
@@ -24,7 +44,7 @@ def find_observation(result: Any) -> Optional[Dict[str, Any]]:
         if not isinstance(node, dict):
             return None
         if "tree" in node or ("screen" in node and "app" in node):
-            return node
+            return _decode(node)
         node = node.get("result") or node.get("data")
     return None
 

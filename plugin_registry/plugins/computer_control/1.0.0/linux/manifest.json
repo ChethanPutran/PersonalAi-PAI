@@ -1,0 +1,389 @@
+{
+  "schemaVersion": 1,
+  "id": "computer_control_linux",
+  "name": "Computer Control",
+  "version": "1.0.0",
+  "description": "Let the agent see and operate your desktop: read the screen through the accessibility tree, click, type, scroll, press shortcuts and open applications, with your permission.",
+  "author": "PAI",
+  "license": "MIT",
+  "type": "native",
+  "changelog": {
+    "summary": "First release: computer control for Linux desktops (accessibility tree, click, type, keys, scroll, drag, apps).",
+    "features": [
+      "computer.observe: the active window's accessibility tree (AT-SPI2) with roles, names, positions and states, plus an optional screenshot",
+      "computer.click / long_press / type / key / scroll / swipe: a semantic accessibility action when the element has one, otherwise pointer and keyboard events through the desktop's remote-desktop portal (Wayland) or XTEST (X11)",
+      "computer.apps.list / launch / foreground, and computer.status which says exactly what is missing and how to fix it",
+      "Consent per plugin for screen and input; element ids are valid only within the observation that issued them"
+    ],
+    "fixes": [],
+    "breaking": []
+  },
+  "runtime": {
+    "kind": "device",
+    "nativeModule": "pai.computer_control",
+    "minPaiVersion": "0.4.0"
+  },
+  "platforms": {
+    "linux": {
+      "artifact": "linux/libpai_computer_control.so",
+      "entrypoint": "pai_plugin_module_create"
+    }
+  },
+  "architectures": [
+    "x86_64"
+  ],
+  "deviceTypes": [
+    "desktop"
+  ],
+  "permissions": [
+    "screen",
+    "input"
+  ],
+  "capabilities": [
+    {
+      "id": "computer.status",
+      "taskType": "one_shot",
+      "description": "Say whether computer control is ready and what is missing (accessibility bus, permissions, input path) with how to fix it. Never asks the user for anything.",
+      "permissions": [],
+      "requireConfirmation": false,
+      "risk": "low",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "id": "computer.observe",
+      "taskType": "one_shot",
+      "description": "Look at the screen: the active application and window, and the accessibility tree of its controls (role, name, text, position, state, an id per element). Optionally a screenshot (PNG, base64) for what the tree does not expose. Element ids are valid only until the next observation. Result fields app, screen, tree and screenshot are JSON.",
+      "permissions": [
+        "screen"
+      ],
+      "requireConfirmation": true,
+      "risk": "medium",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "include_tree": {
+            "type": "boolean",
+            "description": "Return the accessibility tree (default true)."
+          },
+          "include_screenshot": {
+            "type": "boolean",
+            "description": "Also return a screenshot (default false)."
+          },
+          "max_nodes": {
+            "type": "integer",
+            "description": "At most this many tree nodes, 1-500 (default 150)."
+          },
+          "max_depth": {
+            "type": "integer",
+            "description": "Tree depth limit, 1-40 (default 12)."
+          }
+        }
+      },
+      "confirmationReason": "PAI wants to look at what is on your screen.",
+      "timeoutSeconds": 120
+    },
+    {
+      "id": "computer.click",
+      "taskType": "one_shot",
+      "description": "Click an element (element_id) or a point (x, y). Uses the element's own accessibility action when it has one, otherwise real pointer events at its centre. Verify the effect with computer.observe.",
+      "permissions": [
+        "input"
+      ],
+      "requireConfirmation": true,
+      "risk": "high",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "element_id": {
+            "type": "string",
+            "description": "An element id from the latest computer.observe (preferred over coordinates)."
+          },
+          "observation_id": {
+            "type": "string",
+            "description": "Optional: the observation the element id came from; refused with stale_observation if the screen was observed again since."
+          },
+          "x": {
+            "type": "number",
+            "description": "Horizontal pixel of the latest observation (used when there is no element_id)."
+          },
+          "y": {
+            "type": "number",
+            "description": "Vertical pixel of the latest observation (used when there is no element_id)."
+          },
+          "button": {
+            "type": "string",
+            "enum": [
+              "left",
+              "right",
+              "middle"
+            ],
+            "description": "Default left."
+          },
+          "count": {
+            "type": "integer",
+            "description": "1 (click) or 2 (double-click). Default 1."
+          }
+        }
+      },
+      "confirmationReason": "PAI wants to operate your computer for you (click, type, scroll). You can stop it at any time.",
+      "timeoutSeconds": 150
+    },
+    {
+      "id": "computer.long_press",
+      "taskType": "one_shot",
+      "description": "Press and hold an element or point.",
+      "permissions": [
+        "input"
+      ],
+      "requireConfirmation": true,
+      "risk": "high",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "element_id": {
+            "type": "string",
+            "description": "An element id from the latest computer.observe (preferred over coordinates)."
+          },
+          "observation_id": {
+            "type": "string",
+            "description": "Optional: the observation the element id came from; refused with stale_observation if the screen was observed again since."
+          },
+          "x": {
+            "type": "number",
+            "description": "Horizontal pixel of the latest observation (used when there is no element_id)."
+          },
+          "y": {
+            "type": "number",
+            "description": "Vertical pixel of the latest observation (used when there is no element_id)."
+          },
+          "duration_ms": {
+            "type": "integer",
+            "description": "100-5000 (default 600)."
+          }
+        }
+      },
+      "confirmationReason": "PAI wants to operate your computer for you (click, type, scroll). You can stop it at any time.",
+      "timeoutSeconds": 150
+    },
+    {
+      "id": "computer.type",
+      "taskType": "one_shot",
+      "description": "Type text, into an element (it is focused first; a text field is filled directly) or into whatever has focus. Newline presses Return. Up to 500 characters.",
+      "permissions": [
+        "input"
+      ],
+      "requireConfirmation": true,
+      "risk": "high",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "The text to type."
+          },
+          "element_id": {
+            "type": "string",
+            "description": "Element to type into (from computer.observe)."
+          },
+          "observation_id": {
+            "type": "string",
+            "description": "Optional: the observation the element id came from."
+          },
+          "clear_first": {
+            "type": "boolean",
+            "description": "Replace the field's content instead of adding to it (default false)."
+          }
+        },
+        "required": [
+          "text"
+        ]
+      },
+      "confirmationReason": "PAI wants to type text on your computer.",
+      "timeoutSeconds": 150
+    },
+    {
+      "id": "computer.key",
+      "taskType": "one_shot",
+      "description": "Press a key or shortcut, xdotool style: ctrl+l, alt+Tab, Return, Escape, F5, ctrl+shift+t. Write the plus key as 'plus'.",
+      "permissions": [
+        "input"
+      ],
+      "requireConfirmation": true,
+      "risk": "high",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "keys": {
+            "type": "string",
+            "description": "The key or shortcut."
+          }
+        },
+        "required": [
+          "keys"
+        ]
+      },
+      "confirmationReason": "PAI wants to press keys on your computer.",
+      "timeoutSeconds": 150
+    },
+    {
+      "id": "computer.scroll",
+      "taskType": "one_shot",
+      "description": "Scroll the wheel over an element or point (or where the pointer is).",
+      "permissions": [
+        "input"
+      ],
+      "requireConfirmation": true,
+      "risk": "high",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "element_id": {
+            "type": "string",
+            "description": "An element id from the latest computer.observe (preferred over coordinates)."
+          },
+          "observation_id": {
+            "type": "string",
+            "description": "Optional: the observation the element id came from; refused with stale_observation if the screen was observed again since."
+          },
+          "x": {
+            "type": "number",
+            "description": "Horizontal pixel of the latest observation (used when there is no element_id)."
+          },
+          "y": {
+            "type": "number",
+            "description": "Vertical pixel of the latest observation (used when there is no element_id)."
+          },
+          "direction": {
+            "type": "string",
+            "enum": [
+              "up",
+              "down",
+              "left",
+              "right"
+            ]
+          },
+          "amount": {
+            "type": "integer",
+            "description": "Wheel steps, 1-50 (default 3)."
+          }
+        },
+        "required": [
+          "direction"
+        ]
+      },
+      "confirmationReason": "PAI wants to operate your computer for you (click, type, scroll). You can stop it at any time.",
+      "timeoutSeconds": 150
+    },
+    {
+      "id": "computer.swipe",
+      "taskType": "one_shot",
+      "description": "Drag from one point to another (press, move, release).",
+      "permissions": [
+        "input"
+      ],
+      "requireConfirmation": true,
+      "risk": "high",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "from": {
+            "type": "object",
+            "properties": {
+              "x": {
+                "type": "number"
+              },
+              "y": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "x",
+              "y"
+            ],
+            "description": "Start point."
+          },
+          "to": {
+            "type": "object",
+            "properties": {
+              "x": {
+                "type": "number"
+              },
+              "y": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "x",
+              "y"
+            ],
+            "description": "End point."
+          },
+          "duration_ms": {
+            "type": "integer",
+            "description": "50-5000 (default 300)."
+          }
+        },
+        "required": [
+          "from",
+          "to"
+        ]
+      },
+      "confirmationReason": "PAI wants to operate your computer for you (click, type, scroll). You can stop it at any time.",
+      "timeoutSeconds": 150
+    },
+    {
+      "id": "computer.apps.list",
+      "taskType": "one_shot",
+      "description": "List installed applications (id and name), optionally filtered by a text.",
+      "permissions": [],
+      "requireConfirmation": false,
+      "risk": "low",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Only apps whose id or name contains this."
+          }
+        }
+      }
+    },
+    {
+      "id": "computer.apps.launch",
+      "taskType": "one_shot",
+      "description": "Start an installed application by id or name (see computer.apps.list). Then computer.observe to see it.",
+      "permissions": [],
+      "requireConfirmation": true,
+      "risk": "medium",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Application id, e.g. org.gnome.Calculator."
+          },
+          "name": {
+            "type": "string",
+            "description": "Or its display name, e.g. Calculator."
+          }
+        }
+      },
+      "confirmationReason": "PAI wants to start an application on your computer."
+    },
+    {
+      "id": "computer.apps.foreground",
+      "taskType": "one_shot",
+      "description": "The application and window in front right now.",
+      "permissions": [],
+      "requireConfirmation": false,
+      "risk": "low",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    }
+  ]
+}

@@ -25,8 +25,8 @@ tests to change together, and nothing here needs it):
 |---|---|---|---|
 | `computer.status` | none | low | false |
 | `computer.observe` | `screen` | medium | true (reads what is on screen) |
-| `computer.apps.list`, `computer.apps.foreground` | `system` (as `desktop` declares for apps) | low | false |
-| `computer.apps.launch` | `system` | medium | true |
+| `computer.apps.list`, `computer.apps.foreground` | none (like `desktop`'s app capabilities; `system` maps to the backend's `system.*` permissions, which include the hard-denied `system.execute`) | low | false |
+| `computer.apps.launch` | none, but gated by the platform's own consent (Linux: the `input` consent inside the plugin) | medium | true |
 | `computer.click`, `computer.long_press`, `computer.type`, `computer.key`, `computer.scroll`, `computer.swipe` | `input` | high | true |
 
 A capability that declares `input` always asks (the existing rule); the device-side OS prompt (portal dialog on
@@ -36,7 +36,7 @@ human-readable `how_to_fix`.
 
 ## Capabilities
 
-All results are JSON objects; failures use the plugin error channel (a message the user can read), never a
+Native (C++) plugins return flat string maps, so structured fields (`app`, `screen`, `tree`, `screenshot`, `target`, `missing`, `features`, `apps`) may arrive as JSON-encoded strings; the backend decodes them (`pai.agent.computer`). Results are JSON objects; failures use the plugin error channel (a message the user can read), never a
 silent no-op. Coordinates are screen pixels of the CURRENT observation (`screen.width/height`).
 
 * `computer.status` -> `{ready: bool, platform, missing: [string], how_to_fix: string|null, features: {tree, screenshot, ocr, input}}`

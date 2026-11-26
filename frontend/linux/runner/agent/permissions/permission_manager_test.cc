@@ -149,6 +149,61 @@ static void EnvBridgeAcrossPluginsTests() {
   });
 }
 
+static const char* kCC = "pai.computer_control";
+
+// computer_control's consent gates follow only ITS own decisions, in both directions.
+static void ComputerControlGateTests() {
+  ::unsetenv("PAI_INPUT_CONSENT"); ::unsetenv("PAI_SCREEN_CONSENT");
+  ::unsetenv("PAI_CC_INPUT_CONSENT"); ::unsetenv("PAI_CC_SCREEN_CONSENT");
+  WithConfigDir([](const std::string&) {
+    PermissionManager pm;
+    // another plugin being allowed input/screen opens ITS gates, never computer_control's
+    pm.SetDecisions(kInput, {"input"}, true);
+    pm.SetDecisions(kScreen, {"screen"}, true);
+    pm.ApplyEnvBridges();
+    CHECK(Env("PAI_INPUT_CONSENT") == "1" && Env("PAI_SCREEN_CONSENT") == "1");
+    CHECK(Env("PAI_CC_INPUT_CONSENT") == "<unset>");
+    CHECK(Env("PAI_CC_SCREEN_CONSENT") == "<unset>");
+
+    // computer_control allowed for input only: its input gate opens, its screen gate does not
+    pm.SetDecisions(kCC, {"input"}, true);
+    pm.ApplyEnvBridges();
+    CHECK(Env("PAI_CC_INPUT_CONSENT") == "1");
+    CHECK(Env("PAI_CC_SCREEN_CONSENT") == "<unset>");
+
+    // its decisions do not open the shared gates for anyone else
+    pm.SetDecisions(kInput, {"input"}, false);
+    pm.SetDecisions(kScreen, {"screen"}, false);
+    pm.ApplyEnvBridges();
+    CHECK(Env("PAI_INPUT_CONSENT") == "<unset>" && Env("PAI_SCREEN_CONSENT") == "<unset>");
+    CHECK(Env("PAI_CC_INPUT_CONSENT") == "1");               // and revoking the others leaves its own gate alone
+
+    // the user revokes it -> its gate closes immediately
+    pm.SetDecisions(kCC, {"input"}, false);
+    pm.ApplyEnvBridges();
+    CHECK(Env("PAI_CC_INPUT_CONSENT") == "<unset>");
+
+    // allow both, then uninstall (Forget): both gates close and stay closed
+    pm.SetDecisions(kCC, {"input", "screen"}, true);
+    pm.ApplyEnvBridges();
+    CHECK(Env("PAI_CC_INPUT_CONSENT") == "1" && Env("PAI_CC_SCREEN_CONSENT") == "1");
+    pm.Forget(kCC);
+    CHECK(Env("PAI_CC_INPUT_CONSENT") == "<unset>" && Env("PAI_CC_SCREEN_CONSENT") == "<unset>");
+  });
+  // a relaunch restores it from the stored decision
+  {
+    char dir[] = "/tmp/pai_perm_XXXXXX";
+    CHECK(::mkdtemp(dir) != nullptr);
+    ::setenv("XDG_CONFIG_HOME", dir, 1);
+    { PermissionManager pm; pm.SetDecisions(kCC, {"screen"}, true); }
+    ::unsetenv("PAI_CC_SCREEN_CONSENT");
+    { PermissionManager relaunched; relaunched.ApplyEnvBridges(); CHECK(Env("PAI_CC_SCREEN_CONSENT") == "1"); }
+    ::unsetenv("XDG_CONFIG_HOME");
+  }
+  ::unsetenv("PAI_INPUT_CONSENT"); ::unsetenv("PAI_SCREEN_CONSENT");
+  ::unsetenv("PAI_CC_INPUT_CONSENT"); ::unsetenv("PAI_CC_SCREEN_CONSENT");
+}
+
 int main() {
   ::unsetenv("PAI_INPUT_CONSENT");
   ::unsetenv("PAI_SCREEN_CONSENT");
@@ -209,6 +264,7 @@ int main() {
   UninstallTests();
   LegacyFileTests();
   EnvBridgeAcrossPluginsTests();
+  ComputerControlGateTests();
 
   if (failures) { std::fprintf(stderr, "%d check(s) failed\n", failures); return 1; }
   std::puts("OK");
