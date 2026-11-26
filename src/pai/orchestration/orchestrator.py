@@ -167,6 +167,7 @@ class TaskOrchestrator(Manager):
         self.chat_reply_max_tokens = orchestrator_config.chat_reply_max_tokens
         self.chat_reply_temperature = orchestrator_config.chat_reply_temperature
         # Plain conversation skips the planner LLM call (see orchestration/fast_route.py).
+        self.user_profiles = None        # UserProfileService (wired in app_context); None in bare unit tests
         self.fast_router = FastRouter(
             getattr(self.planner, "llm", None), enabled=orchestrator_config.fast_chat_path,
             timeout_seconds=orchestrator_config.fast_route_timeout_seconds)
@@ -395,6 +396,7 @@ class TaskOrchestrator(Manager):
         )
         if request_id:
             execution_context.request_id = request_id
+        await self._apply_user_profile(execution_context)
         if execution_context.origin is None:
             # Who started this: a person typing, a person speaking, or an agent acting alone.
             if agent_id:
@@ -802,6 +804,23 @@ class TaskOrchestrator(Manager):
         cap = data.get("capability") or data.get("type")
         return cap == CHAT_CAPABILITY_ID
 
+    async def _apply_user_profile(self, ctx: ExecutionContext) -> None:
+        """What the user told us about themselves: their time zone for planning ("remind me at 6pm") and
+        a bounded data block for the reply prompt. Cached; a failure never blocks the turn."""
+        profiles = getattr(self, "user_profiles", None)
+        if profiles is None:
+            return
+        try:
+            profile = await profiles.get(ctx.user_id)
+        except Exception as exc:
+            logger.debug("user profile unavailable: {}", exc)
+            return
+        if profile.timezone:
+            ctx.user_preferences.setdefault("timezone", profile.timezone)
+        block = profile.block
+        if block:
+            ctx.user_preferences["profile_block"] = block
+
     async def _chat_reply(
         self,
         *,
@@ -963,6 +982,7 @@ class TaskOrchestrator(Manager):
                 intent="clarify" if clarify else "reply",
                 clarify_question=clarify_question,
                 clarify_options=clarify_options,
+                user_profile_block=str((context.user_preferences or {}).get("profile_block") or ""),
             )
             span.set_attribute("prompt", prompt[:self.prompt_trace_max_size])
             span.set_attribute("prompt_length", len(prompt))

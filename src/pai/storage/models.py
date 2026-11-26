@@ -118,6 +118,8 @@ class UserModel(Base):
     display_name: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
     timezone: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)    # IANA, e.g. "Asia/Kolkata"
     locale: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)      # e.g. "en", "hi-IN"
+    # What the user told us about themselves (likes, interests, style ...): pai.users.profile.Personalization
+    personalization: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False,

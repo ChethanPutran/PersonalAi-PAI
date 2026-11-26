@@ -22,6 +22,7 @@ from pai.app_context import PAIAppContext, get_app_context
 from pai.security.tokens.auth import ahash_password, averify_password
 from pai.storage.models import UserModel
 from pai.storage.repositories.plugin import UserPluginRepository
+from pai.users.profile import Personalization, load_personalization
 
 router = APIRouter(prefix="/account", tags=["account"])
 
@@ -105,12 +106,54 @@ async def get_profile(user_id: str = Depends(get_current_user),
 
 @router.patch("/profile", response_model=ProfileOut)
 async def update_profile(payload: ProfileUpdate, user_id: str = Depends(get_current_user),
-                         session: AsyncSession = Depends(get_db)) -> ProfileOut:
+                         session: AsyncSession = Depends(get_db),
+                         context: PAIAppContext = Depends(get_app_context)) -> ProfileOut:
     user = await _user(session, user_id)
     for field in payload.model_fields_set:
         setattr(user, field, getattr(payload, field) or None)       # "" clears
     await session.flush()
+    _forget(context, user_id)
     return _profile(user)
+
+
+def _forget(context: PAIAppContext, user_id: str) -> None:
+    """Drop the cached profile so the next chat message uses what was just saved."""
+    profiles = getattr(context.orchestrator, "user_profiles", None)
+    if profiles is not None:
+        profiles.invalidate(user_id)
+
+
+# ============================================================
+# Personalization (likes, interests, style ...: used to personalise replies)
+# ============================================================
+
+@router.get("/personalization", response_model=Personalization)
+async def get_personalization(user_id: str = Depends(get_current_user),
+                              session: AsyncSession = Depends(get_db)) -> Personalization:
+    return load_personalization((await _user(session, user_id)).personalization)
+
+
+@router.put("/personalization", response_model=Personalization)
+async def put_personalization(payload: Personalization, user_id: str = Depends(get_current_user),
+                              session: AsyncSession = Depends(get_db),
+                              context: PAIAppContext = Depends(get_app_context)) -> Personalization:
+    """Replace the user's personalization. Everything is optional; an empty body clears it. The text is
+    sanitised and bounded (see pai.users.profile) because it is sent to the model with every request."""
+    user = await _user(session, user_id)
+    user.personalization = payload.model_dump()
+    await session.flush()
+    _forget(context, user_id)
+    return payload
+
+
+@router.delete("/personalization", status_code=204)
+async def clear_personalization(user_id: str = Depends(get_current_user),
+                                session: AsyncSession = Depends(get_db),
+                                context: PAIAppContext = Depends(get_app_context)):
+    user = await _user(session, user_id)
+    user.personalization = None
+    await session.flush()
+    _forget(context, user_id)
 
 
 class PasswordChange(BaseModel):

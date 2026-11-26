@@ -388,6 +388,23 @@ class DeviceManager(Manager):
             )
         await self._with_session(_do)
 
+    async def rename(self, device_id: str, name: str) -> Optional[DeviceInfo]:
+        """Give a device the name its owner chose (the route checked ownership). The name is then locked
+        against the automatic default the app sends on every launch."""
+        device = await self.registry.get(device_id)
+        if device is None:
+            return None
+        device.name = name
+        device.metadata = {**(device.metadata or {}), "name_locked": True}
+
+        async def _do(session: AsyncSession):
+            await DeviceRepository(session).upsert(
+                device_id=device_id, name=name, metadata=dict(device.metadata), user_id=device.user_id,
+                status=_normalize_status(device.status))     # upsert()'s default would mark it offline
+        await self._with_session(_do)
+        self._invalidate_router(device.user_id)
+        return device
+
     async def set_remote_access(
         self, device_id: str, *, install: Optional[bool] = None, invoke: Optional[bool] = None,
     ) -> Optional[DeviceInfo]:
@@ -885,6 +902,12 @@ class DeviceManager(Manager):
                 return
 
             updates = update.model_dump(exclude_none=True)
+            # A name the user chose is theirs: the app re-sends its default name ("PAI <hostname>") on
+            # every launch and must not undo it. Metadata is merged for the same reason (it carries the flag).
+            if (device.metadata or {}).get("name_locked"):
+                updates.pop("name", None)
+            if "metadata" in updates:
+                updates["metadata"] = {**(device.metadata or {}), **(updates["metadata"] or {})}
 
             changed = {
                 key: value
@@ -914,6 +937,7 @@ class DeviceManager(Manager):
                     # Metadata refresh never changes WHO owns the device (assign_user does that,
                     # deliberately): keep the owner the registry already has.
                     kwargs["user_id"] = device.user_id
+                    kwargs["status"] = _normalize_status(device.status)     # upsert()'s default is "offline"
 
                     await repo.upsert(**kwargs)
 

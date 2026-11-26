@@ -179,6 +179,32 @@ def _remote_access_view(device: Any) -> Dict[str, Any]:
     }
 
 
+class DeviceRename(BaseModel):
+    name: str
+
+
+@router.patch("/{device_id}")
+async def rename_device(
+    device_id: str,
+    payload: DeviceRename,
+    context: PAIAppContext = Depends(get_app_context),
+    user_id: str = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Rename one of your devices (1 to 80 characters). The name sticks: the app's automatic default name
+    no longer replaces it when the app registers again."""
+    name = " ".join((payload.name or "").split())
+    if not 1 <= len(name) <= 80:
+        raise HTTPException(422, "The name must be 1 to 80 characters.")
+    dm = context.orchestrator.device_manager
+    device = await dm.get(device_id)
+    if device is None or getattr(device, "user_id", None) != user_id:
+        raise HTTPException(404, "Device not found")
+    updated = await dm.rename(device_id, name)
+    if updated is None:
+        raise HTTPException(404, "Device not found")
+    return {"id": updated.id, "name": updated.name}
+
+
 @router.get("/{device_id}/remote-access")
 async def get_remote_access(
     device_id: str,

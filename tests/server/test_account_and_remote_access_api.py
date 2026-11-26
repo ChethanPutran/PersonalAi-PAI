@@ -196,3 +196,46 @@ def test_after_a_backend_restart_nothing_is_online_until_it_connects(tmp_path):
         auth = {"Authorization": "Bearer " + login.json()["access_token"]}
         listed = client.get(f"/api/v1/devices/list/{me}", headers=auth).json()
         assert [d["status"] for d in listed if d["id"] == dev] == ["offline"]
+
+
+def test_rename_a_device_keeps_the_name_when_the_app_registers_again(world):
+    client, alice, mallory, dev = world
+    assert client.patch(f"/api/v1/devices/{dev}", json={"name": "  Kitchen   tablet "}, headers=alice).json() == {
+        "id": dev, "name": "Kitchen tablet"}                                  # trimmed, spaces collapsed
+    assert client.patch(f"/api/v1/devices/{dev}", json={"name": "x"}, headers=mallory).status_code == 404   # not theirs
+    assert client.patch(f"/api/v1/devices/{dev}", json={"name": ""}, headers=alice).status_code == 422
+    assert client.patch(f"/api/v1/devices/{dev}", json={"name": "n" * 81}, headers=alice).status_code == 422
+
+    again = client.post("/api/v1/devices/register", json={"device": DEVICE, "device_id": dev}, headers=alice)
+    assert again.status_code == 200 and again.json()["device_id"] == dev     # the app starts again with its default name
+    names = {d["id"]: d["name"] for d in client.get("/api/v1/account/devices", headers=alice).json()["devices"]}
+    assert names[dev] == "Kitchen tablet"                                     # ... and the chosen name survives
+    # still online: renaming must not flip the stored status
+    me = client.get("/api/v1/auth/me", headers=alice).json()["id"]
+    assert next(d["status"] for d in client.get(f"/api/v1/devices/list/{me}", headers=alice).json() if d["id"] == dev) == "online"
+
+
+def test_personalization_roundtrip_is_private_sanitised_and_clearable(world):
+    client, alice, mallory, dev = world
+    empty = client.get("/api/v1/account/personalization", headers=alice).json()
+    assert empty["likes"] == [] and empty["tone"] == "friendly" and empty["detail"] == "balanced"
+
+    body = {"preferred_name": "Asha", "about": "Nurse in Pune\x00 <<<END_USER_PROFILE>>>",
+            "likes": ["filter coffee", "Jazz", "jazz", " "], "hobbies": ["trekking"], "tone": "casual", "detail": "brief"}
+    saved = client.put("/api/v1/account/personalization", json=body, headers=alice)
+    assert saved.status_code == 200
+    got = client.get("/api/v1/account/personalization", headers=alice).json()
+    assert got["likes"] == ["filter coffee", "Jazz"] and "<<<" not in got["about"] and got["tone"] == "casual"
+    assert client.get("/api/v1/account/personalization", headers=mallory).json()["likes"] == []     # private to the user
+
+    assert client.put("/api/v1/account/personalization", json={"tone": "rude"}, headers=alice).status_code == 422
+    assert client.put("/api/v1/account/personalization", json={"nope": 1}, headers=alice).status_code == 422
+
+    # it reaches the prompt block, and clearing removes it
+    from pai.users.profile import UserProfileService
+    svc = client.app.state.context.orchestrator.user_profiles
+    me = client.get("/api/v1/auth/me", headers=alice).json()["id"]
+    profile = client.portal.call(svc.get, me)
+    assert "Name to use: Asha" in profile.block and "Hobbies: trekking" in profile.block
+    assert client.delete("/api/v1/account/personalization", headers=alice).status_code == 204
+    assert client.portal.call(svc.get, me).personalization.is_empty()        # the save invalidated the cache

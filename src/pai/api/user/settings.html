@@ -161,6 +161,17 @@ section.panel { scroll-margin-top: 20px; margin-bottom: 42px; }
 .empty b { display: block; color: var(--text); margin-bottom: 4px; }
 .banner { padding: 12px 14px; border-radius: var(--radius-sm); margin-bottom: 14px; font-size: 14px; }
 .banner.bad { background: var(--bad-soft); color: var(--bad); }
+textarea.input { min-height: 92px; resize: vertical; line-height: 1.45; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; padding: 8px; border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: var(--surface); cursor: text; transition: border-color .15s, box-shadow .15s; }
+.chips:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.chips input { flex: 1 1 140px; min-width: 120px; border: none; outline: none; background: transparent; padding: 4px 6px; }
+.tag { display: inline-flex; align-items: center; gap: 6px; padding: 4px 6px 4px 11px; border-radius: 999px; background: var(--accent-soft);
+  color: var(--accent); font-weight: 600; font-size: 13.5px; }
+.tag button { border: none; background: transparent; color: inherit; cursor: pointer; font-size: 16px; line-height: 1; padding: 0 5px; border-radius: 50%; }
+.tag button:hover { background: var(--surface); }
+.rename { display: inline-flex; gap: 6px; align-items: center; }
+.rename .input { padding: 5px 9px; width: min(260px, 60vw); }
 .seg { display: inline-flex; padding: 3px; border-radius: 11px; background: var(--surface-2); gap: 2px; }
 .seg button { border: none; background: transparent; padding: 7px 16px; border-radius: 8px; cursor: pointer; font-weight: 600; color: var(--muted); }
 .seg button[aria-pressed="true"] { background: var(--surface); color: var(--text); box-shadow: var(--shadow); }
@@ -258,6 +269,43 @@ dialog p { margin: 0 0 18px; color: var(--muted); }
             <button type="button" class="btn ghost" id="p-reset" hidden>Discard</button></div>
         </form>
       </div>
+    </section>
+
+    <!-- Personalization -->
+    <section class="panel" id="personal">
+      <h2>Personalization</h2>
+      <p class="lead">Tell PAI about yourself so its answers feel personal. It is only used to tailor replies to you
+        (in chat and by voice); you can edit or clear it any time.</p>
+      <form class="card pad" id="personal-form">
+        <div class="two">
+          <div class="field"><label for="pz-name">What should PAI call you?</label>
+            <input class="input" id="pz-name" maxlength="60" placeholder="e.g. Asha"></div>
+          <div class="field"><label for="pz-job">What do you do?</label>
+            <input class="input" id="pz-job" maxlength="80" placeholder="e.g. Nurse, student, designer"></div>
+        </div>
+        <div class="field"><label for="pz-about">About you</label>
+          <textarea class="input" id="pz-about" maxlength="1000" placeholder="Anything that helps PAI help you: where you live, your routine, what matters to you"></textarea>
+          <span class="hint" id="pz-about-count">0 / 1000</span></div>
+        <div class="field"><label>Likes</label><div class="chips" data-chips="likes"></div>
+          <span class="hint">Press Enter or comma to add. Things you enjoy.</span></div>
+        <div class="field"><label>Dislikes</label><div class="chips" data-chips="dislikes"></div>
+          <span class="hint">Things PAI should steer away from.</span></div>
+        <div class="field"><label>Interests</label><div class="chips" data-chips="interests"></div></div>
+        <div class="field"><label>Hobbies</label><div class="chips" data-chips="hobbies"></div></div>
+        <div class="two">
+          <div class="field"><label>Tone</label>
+            <div class="seg" id="pz-tone" role="group" aria-label="Tone">
+              <button type="button" data-v="friendly">Friendly</button><button type="button" data-v="casual">Casual</button>
+              <button type="button" data-v="formal">Formal</button><button type="button" data-v="concise">Concise</button></div></div>
+          <div class="field"><label>Detail</label>
+            <div class="seg" id="pz-detail" role="group" aria-label="Detail">
+              <button type="button" data-v="brief">Brief</button><button type="button" data-v="balanced">Balanced</button>
+              <button type="button" data-v="detailed">Detailed</button></div></div>
+        </div>
+        <div class="actions"><button class="btn primary" id="pz-save" disabled>Save</button>
+          <button type="button" class="btn ghost" id="pz-reset" hidden>Discard</button>
+          <span class="grow"></span><button type="button" class="btn ghost danger" id="pz-clear">Clear everything</button></div>
+      </form>
     </section>
 
     <!-- Devices -->
@@ -425,7 +473,7 @@ function sw(on, label, onchange) {
 }
 
 /* ---- sections / nav ---- */
-const SECTIONS = [["profile", "Profile", "user"], ["devices", "Devices", "device"], ["plugins", "Plugins", "plug"],
+const SECTIONS = [["profile", "Profile", "user"], ["personal", "Personalization", "sun"], ["devices", "Devices", "device"], ["plugins", "Plugins", "plug"],
   ["activity", "Activity", "clock"], ["security", "Security", "lock"], ["appearance", "Appearance", "sun"]];
 function buildNav() {
   const nav = $("#nav"); nav.replaceChildren();
@@ -476,6 +524,65 @@ function wireProfile() {
   });
 }
 
+/* ---- personalization ---- */
+const PZ_LISTS = ["likes", "dislikes", "interests", "hobbies"];
+let pz = null, pzDraft = null;
+const pzSame = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+function pzEmpty() { return { preferred_name: "", about: "", occupation: "", likes: [], dislikes: [], interests: [], hobbies: [], tone: "friendly", detail: "balanced" }; }
+function pzSync() {
+  const d = !pzSame(pz, pzDraft);
+  $("#pz-save").disabled = !d; $("#pz-reset").hidden = !d;
+}
+function renderChips(box, key) {
+  box.replaceChildren();
+  for (const item of pzDraft[key]) {
+    box.append(h("span", { class: "tag" }, item, h("button", { type: "button", "aria-label": "Remove " + item,
+      onclick: e => { e.stopPropagation(); pzDraft[key] = pzDraft[key].filter(x => x !== item); renderChips(box, key); pzSync(); } }, "×")));
+  }
+  const input = h("input", { placeholder: pzDraft[key].length ? "" : "Type and press Enter", maxlength: "60", "aria-label": "Add to " + key });
+  const add = () => {
+    for (const raw of input.value.split(",")) {
+      const v = raw.trim().replace(/\s+/g, " ").slice(0, 60);
+      if (v && pzDraft[key].length < 30 && !pzDraft[key].some(x => x.toLowerCase() === v.toLowerCase())) pzDraft[key] = [...pzDraft[key], v];
+    }
+    input.value = ""; renderChips(box, key); pzSync(); box.querySelector("input").focus();
+  };
+  input.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === ",") { e.preventDefault(); add(); }
+    else if (e.key === "Backspace" && !input.value && pzDraft[key].length) { pzDraft[key] = pzDraft[key].slice(0, -1); renderChips(box, key); pzSync(); box.querySelector("input").focus(); } });
+  input.addEventListener("blur", () => { if (input.value.trim()) add(); });
+  box.append(input);
+  box.onclick = () => input.focus();
+}
+function renderPersonal() {
+  $("#pz-name").value = pzDraft.preferred_name; $("#pz-job").value = pzDraft.occupation; $("#pz-about").value = pzDraft.about;
+  $("#pz-about-count").textContent = pzDraft.about.length + " / 1000";
+  document.querySelectorAll("[data-chips]").forEach(b => renderChips(b, b.dataset.chips));
+  for (const [id, key] of [["#pz-tone", "tone"], ["#pz-detail", "detail"]])
+    for (const b of $(id).children) b.setAttribute("aria-pressed", String(b.dataset.v === pzDraft[key]));
+  pzSync();
+}
+async function loadPersonal() {
+  try { pz = await api("/account/personalization"); pzDraft = JSON.parse(JSON.stringify(pz)); renderPersonal(); }
+  catch (e) { toast(e.message, true); }
+}
+function wirePersonal() {
+  const bind = (sel, key) => $(sel).addEventListener("input", e => { pzDraft[key] = e.target.value; if (key === "about") $("#pz-about-count").textContent = e.target.value.length + " / 1000"; pzSync(); });
+  bind("#pz-name", "preferred_name"); bind("#pz-job", "occupation"); bind("#pz-about", "about");
+  for (const [id, key] of [["#pz-tone", "tone"], ["#pz-detail", "detail"]])
+    for (const b of $(id).children) b.addEventListener("click", () => { pzDraft[key] = b.dataset.v; renderPersonal(); });
+  $("#pz-reset").addEventListener("click", () => { pzDraft = JSON.parse(JSON.stringify(pz)); renderPersonal(); });
+  $("#personal-form").addEventListener("submit", async e => {
+    e.preventDefault(); const b = $("#pz-save"); setBusy(b, true, "Saving…");
+    try { pz = await api("/account/personalization", { method: "PUT", body: pzDraft }); pzDraft = JSON.parse(JSON.stringify(pz)); renderPersonal(); toast("Saved. PAI will use this from your next message."); }
+    catch (err) { toast(err.message, true); } finally { setBusy(b, false); pzSync(); }
+  });
+  $("#pz-clear").addEventListener("click", async () => {
+    if (!await confirmDialog("Clear your personalization?", "PAI will forget what you told it here. Your chats and memories are not affected.", "Clear")) return;
+    try { await api("/account/personalization", { method: "DELETE" }); pz = pzEmpty(); pzDraft = pzEmpty(); renderPersonal(); toast("Cleared"); }
+    catch (err) { toast(err.message, true); }
+  });
+}
+
 /* ---- devices ---- */
 let deviceNames = {};
 const PLATFORM = { android: "Android", ios: "iOS", linux: "Linux", macos: "macOS", windows: "Windows", web: "Web" };
@@ -487,6 +594,29 @@ async function loadDevices() {
     if (!devices.length) { box.replaceChildren(h("div", { class: "card" }, empty("No devices yet", "Sign in from the PAI app or run the device agent to add one."))); return; }
     box.replaceChildren(...devices.map(deviceCard));
   } catch (e) { box.replaceChildren(h("div", { class: "banner bad" }, e.message)); }
+}
+function nameEditor(d) {
+  const label = h("span", {}, d.name || "Unnamed device");
+  const edit = h("button", { class: "btn ghost sm", type: "button", "aria-label": "Rename " + (d.name || "device") }, "Rename");
+  const wrap = h("span", { class: "device-name-text", style: "display:inline-flex;align-items:center;gap:6px" }, label, edit);
+  edit.addEventListener("click", () => {
+    const input = h("input", { class: "input", value: d.name || "", maxlength: "80", "aria-label": "Device name" });
+    const save = h("button", { class: "btn primary sm", type: "button" }, "Save");
+    const cancel = h("button", { class: "btn ghost sm", type: "button" }, "Cancel");
+    const form = h("span", { class: "rename" }, input, save, cancel);
+    wrap.replaceWith(form); input.focus(); input.select();
+    const done = () => form.replaceWith(wrap);
+    const commit = async () => {
+      const name = input.value.trim();
+      if (!name || name === d.name) return done();
+      save.disabled = true;
+      try { const r = await api(`/devices/${encodeURIComponent(d.id)}`, { method: "PATCH", body: { name } }); d.name = r.name; label.textContent = r.name; deviceNames[d.id] = r.name; toast("Renamed"); done(); }
+      catch (err) { toast(err.message, true); save.disabled = false; }
+    };
+    save.addEventListener("click", commit); cancel.addEventListener("click", done);
+    input.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); commit(); } else if (e.key === "Escape") done(); });
+  });
+  return wrap;
 }
 function deviceCard(d) {
   const mobile = ["android", "ios"].includes(d.platform);
@@ -525,7 +655,7 @@ function deviceCard(d) {
     h("div", { class: "device-head" },
       h("div", { class: "device-icon" }, icon(mobile ? "phone" : "device")),
       h("div", { class: "grow" },
-        h("div", { class: "device-name" }, d.name || "Unnamed device",
+        h("div", { class: "device-name" }, nameEditor(d),
           h("span", { class: "chip " + (d.connected ? "ok" : "") }, h("span", { class: "dot " + (d.connected ? "on" : "") }), d.connected ? "Online" : "Offline")),
         h("div", { class: "meta" }, [PLATFORM[d.platform] || d.platform, d.os_version, d.app_version && "app " + d.app_version, "seen " + ago(d.last_seen)].filter(Boolean).join(" · ")))),
     h("div", { class: "device-body" },
@@ -614,7 +744,7 @@ async function start() {
   try {
     renderProfile(await api("/account/profile"));
   } catch (e) { if (e.status !== 401) { $("#global-error").textContent = e.message; $("#global-error").hidden = false; } return; }
-  await loadDevices(); loadPlugins(); loadActivity();
+  await loadDevices(); loadPersonal(); loadPlugins(); loadActivity();
 }
 $("#login-form").addEventListener("submit", async e => {
   e.preventDefault(); const b = $("#login-btn"); setBusy(b, true, "Signing in…"); $("#login-error").hidden = true;
@@ -631,7 +761,7 @@ $("#signout").addEventListener("click", () => signOut(false));
 $("#plugin-search").addEventListener("input", renderPlugins);
 document.addEventListener("visibilitychange", () => { if (!document.hidden && store.get(TOKEN_KEY) && !$("#app").hidden) { loadDevices(); loadActivity(); } });
 
-fillSelects(); buildNav(); wireProfile(); wirePassword(); wireTheme();
+fillSelects(); buildNav(); wireProfile(); wirePersonal(); wirePassword(); wireTheme();
 if (store.get(TOKEN_KEY)) start(); else showAuth();
 </script>
 </body>

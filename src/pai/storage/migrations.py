@@ -41,6 +41,7 @@ MIGRATIONS: List[AddColumn] = [
     AddColumn("users", "display_name", "VARCHAR(80)"),
     AddColumn("users", "timezone", "VARCHAR(64)"),
     AddColumn("users", "locale", "VARCHAR(16)"),
+    AddColumn("users", "personalization", "JSON"),
     # per-device switches for remote plugin install / invocation (off by default)
     AddColumn("devices", "allow_remote_install", "BOOLEAN NOT NULL DEFAULT 0"),
     AddColumn("devices", "allow_remote_invoke", "BOOLEAN NOT NULL DEFAULT 0"),

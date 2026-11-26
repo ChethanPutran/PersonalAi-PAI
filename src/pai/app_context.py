@@ -317,6 +317,8 @@ def create_app_context(config: Config) -> PAIAppContext:
     capability_router.register_change_listener(
         orchestrator.sweep_stale_capability_memories,
     )
+    from pai.users.profile import UserProfileService
+    orchestrator.user_profiles = UserProfileService(database.sessionmaker)     # personalization for prompts
 
     # Long-running ReAct agents. Their tools are the user's own capabilities, run through
     # orchestrator.execute_action (so authorization/confirmation/audit are unchanged); their LLM
