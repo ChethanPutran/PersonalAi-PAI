@@ -30,6 +30,8 @@ import 'plugins/plugin_repository.dart';
 import 'plugins/plugin_registry.dart';
 import 'plugins/plugin_command_handler.dart';
 import 'plugins/plugin_command_router.dart';
+import 'plugins/remote_lifecycle.dart';
+import 'device/remote_access.dart';
 import 'plugins/runtime/plugin_runtime.dart';
 
 import 'plugins/capability_dispatcher.dart';
@@ -76,6 +78,11 @@ class _PaiAppState extends State<PaiApp> {
   TaskService? _taskService;
   ScheduleService? _scheduleService;
   DeviceConnectionService? _connectionService;
+
+  /// What the owner allows other devices to do to this one (pushed by the backend; see
+  /// [RemoteAccessController]) and the device-side handling of install requests.
+  RemoteAccessController? _remoteAccess;
+  RemoteLifecycle? _remoteLifecycle;
 
   ProfileService? _profileService;
   DeviceRepository? _deviceRepository;
@@ -140,6 +147,9 @@ if (context == null || !mounted) {
     '($nativeModule): $permissions',
   );
 
+  // A remote install is waiting for this answer: tell whoever asked.
+  unawaited(_remoteLifecycle?.awaitingPermission() ?? Future<void>.value());
+
   final approved = await showDialog<bool>(
     context: context,
     barrierDismissible: false,
@@ -195,6 +205,7 @@ if (context == null || !mounted) {
   );
 
   debugPrint('[PaiApp] consent result for $pluginName: $approved');
+  unawaited(_remoteLifecycle?.permissionAnswered() ?? Future<void>.value());
   return approved == true;
 }
 
@@ -236,11 +247,19 @@ if (context == null || !mounted) {
       final id = device.id;
       debugPrint('[PaiApp] Device registered: $id');
 
+      // From now on every call names this device (the backend tells local from remote with it).
+      api.deviceId = id;
+
+      // The owner's switches for THIS device. Nothing remote is allowed until the backend says so.
+      _remoteAccess?.dispose();
+      final remoteAccess = RemoteAccessController(api: api, deviceId: id);
+
       // WebSocket.
       final connection = DeviceConnectionService(
         baseUrl: api.baseUrl,
         deviceId: id,
         token: auth.token,
+        remoteAccess: remoteAccess,
       );
 
       // Restore chat session (if any) so that the user can see their
@@ -278,6 +297,31 @@ if (context == null || !mounted) {
       )..start();
       final profileService = ProfileService(api: api);
       final deviceRepo = DeviceRepository(profileService: profileService);
+
+      // Device side of install requests: enforce the switch, report stages + the final result.
+      final remoteLifecycle = RemoteLifecycle(
+        thisDeviceId: () => deviceId,
+        access: () => remoteAccess.value,
+        send: (frame) => connection.send(frame),
+        reportInstall: ({required pluginId, required version, operationId, required success, error}) =>
+            _pluginManager?.reportCommandInstall(
+                  pluginId: pluginId,
+                  version: version,
+                  operationId: operationId,
+                  success: success,
+                  error: error,
+                ) ??
+            Future<void>.value(),
+        reportUninstall: ({required pluginId, operationId, required success, error}) =>
+            _pluginManager?.reportCommandUninstall(
+                  pluginId: pluginId,
+                  operationId: operationId,
+                  success: success,
+                  error: error,
+                ) ??
+            Future<void>.value(),
+        bindStages: (listener) => installer.onStage = listener,
+      );
 
       // 4. Command router + handler.
       final commandRouter = PluginCommandRouter(
@@ -354,6 +398,8 @@ if (context == null || !mounted) {
         _device = device;
         _pluginManager = pluginManager;
         _connectionService = connection;
+        _remoteAccess = remoteAccess;
+        _remoteLifecycle = remoteLifecycle;
         _dispatcher = dispatcher;
         _chatService = chatService;
         _taskService = taskService;
@@ -405,7 +451,8 @@ unawaited(_refreshDevicesAfterConnect());
 
     final ran = await _reconcileGate.run(() async {
       final ok = await manager.reconcileWithBackend();
-      await manager.loadCatalog();
+      // The catalog was loaded at startup: only reload it when the reconcile changed something.
+      await manager.loadCatalog(maxAge: manager.lastReconcileChangedBackend ? null : const Duration(minutes: 1));
       dispatcher.invalidateCache();
       return ok;
     });
@@ -489,6 +536,15 @@ unawaited(_refreshDevicesAfterConnect());
       case 'capability.invoke':
         await _handlePluginCommand(message, commandHandler);
         return;
+      case 'plugin.operation':
+        // Live status of a remote install/uninstall (replaces polling).
+        _pluginManager?.handleOperationFrame(message);
+        return;
+
+      case 'device.remote_access':
+        // Applied by the connection service itself (it enforces it); nothing else to do.
+        return;
+
       case 'device.removed':
         final removedDeviceId = message['device_id']?.toString();
 
@@ -502,6 +558,9 @@ unawaited(_refreshDevicesAfterConnect());
         // Backend has just run attach_connection → DB status is now ONLINE.
         // Pull the authoritative view and republish to every consumer.
         unawaited(_refreshDevicesAfterConnect());
+
+        // Pick up installs that were running while the socket was down.
+        unawaited(_pluginManager?.loadActiveOperations() ?? Future<void>.value());
 
         unawaited(
           _reconcilePlugins().catchError((e, st) {
@@ -711,6 +770,28 @@ Future<void> _refreshDevicesAfterConnect() async {
       return;
     }
 
+    // Install/uninstall asked by the backend: the owner's switch decides (fail closed), and the
+    // requester gets live stages plus a clear result.
+    final lifecycle = _remoteLifecycle;
+    final isLifecycle = lifecycle != null && RemoteLifecycle.handles(type);
+    if (isLifecycle) {
+      final refusal = await lifecycle.refuseIfNotAllowed(message);
+      if (refusal != null) {
+        try {
+          await connection.sendResult(
+            requestId: requestId,
+            success: false,
+            result: {'operation': type, 'plugin_id': RemoteLifecycle.pluginIdOf(message)},
+            error: refusal,
+          );
+        } catch (e) {
+          debugPrint('[PaiApp] Failed to send refusal: $e');
+        }
+        return;
+      }
+      lifecycle.begin(message);
+    }
+
     try {
       final response = await commandHandler.handle(message);
       final success = response['success'] == true;
@@ -735,6 +816,7 @@ Future<void> _refreshDevicesAfterConnect() async {
         });
 
         debugPrint('[PaiApp] Plugin command succeeded: $type');
+        if (isLifecycle) await lifecycle.succeeded(message);
       } else {
         manager.handleCommandFailure({
           'success': false,
@@ -745,6 +827,7 @@ Future<void> _refreshDevicesAfterConnect() async {
         debugPrint(
           '[PaiApp] Plugin command failed: $type - ${response['error']}',
         );
+        if (isLifecycle) await lifecycle.failed(message, _commandFailureText(response['error'] ?? 'failed'));
       }
     } catch (e, st) {
       debugPrint('[PaiApp] Plugin command exception: $e');
@@ -755,6 +838,7 @@ Future<void> _refreshDevicesAfterConnect() async {
         'result': {'operation': type},
         'error': e.toString(),
       });
+      if (isLifecycle) await lifecycle.failed(message, _commandFailureText(e));
 
       try {
         await connection.sendResult(
@@ -767,7 +851,18 @@ Future<void> _refreshDevicesAfterConnect() async {
         debugPrint('[PaiApp] Failed to send command error: $sendError');
         debugPrintStack(stackTrace: sendStack);
       }
+    } finally {
+      if (isLifecycle) lifecycle.end();
     }
+  }
+
+  /// What the backend is told when an install request failed here. A permission the user hasn't
+  /// granted yet gets its own wording (the backend turns it into "allow it on the device").
+  String _commandFailureText(Object error) {
+    if (error is PluginPermissionPendingException || error is PluginPermissionDeniedException) {
+      return 'Permission needed: $error';
+    }
+    return error.toString();
   }
 
   void _handleDeviceRemoved(String removedDeviceId) {
@@ -785,6 +880,10 @@ Future<void> _refreshDevicesAfterConnect() async {
     _taskEventStream = null;
 
     _connectionService = null;
+    _remoteLifecycle = null;
+    _remoteAccess?.dispose();
+    _remoteAccess = null;
+    api.deviceId = null;
     _testTaskRunner = null;
     _pluginManager = null;
     _dispatcher = null;
@@ -820,6 +919,7 @@ Future<void> _refreshDevicesAfterConnect() async {
     _taskEventsController.close();
     _testTaskRunner?.dispose();
     _connectionService?.dispose();
+    _remoteAccess?.dispose();
     super.dispose();
   }
 
@@ -945,6 +1045,7 @@ Future<void> _refreshDevicesAfterConnect() async {
         service: _profileService!,
         settings: _settingsService,
         currentDeviceId: deviceId,
+        remoteAccess: _remoteAccess,
         onLogout: _logout,
       ),
       if (kDebugMode)

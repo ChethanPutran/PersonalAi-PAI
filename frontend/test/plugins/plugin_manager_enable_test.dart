@@ -133,12 +133,19 @@ void main() {
     expect(api.posts, ['/plugins/input/enable']);
   });
 
-  test('a plugin installed on another device is enabled for that device once it reports installed', () async {
+  test('a plugin installed on another device is enabled for that device once the backend reports it installed', () async {
     final (m, api, _) = await _manager();
     await m.installOnDevice('input', '1.0.0', _other);
-    // the poll runs asynchronously every 2s
+    // The backend pushes the outcome (a `plugin.operation` frame); nothing polls for it.
+    m.handleOperationFrame({
+      'type': 'plugin.operation',
+      'operation': {
+        'id': 'op1', 'plugin_id': 'input', 'device_id': _other, 'version': '1.0.0',
+        'kind': 'install', 'status': 'succeeded', 'terminal': true, 'error': null,
+      },
+    });
     for (var i = 0; i < 40 && !api.posts.contains('/plugins/input/enable'); i++) {
-      await Future<void>.delayed(const Duration(milliseconds: 150));
+      await Future<void>.delayed(const Duration(milliseconds: 25));
     }
     expect(api.posts, containsAllInOrder(['/plugins/input/install', '/plugins/input/enable']));
     expect(api.bodies['/plugins/input/enable'], {'device_id': _other});

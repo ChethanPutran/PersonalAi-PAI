@@ -378,7 +378,7 @@ class TaskCard extends StatelessWidget {
             const SizedBox(height: 2),
             Text(meta, maxLines: 1, overflow: TextOverflow.ellipsis, style: context.pai.mono(size: 12)),
           ],
-          if (failed && (task.error ?? '').isNotEmpty) ...[
+          if (failed) ...[
             const SizedBox(height: PaiSpacing.sm),
             Row(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -386,7 +386,8 @@ class TaskCard extends StatelessWidget {
                 Icon(Icons.error_outline, size: 16, color: scheme.error),
                 const SizedBox(width: 6),
                 Expanded(
-                  child: Text(task.error!,
+                  child: Text(taskFailureText(task),
+                      key: const Key('task-failure-text'),
                       maxLines: 3,
                       overflow: TextOverflow.ellipsis,
                       style: text.bodySmall?.copyWith(color: scheme.error)),

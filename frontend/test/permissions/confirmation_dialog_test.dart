@@ -219,6 +219,39 @@ void main() {
     });
   });
 
+  group('shell: the command is always pinned', () {
+    ConfirmationRequest shell() => ConfirmationRequest.fromJson({
+          ...confirmationJson(
+            capability: 'shell.exec',
+            risk: 'high',
+            scopes: const ['once', 'session'],
+            params: const [
+              {'name': 'command', 'value_preview': 'hostname -I'},
+              {'name': 'timeoutSec', 'value_preview': '30'},
+            ],
+          ),
+          'default_binding': {'mode': 'keys', 'keys': ['command']},
+          'required_binding_keys': ['command'],
+        }).withDeviceName('Laptop');
+
+    test('parses required_binding_keys (and keeps them when the request is copied)', () {
+      expect(shell().requiredBindingKeys, ['command']);
+      expect(shell().withDeviceName('x').requiredBindingKeys, ['command']);
+      expect(sampleRequest().requiredBindingKeys, isEmpty);
+    });
+
+    testWidgets('"Any parameters" is not offered and the command cannot be unticked', (t) async {
+      final h = await open(t, shell());
+      await tapKey(t, 'scope-session');
+      expect(find.byKey(const Key('binding-any')), findsNothing);
+      expect(find.byKey(const Key('binding-any-warning')), findsNothing);
+      expect(t.widget<CheckboxListTile>(find.byKey(const Key('key-command'))).onChanged, isNull);
+      await tapKey(t, 'confirm-allow');
+      await t.pumpAndSettle();
+      expect(h.decisions.single.toBody()['binding'], {'mode': 'keys', 'keys': ['command']});
+    });
+  });
+
   group('always: expiry', () {
     testWidgets('30 / 90 / 365 days, 90 preselected, with the end date', (t) async {
       final h = await open(t, sampleRequest());

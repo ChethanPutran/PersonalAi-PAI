@@ -122,6 +122,7 @@ class FakeSchedulesApi extends ScheduleService {
     String timezone = 'UTC',
     String capability = kReminderCapability,
     String catchUp = 'once',
+    int? misfireGraceSeconds,
     String? targetDeviceId,
     Map<String, dynamic>? parameters,
   }) async {
@@ -129,6 +130,7 @@ class FakeSchedulesApi extends ScheduleService {
       'title': title, 'body': body, 'kind': kind, 'fireAt': fireAt, 'cron': cron,
       'intervalSeconds': intervalSeconds, 'timezone': timezone, 'capability': capability,
       'targetDeviceId': targetDeviceId, 'parameters': parameters,
+      'catchUp': catchUp, 'misfireGraceSeconds': misfireGraceSeconds,
     };
     created.add(payload);
     if (createError != null) throw createError!;
@@ -144,11 +146,13 @@ class FakeSchedulesApi extends ScheduleService {
     String id, {
     String? title, String? body, String? kind, DateTime? fireAt, String? cron, int? intervalSeconds,
     String? timezone, String? capability, Map<String, dynamic>? parameters, String? catchUp,
+    int? misfireGraceSeconds, bool clearMisfireGrace = false,
     String? targetDeviceId, bool? enabled,
   }) async {
     final payload = <String, Object?>{
       'title': title, 'body': body, 'kind': kind, 'cron': cron, 'capability': capability,
       'parameters': parameters, 'targetDeviceId': targetDeviceId,
+      'catchUp': catchUp, 'misfireGraceSeconds': misfireGraceSeconds, 'clearMisfireGrace': clearMisfireGrace,
     };
     updated.add(payload);
     if (updateError != null) throw updateError!;

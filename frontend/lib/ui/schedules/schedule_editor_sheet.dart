@@ -73,6 +73,10 @@ class _ScheduleEditorSheetState extends State<ScheduleEditorSheet> {
   // --- timing ---
   late Timing _timing;
 
+  // --- if the app was offline when it was due ---
+  String _catchUp = 'once';
+  int? _graceSeconds; // null = no limit
+
   // --- state ---
   Schedule? _current; // the stored schedule (edit mode; replaced by server responses)
   bool _dirty = false;
@@ -106,6 +110,8 @@ class _ScheduleEditorSheetState extends State<ScheduleEditorSheet> {
         _pluginDeviceId = s.targetDeviceId;
       }
       _timezone = s.timezone;
+      _catchUp = s.catchUp;
+      _graceSeconds = s.misfireGraceSeconds;
     }
     _loadTimezone();
     _loadDevices();
@@ -339,6 +345,9 @@ class _ScheduleEditorSheetState extends State<ScheduleEditorSheet> {
           cron: enc.cron,
           intervalSeconds: enc.intervalSeconds,
           timezone: _timezone,
+          catchUp: _catchUp != s.catchUp ? _catchUp : null,
+          misfireGraceSeconds: _graceSeconds != s.misfireGraceSeconds ? _graceSeconds : null,
+          clearMisfireGrace: _graceSeconds == null && s.misfireGraceSeconds != null,
           // Only send what actually changed: these three reset an existing approval.
           capability: (_kind == ActionKind.plugin && _capability!.id != s.capability) ? _capability!.id : null,
           parameters: _kind == ActionKind.plugin
@@ -358,6 +367,8 @@ class _ScheduleEditorSheetState extends State<ScheduleEditorSheet> {
           cron: enc.cron,
           intervalSeconds: enc.intervalSeconds,
           timezone: _timezone,
+          catchUp: _catchUp,
+          misfireGraceSeconds: _graceSeconds,
           capability: _kind == ActionKind.plugin ? _capability!.id : kReminderCapability,
           parameters: _kind == ActionKind.plugin ? params : null,
           targetDeviceId: _kind == ActionKind.plugin ? _pluginDeviceId : _reminderDeviceId,
@@ -635,6 +646,8 @@ class _ScheduleEditorSheetState extends State<ScheduleEditorSheet> {
         },
       ),
 
+      ..._missedRunSection(),
+
       if (!plugin && widget.profileService != null) ...[
         const SizedBox(height: 12),
         DropdownButtonFormField<String?>(
@@ -713,6 +726,49 @@ class _ScheduleEditorSheetState extends State<ScheduleEditorSheet> {
         expanded: true,
         loading: _saving,
         onPressed: _saving ? null : _save,
+      ),
+    ];
+  }
+
+  // --- missed runs (the app or device was off when it was due) --------------
+
+  static const _graceChoices = <int?, String>{
+    null: 'No limit',
+    300: '5 minutes',
+    3600: '1 hour',
+    21600: '6 hours',
+    86400: '1 day',
+  };
+
+  List<Widget> _missedRunSection() {
+    // A custom value saved elsewhere (API) stays selectable instead of crashing the dropdown.
+    final graceItems = {..._graceChoices};
+    if (!graceItems.containsKey(_graceSeconds)) graceItems[_graceSeconds] = '${_graceSeconds}s';
+    return [
+      const SizedBox(height: 12),
+      DropdownButtonFormField<String>(
+        key: ValueKey('catchup-$_catchUp'),
+        initialValue: _catchUp,
+        decoration: const InputDecoration(labelText: 'If a run is missed'),
+        items: const [
+          DropdownMenuItem(value: 'once', child: Text('Run once when back')),
+          DropdownMenuItem(value: 'all', child: Text('Run every missed time')),
+          DropdownMenuItem(value: 'none', child: Text('Skip it')),
+        ],
+        onChanged: (v) {
+          if (v != null) setState(() { _catchUp = v; _dirty = true; });
+        },
+      ),
+      const SizedBox(height: 12),
+      DropdownButtonFormField<int?>(
+        key: ValueKey('grace-$_graceSeconds'),
+        initialValue: _graceSeconds,
+        decoration: const InputDecoration(
+            labelText: 'Still run if no later than', helperText: 'Older missed runs are skipped'),
+        items: [
+          for (final e in graceItems.entries) DropdownMenuItem<int?>(value: e.key, child: Text(e.value)),
+        ],
+        onChanged: (v) => setState(() { _graceSeconds = v; _dirty = true; }),
       ),
     ];
   }

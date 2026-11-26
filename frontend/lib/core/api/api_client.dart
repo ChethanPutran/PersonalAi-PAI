@@ -22,10 +22,18 @@ import '../../config/app_config.dart';
 /// **Do NOT include `/api/v1` in caller paths** — doing so produces
 /// a doubled prefix. A `debugPrint` warning fires if you try, so the
 /// bug surfaces in one test cycle instead of as a silent 404.
+/// Header naming the device a request comes from (see [ApiClient.deviceId]).
+const String sourceDeviceHeader = 'X-PAI-Device-Id';
+
 class ApiClient {
   final String baseUrl;
   final String apiPrefix;
   final AuthService? auth;
+
+  /// This device's backend id, set once the device is registered. Sent as `X-PAI-Device-Id` on every
+  /// call so the backend can tell "this device acting on itself" (local) from "acting on another
+  /// device" (remote: needs that device's owner opt-in). Without it a call counts as remote.
+  String? deviceId;
 
   String? get authToken => auth?.token;
 
@@ -98,6 +106,10 @@ class ApiClient {
     final token = auth?.token;
     if (token != null && token.isNotEmpty) {
       h['Authorization'] = 'Bearer $token';
+    }
+    final device = deviceId;
+    if (device != null && device.isNotEmpty) {
+      h[sourceDeviceHeader] = device;
     }
     return h;
   }

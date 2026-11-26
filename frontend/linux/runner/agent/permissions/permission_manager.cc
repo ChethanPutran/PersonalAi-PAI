@@ -6,6 +6,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <fstream>
+#include <iterator>
 #include <set>
 #include <sstream>
 
@@ -44,9 +45,11 @@ bool FilesystemAccessible() {
 }
 
 
-// Permissions that require explicit user consent (dialog on first use).
+// Permissions that require explicit user consent (dialog on first use, once PER PLUGIN).
 const std::set<std::string> kConsentRequired = {
     "screen", "camera", "microphone", "clipboard", "notifications",
+    // Every plugin asks for what it declares, including these: nothing is granted silently.
+    "filesystem", "network", "accessibility",
     // Typing and clicking on the user's behalf: can do anything the user can do on screen.
     "input",
     // Privileged operations — must always prompt. Never auto-grant,
@@ -54,10 +57,8 @@ const std::set<std::string> kConsentRequired = {
     "shell", "exec", "subprocess", "command", "process.spawn",
 };
 
-// Permissions that are auto-granted once the OS probe passes.
-const std::set<std::string> kAutoGranted = {
-    "filesystem", "network", "accessibility",
-};
+// Nothing is auto-granted any more: a plugin gets only what the user allowed for THAT plugin.
+const std::set<std::string> kAutoGranted = {};
 
 // "available" | "unavailable" — never "needs prompt"; that's decided later.
 std::string Probe(const std::string& logical) {
@@ -142,12 +143,25 @@ std::string Serialize(const std::map<std::string, std::string>& m) {
 
 PermissionManager::PermissionManager() { Load(); }
 
+std::string PermissionManager::Key(const std::string& plugin, const std::string& permission) {
+  return plugin + "/" + permission;
+}
+
 void PermissionManager::Load() {
   decisions_.clear();
   std::ifstream f(ConfigPath());
   if (!f) return;
   std::stringstream ss; ss << f.rdbuf();
-  decisions_ = ParseDecisions(ss.str());
+  size_t legacy = 0;
+  for (const auto& [k, v] : ParseDecisions(ss.str())) {
+    // Old releases stored one decision per permission for ALL plugins ("camera":"allow"). Those cannot
+    // be attributed to any plugin, so they are dropped: each plugin is asked again, on its own.
+    if (k.find('/') == std::string::npos) { ++legacy; continue; }
+    decisions_[k] = v;
+  }
+  if (legacy > 0) {
+    fprintf(stderr, "[perm] ignoring %zu legacy shared decision(s): every plugin will ask for its own\n", legacy);
+  }
 }
 
 void PermissionManager::Save() const {
@@ -156,15 +170,27 @@ void PermissionManager::Save() const {
 }
 
 void PermissionManager::SetDecisions(
-    const std::vector<std::string>& permissions, bool allow) {
+    const std::string& plugin, const std::vector<std::string>& permissions, bool allow) {
+  if (plugin.empty()) return;          // never store a decision that belongs to no plugin
   for (const auto& p : permissions) {
-    decisions_[p] = allow ? "allow" : "deny";
+    decisions_[Key(plugin, p)] = allow ? "allow" : "deny";
   }
   Save();
 }
 
-std::string PermissionManager::Classify(const std::string& p) const {
-  auto it = decisions_.find(p);
+void PermissionManager::Forget(const std::string& plugin) {
+  if (plugin.empty()) return;
+  const std::string prefix = plugin + "/";
+  for (auto it = decisions_.begin(); it != decisions_.end();) {
+    it = (it->first.rfind(prefix, 0) == 0) ? decisions_.erase(it) : std::next(it);
+  }
+  Save();
+  ApplyBridges(/*unset_when_none_allowed=*/true);     // a plugin that is gone must not keep a gate open
+}
+
+std::string PermissionManager::Classify(const std::string& plugin, const std::string& p) const {
+  auto it = decisions_.find(Key(plugin, p));
+  if (plugin.empty()) it = decisions_.end();
   const std::string decision = (it == decisions_.end()) ? "prompt" : it->second;
   // An explicit deny is always respected — never re-prompt.
   if (decision == "deny") return "denied";
@@ -179,20 +205,20 @@ std::string PermissionManager::Classify(const std::string& p) const {
 }
 
 std::map<std::string, std::string> PermissionManager::PermissionStatus(
-    const std::vector<std::string>& permissions) const {
+    const std::string& plugin, const std::vector<std::string>& permissions) const {
   std::map<std::string, std::string> out;
-  for (const auto& p : permissions) out[p] = Classify(p);
+  for (const auto& p : permissions) out[p] = Classify(plugin, p);
   return out;
 }
 
 std::map<std::string, std::string> PermissionManager::Request(
-    const std::vector<std::string>& permissions) {
+    const std::string& plugin, const std::vector<std::string>& permissions) {
   std::vector<std::string> granted, denied, pending;
 
   for (const auto& p : permissions) {
-    const std::string state = Classify(p);
-    auto it = decisions_.find(p);
-    fprintf(stderr, "[perm] %-12s probe=%-11s decision=%s\n", p.c_str(), Probe(p).c_str(),
+    const std::string state = Classify(plugin, p);
+    auto it = decisions_.find(Key(plugin, p));
+    fprintf(stderr, "[perm] %-18s %-12s probe=%-11s decision=%s\n", plugin.c_str(), p.c_str(), Probe(p).c_str(),
             it == decisions_.end() ? "prompt" : it->second.c_str());
     if (state == "granted") granted.push_back(p);
     else if (state == "denied") denied.push_back(p);
@@ -208,7 +234,9 @@ std::map<std::string, std::string> PermissionManager::Request(
   return out;
 }
 
-void PermissionManager::ApplyEnvBridges() {
+void PermissionManager::ApplyEnvBridges() { ApplyBridges(/*unset_when_none_allowed=*/false); }
+
+void PermissionManager::ApplyBridges(bool unset_when_none_allowed) {
   // Plugins check their own env vars (PAI_SCREEN_CONSENT=1, PAI_INPUT_CONSENT=1). Reflect the user's
   // decision into those env vars: "allow" sets it so the plugin's gate passes without the user
   // setting anything by hand; "deny" clears it.
@@ -220,11 +248,18 @@ void PermissionManager::ApplyEnvBridges() {
       // {"camera", "PAI_CAMERA_CONSENT"},
   };
   for (const auto& b : kBridges) {
-    auto it = decisions_.find(b.perm);
-    if (it == decisions_.end()) continue;
-    if (it->second == "allow") {
+    // Decisions are per plugin but the variable is process-wide: open while any plugin allows it.
+    bool any_allow = false, any_deny = false;
+    const std::string suffix = std::string("/") + b.perm;
+    for (const auto& [k, v] : decisions_) {
+      if (k.size() > suffix.size() && k.compare(k.size() - suffix.size(), suffix.size(), suffix) == 0) {
+        if (v == "allow") any_allow = true;
+        else if (v == "deny") any_deny = true;
+      }
+    }
+    if (any_allow) {
       ::setenv(b.env, "1", 1);
-    } else if (it->second == "deny") {
+    } else if (any_deny || unset_when_none_allowed) {
       // A revoke must take effect NOW. Only ever setting the variable left it "1" until the app was
       // restarted, so a plugin kept passing its own consent gate after the user said no.
       ::unsetenv(b.env);

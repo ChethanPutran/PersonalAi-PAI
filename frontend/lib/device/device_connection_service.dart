@@ -1,3 +1,4 @@
+import 'remote_access.dart';
 import 'connection_liveness.dart';
 import 'dart:async';
 import 'dart:convert';
@@ -84,11 +85,16 @@ Timer? _heartbeatWatchdog;
   final _taskEventController =
       StreamController<Map<String, dynamic>>.broadcast();
 
+  /// What the owner allows other devices to do to this one. Enforced here on every invoke
+  /// (fail closed until the backend has said what is allowed).
+  final RemoteAccessController remoteAccess;
+
   DeviceConnectionService({
     required this.baseUrl,
     required this.deviceId,
     this.token,
-  });
+    RemoteAccessController? remoteAccess,
+  }) : remoteAccess = remoteAccess ?? RemoteAccessController();
 
   DeviceConnectionState get state => _state;
   bool get isConnected => _state == DeviceConnectionState.connected;
@@ -329,6 +335,10 @@ _heartbeatWatchdog = null;
       final type = DeviceMessageType.fromWire(wire);
 
       if (type == null) {
+        if (wire == 'device.remote_access') {
+          // The owner changed what other devices may do to this one: effective immediately.
+          remoteAccess.applyFrame(message['remote_access']);
+        }
         debugPrint('[DeviceConnection] Unknown message type: $wire');
         if (_messageHandler != null) {
           await _messageHandler!(message);
@@ -344,6 +354,7 @@ _heartbeatWatchdog = null;
         case DeviceMessageType.connected:
           debugPrint('[DeviceConnection] Backend handshake: $message');
           _consecutiveFailures = 0;
+          remoteAccess.applyFrame(message['remote_access']);
           // NEW: let the app react. Previously this branch was handled only
           // locally, so PaiApp._handleDeviceMessage's `case 'connected'`
           // — and the reconcile it triggers — never ran.
@@ -484,6 +495,19 @@ Future<void> _handleHeartbeat(Map<String, dynamic> message) async {
 
     if (requestId.isEmpty || capability.isEmpty) {
       debugPrint('[DeviceConnection] invoke: missing request_id or capability');
+      return;
+    }
+
+    // The owner's switch for this device: anything not asked by this device itself is remote.
+    final refusal = remoteInvokeRefusal(
+      capability: capability,
+      sourceDeviceId: message['source_device_id']?.toString(),
+      thisDeviceId: deviceId,
+      access: remoteAccess.value,
+    );
+    if (refusal != null) {
+      debugPrint('[DeviceConnection] invoke refused ($capability): $refusal');
+      await sendResult(requestId: requestId, success: false, error: refusal);
       return;
     }
 

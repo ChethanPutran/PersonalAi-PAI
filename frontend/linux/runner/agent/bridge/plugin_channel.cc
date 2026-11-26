@@ -244,7 +244,7 @@ namespace pai::agent
         //    Permissions() silently bypasses the consent dialog.
         const auto plugin_declared = mod->Permissions();
         const auto to_check = requested.empty() ? plugin_declared : requested;
-         const auto perm_result = self->permissions.Request(to_check);
+         const auto perm_result = self->permissions.Request(name, to_check);
 
         if (perm_result.at("ok") != "true")
         {
@@ -341,34 +341,45 @@ namespace pai::agent
       if (std::strcmp(method, "requestPermissions") == 0)
       {
         std::vector<std::string> perms;
+        std::string plugin; // decisions are per plugin (its native module name)
         if (args && fl_value_get_type(args) == FL_VALUE_TYPE_MAP)
         {
           perms = GetStrList(fl_value_lookup_string(args, "permissions"));
+          plugin = GetStr(fl_value_lookup_string(args, "nativeModule"));
         }
-        ReplyMap(call, self->permissions.Request(perms));
+        ReplyMap(call, self->permissions.Request(plugin, perms));
         return;
       }
 
       if (std::strcmp(method, "permissionStatus") == 0)
       {
-        // Read-only (no prompt): {"permissions": [...]} -> {perm: "granted"|"denied"|"pending"}.
+        // Read-only (no prompt): {"nativeModule": "...", "permissions": [...]} -> {perm: "granted"|"denied"|"pending"}.
         std::vector<std::string> perms;
+        std::string plugin;
         if (args && fl_value_get_type(args) == FL_VALUE_TYPE_MAP)
         {
           perms = GetStrList(fl_value_lookup_string(args, "permissions"));
+          plugin = GetStr(fl_value_lookup_string(args, "nativeModule"));
         }
-        ReplyMap(call, self->permissions.PermissionStatus(perms));
+        ReplyMap(call, self->permissions.PermissionStatus(plugin, perms));
         return;
       }
 
       if (std::strcmp(method, "grantPermissions") == 0)
       {
         std::vector<std::string> perms;
+        std::string plugin;
         if (args && fl_value_get_type(args) == FL_VALUE_TYPE_MAP)
         {
           perms = GetStrList(fl_value_lookup_string(args, "permissions"));
+          plugin = GetStr(fl_value_lookup_string(args, "nativeModule"));
         }
-        self->permissions.SetDecisions(perms, /*allow=*/true);
+        if (plugin.empty())
+        {
+          ReplyError(call, "INVALID_ARGS", "nativeModule is required: permissions are granted per plugin");
+          return;
+        }
+        self->permissions.SetDecisions(plugin, perms, /*allow=*/true);
         self->permissions.ApplyEnvBridges(); // PAI_SCREEN_CONSENT=1 now set
         ReplyMap(call, {{"ok", "true"}, {"granted", JoinList(perms)}});
         return;
@@ -377,13 +388,38 @@ namespace pai::agent
       if (std::strcmp(method, "denyPermissions") == 0)
       {
         std::vector<std::string> perms;
+        std::string plugin;
         if (args && fl_value_get_type(args) == FL_VALUE_TYPE_MAP)
         {
           perms = GetStrList(fl_value_lookup_string(args, "permissions"));
+          plugin = GetStr(fl_value_lookup_string(args, "nativeModule"));
         }
-        self->permissions.SetDecisions(perms, /*allow=*/false);
+        if (plugin.empty())
+        {
+          ReplyError(call, "INVALID_ARGS", "nativeModule is required: permissions are denied per plugin");
+          return;
+        }
+        self->permissions.SetDecisions(plugin, perms, /*allow=*/false);
         self->permissions.ApplyEnvBridges(); // a revoke clears PAI_*_CONSENT immediately
         ReplyMap(call, {{"ok", "true"}, {"denied", JoinList(perms)}});
+        return;
+      }
+
+      if (std::strcmp(method, "forgetPermissions") == 0)
+      {
+        // Uninstall: drop everything decided for this plugin so a reinstall asks again.
+        std::string plugin;
+        if (args && fl_value_get_type(args) == FL_VALUE_TYPE_MAP)
+        {
+          plugin = GetStr(fl_value_lookup_string(args, "nativeModule"));
+        }
+        if (plugin.empty())
+        {
+          ReplyError(call, "INVALID_ARGS", "nativeModule is required");
+          return;
+        }
+        self->permissions.Forget(plugin);
+        ReplyMap(call, {{"ok", "true"}, {"forgotten", plugin}});
         return;
       }
 

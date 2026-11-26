@@ -1,5 +1,6 @@
 // lib/tasks/confirmation_service.dart
 
+import '../core/redact.dart';
 import 'dart:async';
 import 'dart:convert';
 
@@ -33,6 +34,19 @@ class PendingConfirmation {
               reason: reason,
             );
 }
+
+/// The WebSocket that carries `task.*` events (incl. `task.confirmation_requested`) for one chat session:
+/// `WS /tasks/{session_id}/stream?token=<jwt>`. (`/tasks/stream` is NOT a WebSocket route — it only matches
+/// `GET /tasks/{task_id}` — so a socket opened there is closed at once and no approval prompt would ever reach the user.)
+@visibleForTesting
+Uri confirmationSocketUri({
+  required String wsBase,
+  required String apiPrefix,
+  required String sessionId,
+  required String token,
+}) =>
+    Uri.parse('$wsBase$apiPrefix/tasks/${Uri.encodeComponent(sessionId)}/stream'
+        '?token=${Uri.encodeComponent(token)}');
 
 class ConfirmationService extends ChangeNotifier {
   final ApiClient api;
@@ -72,11 +86,10 @@ class ConfirmationService extends ChangeNotifier {
       // Remove trailing slash if present to avoid double slashes
       final cleanBase = base.endsWith('/') ? base.substring(0, base.length - 1) : base;
       
-      final url = Uri.parse(
-        '$cleanBase/api/v1/tasks/stream?session_id=$sessionId&token=${Uri.encodeComponent(token)}',
-      );
+      final url = confirmationSocketUri(
+          wsBase: cleanBase, apiPrefix: api.apiPrefix, sessionId: sessionId, token: token);
 
-      debugPrint('[ConfirmationService] Connecting to WebSocket: $url');
+      debugPrint('[ConfirmationService] Connecting to WebSocket: ${redactUrl(url)}');
       _ws = WebSocketChannel.connect(url);
 
       _sub = _ws!.stream.listen(

@@ -56,7 +56,7 @@ class VoiceController extends ChangeNotifier {
         ),
       ),
       mic: mic,
-      player: PcmPlayer(),
+      player: createAudioOutput(),
       // Voice turns are stored in the same chat session; adopt its id so the
       // text chat shows them and keeps going from there.
       onChatSession: (id) => chat.setSessionId(id),

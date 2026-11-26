@@ -212,7 +212,7 @@ class FakePluginManager extends ChangeNotifier implements PluginManager {
   @override
   RemoteOp remoteStateFor(String deviceId, String pluginId) => const RemoteOp();
   @override
-  Future<void> loadCatalog() async {}
+  Future<void> loadCatalog({Duration? maxAge}) async {}
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);

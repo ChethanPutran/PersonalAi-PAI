@@ -62,11 +62,14 @@ class _ConfirmationDialogState extends State<ConfirmationDialog> {
     // Start from the server's suggested binding (usually "exact").
     _bindingMode = _r.defaultBinding.mode;
     _keys.addAll(_r.defaultBinding.keys);
+    _keys.addAll(_r.requiredBindingKeys);
+    if (_pinned && _bindingMode == BindingMode.any) _bindingMode = BindingMode.keys;
     if (_bindingMode == BindingMode.keys && _r.parameterNames.isEmpty) _bindingMode = BindingMode.exact;
   }
 
   bool get _showBinding => _scope != ConfirmationScope.once && _r.canBindParams;
   bool get _hasParams => _r.parametersSummary.isNotEmpty;
+  bool get _pinned => _r.requiredBindingKeys.isNotEmpty;       // e.g. shell: the command is always pinned
 
   ParamBinding get _binding => switch (_bindingMode) {
         BindingMode.any => ParamBinding.any,
@@ -264,7 +267,7 @@ class _ConfirmationDialogState extends State<ConfirmationDialog> {
                   controlAffinity: ListTileControlAffinity.leading,
                   title: Text(name, style: PaiText.mono(size: 12, color: context.pai.strong)),
                   value: _keys.contains(name),
-                  onChanged: _busy
+                  onChanged: _busy || _r.requiredBindingKeys.contains(name)
                       ? null
                       : (v) => setState(() => v == true ? _keys.add(name) : _keys.remove(name)),
                 ),
@@ -279,13 +282,14 @@ class _ConfirmationDialogState extends State<ConfirmationDialog> {
                 ),
             ]),
           ),
+        if (!_pinned)
         _ChoiceTile(
           key: const Key('binding-any'),
           selected: _bindingMode == BindingMode.any,
           title: 'Any parameters',
           onTap: _busy ? null : () => setState(() => _bindingMode = BindingMode.any),
         ),
-        if (_bindingMode == BindingMode.any)
+        if (!_pinned && _bindingMode == BindingMode.any)
           Padding(
             key: const Key('binding-any-warning'),
             padding: const EdgeInsets.only(left: PaiSpacing.xl, bottom: PaiSpacing.xs),

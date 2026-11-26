@@ -24,6 +24,7 @@ Task mk(
   TaskCancelOutcome? cancelOutcome,
   String? blockedReason,
   String? error,
+  TaskErrorInfo? errorInfo,
   TaskRetry? retry,
 }) =>
     Task(
@@ -40,6 +41,7 @@ Task mk(
       cancelOutcome: cancelOutcome,
       controlBlockedReason: blockedReason,
       error: error,
+      errorInfo: errorInfo,
       retry: retry,
     );
 

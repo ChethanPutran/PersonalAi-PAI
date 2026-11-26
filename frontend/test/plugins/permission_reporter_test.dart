@@ -79,17 +79,19 @@ void main() {
   group('PermissionReporter', () {
     test('reports each plugin only for the permissions it declares, with the device answers', () async {
       final api = FakeApi();
-      final asked = <List<String>>[];
+      final asked = <String>[];
       final r = PermissionReporter(
           api: api,
           deviceId: 'dev-1',
-          status: (p) async {
-            asked.add(p);
+          status: (module, p) async {
+            asked.add('$module:${p.join(',')}');
             return {'input': 'denied', 'screen': 'granted', 'camera': 'pending'};
           });
-      final ok = await r.report({'input': ['input'], 'shot': ['screen', 'camera']});
+      final ok = await r.report({'input': ['input'], 'shot': ['screen', 'camera']},
+          nativeModules: {'input': 'pai.input', 'shot': 'pai.shot'});
       expect(ok, isTrue);
-      expect(asked.single, ['camera', 'input', 'screen']);       // one query for the union
+      // One query PER plugin: a decision made for one plugin is never read as another's.
+      expect(asked, ['pai.input:input', 'pai.shot:screen,camera']);
       expect(api.paths.single, '/plugins/device/dev-1/permissions');
       expect(api.sent.single, {
         'plugins': {
@@ -101,7 +103,7 @@ void main() {
 
     test('a platform that cannot answer reports nothing at all (unknown is not granted/denied)', () async {
       final api = FakeApi();
-      final r = PermissionReporter(api: api, deviceId: 'dev-1', status: (_) async => null);
+      final r = PermissionReporter(api: api, deviceId: 'dev-1', status: (_, __) async => null);
       expect(await r.report({'input': ['input']}), isFalse);
       expect(api.paths, isEmpty);
     });
@@ -109,7 +111,7 @@ void main() {
     test('permissions the device did not answer, or answered oddly, are left out', () async {
       final api = FakeApi();
       final r = PermissionReporter(
-          api: api, deviceId: 'dev-1', status: (_) async => {'input': 'maybe', 'screen': 'denied'});
+          api: api, deviceId: 'dev-1', status: (_, __) async => {'input': 'maybe', 'screen': 'denied'});
       await r.report({'a': ['input'], 'b': ['screen', 'camera']});
       expect(api.sent.single, {'plugins': {'b': {'screen': 'denied'}}});
     });
@@ -117,7 +119,7 @@ void main() {
     test('unchanged reports are not re-sent; a change, force and reset are', () async {
       final api = FakeApi();
       var state = 'denied';
-      final r = PermissionReporter(api: api, deviceId: 'dev-1', status: (_) async => {'input': state});
+      final r = PermissionReporter(api: api, deviceId: 'dev-1', status: (_, __) async => {'input': state});
       final d = {'input': ['input']};
       expect(await r.report(d), isTrue);
       expect(await r.report(d), isFalse);
@@ -131,15 +133,39 @@ void main() {
 
     test('a failed send is not remembered as sent (retried next time) and never throws', () async {
       final api = FakeApi()..failPermissions = true;
-      final r = PermissionReporter(api: api, deviceId: 'dev-1', status: (_) async => {'input': 'denied'});
+      final r = PermissionReporter(api: api, deviceId: 'dev-1', status: (_, __) async => {'input': 'denied'});
       expect(await r.report({'input': ['input']}), isFalse);
       api.failPermissions = false;
       expect(await r.report({'input': ['input']}), isTrue);
     });
 
+    test('the same permission is answered separately for each plugin', () async {
+      final api = FakeApi();
+      final r = PermissionReporter(
+          api: api,
+          deviceId: 'dev-1',
+          status: (module, p) async => {'filesystem': module == 'pai.camera' ? 'granted' : 'pending'});
+      await r.report({'camera_linux': ['filesystem'], 'files': ['filesystem']},
+          nativeModules: {'camera_linux': 'pai.camera', 'files': 'pai.files'});
+      expect(api.sent.single, {
+        'plugins': {
+          'camera_linux': {'filesystem': 'granted'},
+          'files': {'filesystem': 'pending'},       // allowing the camera never allowed the files plugin
+        }
+      });
+    });
+
+    test('one plugin the platform cannot answer for does not hide the others', () async {
+      final api = FakeApi();
+      final r = PermissionReporter(
+          api: api, deviceId: 'dev-1', status: (module, _) async => module == 'a' ? null : {'input': 'granted'});
+      await r.report({'x': ['input'], 'y': ['input']}, nativeModules: {'x': 'a', 'y': 'b'});
+      expect(api.sent.single, {'plugins': {'y': {'input': 'granted'}}});
+    });
+
     test('plugins declaring no permissions cause no call', () async {
       final api = FakeApi();
-      final r = PermissionReporter(api: api, deviceId: 'dev-1', status: (_) async => {});
+      final r = PermissionReporter(api: api, deviceId: 'dev-1', status: (_, __) async => {});
       expect(await r.report({'notes': []}), isFalse);
       expect(api.paths, isEmpty);
     });
@@ -155,7 +181,7 @@ void main() {
         dispatcher: FakeDispatcher(),
         permissionReporter: withReporter
             ? PermissionReporter(
-                api: api, deviceId: 'dev-1', status: (_) async => answers ?? {'input': 'denied'})
+                api: api, deviceId: 'dev-1', status: (_, __) async => answers ?? {'input': 'denied'})
             : null,
       );
       await m.loadCatalog();

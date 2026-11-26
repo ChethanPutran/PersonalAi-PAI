@@ -99,6 +99,7 @@ class Schedule {
   final String capability;
   final Map<String, dynamic> parameters;
   final String catchUp;           // none | once | all
+  final int? misfireGraceSeconds; // how late a missed run may still run; null = no limit
   final bool enabled;
   final DateTime? lastFiredAt;
   final DateTime? nextFireAt;
@@ -128,6 +129,7 @@ class Schedule {
     required this.capability,
     required this.parameters,
     required this.catchUp,
+    this.misfireGraceSeconds,
     required this.enabled,
     this.lastFiredAt,
     this.nextFireAt,
@@ -157,6 +159,7 @@ class Schedule {
             j['capability']?.toString() ?? 'system.notifications.show',
         parameters: (j['parameters'] as Map?)?.cast<String, dynamic>() ?? {},
         catchUp: j['catch_up']?.toString() ?? 'once',
+        misfireGraceSeconds: (j['misfire_grace_seconds'] as num?)?.toInt(),
         enabled: j['enabled'] == true,
         lastFiredAt: _parse(j['last_fired_at']),
         nextFireAt: _parse(j['next_fire_at']),

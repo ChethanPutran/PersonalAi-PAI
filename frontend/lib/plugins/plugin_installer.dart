@@ -22,6 +22,18 @@ class PluginInstaller {
 
   PluginInstaller(this.repository);
 
+  /// Optional: told which stage an install reached (`downloading`, `verifying`, `installing`).
+  /// Set by whoever runs one install at a time and wants to report progress (a remote request).
+  void Function(String stage)? onStage;
+
+  void _stage(String name) {
+    try {
+      onStage?.call(name);
+    } catch (e) {
+      debugPrint('$_tag stage listener failed: $e');
+    }
+  }
+
   // ---------------------------------------------------------------
   // Paths
   // ---------------------------------------------------------------
@@ -65,7 +77,54 @@ class PluginInstaller {
   // Discovery
   // ---------------------------------------------------------------
 
-  Future<List<PluginManifest>> discover() async {
+  // discover() is called by restore, reconcile, catalog and permission reporting within the same second: share one
+  // scan between them (concurrent callers wait for the running scan; a fresh result is reused for a few seconds).
+  // Anything that changes the store drops it (_changesStore), and a scan that raced with a change is not cached.
+  static const _discoverTtl = Duration(seconds: 5);
+  List<PluginManifest>? _discovered;
+  DateTime? _discoveredAt;
+  Future<List<PluginManifest>>? _scanning;
+  int _storeVersion = 0;
+
+  void _storeChanged() {
+    _storeVersion++;
+    _discovered = null;
+    _scanning = null;
+  }
+
+  Future<T> _changesStore<T>(Future<T> Function() change) async {
+    _storeChanged();
+    try {
+      return await change();
+    } finally {
+      _storeChanged();
+    }
+  }
+
+  Future<List<PluginManifest>> discover({bool force = false}) {
+    final at = _discoveredAt;
+    final cached = _discovered;
+    if (!force && cached != null && at != null && DateTime.now().difference(at) < _discoverTtl) {
+      return Future.value(List<PluginManifest>.of(cached));
+    }
+    final running = _scanning;
+    if (!force && running != null) return running.then((m) => List<PluginManifest>.of(m));
+    final version = _storeVersion;
+    late final Future<List<PluginManifest>> scan;
+    scan = _scanStore().then((found) {
+      if (version == _storeVersion) {
+        _discovered = found;
+        _discoveredAt = DateTime.now();
+      }
+      return found;
+    }).whenComplete(() {
+      if (identical(_scanning, scan)) _scanning = null;
+    });
+    _scanning = scan;
+    return scan.then((m) => List<PluginManifest>.of(m));
+  }
+
+  Future<List<PluginManifest>> _scanStore() async {
     debugPrint('$_tag discover() scanning plugin store');
 
     final root = await pluginsRoot();
@@ -133,7 +192,9 @@ class PluginInstaller {
   // Install
   // ---------------------------------------------------------------
 
-  Future<PluginInfo> install(String id, String version, {String? abi}) async {
+  Future<PluginInfo> install(String id, String version, {String? abi}) => _changesStore(() => _install(id, version, abi: abi));
+
+  Future<PluginInfo> _install(String id, String version, {String? abi}) async {
     // 1. Download package.tar.gz
     //   ↓
     // 2. Verify SHA-256 checksum
@@ -221,6 +282,7 @@ class PluginInstaller {
       final artifactFile = File('${tempDir.path}/$_artifactName');
 
       debugPrint('$_tag Downloading artifact to ${artifactFile.path}');
+      _stage('downloading');
 
       await repository.downloadArtifact(
         url: packageUrl,
@@ -244,6 +306,7 @@ class PluginInstaller {
       // STEP 3: Verify SHA-256.
       // -----------------------------------------------------------
 
+      _stage('verifying');
       final actualChecksum = await _calculateSha256(artifactFile);
 
       final expectedChecksum = _normalizeSha256(checksum);
@@ -294,6 +357,8 @@ class PluginInstaller {
       // -----------------------------------------------------------
       // STEP 5: Promote temporary directory.
       // -----------------------------------------------------------
+
+      _stage('installing');
 
       // Preserve the existing installation if one exists.
       if (await finalDir.exists()) {
@@ -399,7 +464,9 @@ class PluginInstaller {
   // Remove
   // ---------------------------------------------------------------
 
-  Future<void> remove(String id) async {
+  Future<void> remove(String id) => _changesStore(() => _remove(id));
+
+  Future<void> _remove(String id) async {
     _validatePathSegment(id, 'plugin id');
 
     debugPrint('$_tag remove($id) starting');
@@ -418,7 +485,9 @@ class PluginInstaller {
   }
 
   /// Remove only one version of a plugin.
-  Future<void> removeVersion(String id, String version) async {
+  Future<void> removeVersion(String id, String version) => _changesStore(() => _removeVersion(id, version));
+
+  Future<void> _removeVersion(String id, String version) async {
     final dir = await pluginDir(id, version);
 
     if (await dir.exists()) {
@@ -428,7 +497,10 @@ class PluginInstaller {
   }
 
   /// Restore the previous installed.json entry after a failed installation.
-  Future<void> restoreInstalledEntry(
+  Future<void> restoreInstalledEntry(String id, Map<String, dynamic>? previousEntry) =>
+      _changesStore(() => _restoreInstalledEntry(id, previousEntry));
+
+  Future<void> _restoreInstalledEntry(
     String id,
     Map<String, dynamic>? previousEntry,
   ) async {

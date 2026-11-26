@@ -147,6 +147,21 @@ Future<void> denyPermissions({
   });
 }
 
+  /// Uninstall: forget every permission decision made for this plugin, so a reinstall asks again.
+  /// Never throws (a platform without per-plugin decisions simply has nothing to forget).
+  Future<void> forgetPermissions(String nativeModule) async {
+    try {
+      await _channel.invokeMethod('forgetPermissions', {'nativeModule': nativeModule});
+      debugPrint('$_tag forgetPermissions($nativeModule) ok');
+    } on MissingPluginException {
+      // platform without a native permission store
+    } on PlatformException catch (e) {
+      debugPrint('$_tag forgetPermissions($nativeModule) error: code=${e.code} message=${e.message}');
+    } catch (e) {
+      debugPrint('$_tag forgetPermissions($nativeModule) unexpected: $e');
+    }
+  }
+
   Future<void> unloadNativeModule(String nativeModule) async {
     debugPrint('$_tag unloadNativeModule($nativeModule)');
     try {
@@ -304,10 +319,13 @@ Future<String> getAbi() async {
   ///
   /// Returns null when this platform cannot answer without prompting (Android asks on request; no native
   /// method yet): the caller must then treat every permission as unknown, never as granted or denied.
-  Future<Map<String, String>?> permissionStatus(List<String> permissions) async {
+  ///
+  /// Decisions belong to ONE plugin ([nativeModule]): what the user allowed the camera plugin says nothing
+  /// about the files plugin.
+  Future<Map<String, String>?> permissionStatus(String nativeModule, List<String> permissions) async {
     try {
       final r = await _channel.invokeMethod<Map<dynamic, dynamic>>(
-          'permissionStatus', {'permissions': permissions});
+          'permissionStatus', {'nativeModule': nativeModule, 'permissions': permissions});
       if (r == null) return null;
       return {for (final e in r.entries) e.key.toString(): e.value.toString()};
     } on MissingPluginException {

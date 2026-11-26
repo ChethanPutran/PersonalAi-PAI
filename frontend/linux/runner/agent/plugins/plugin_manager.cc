@@ -21,14 +21,15 @@ std::map<std::string, std::string> PluginManager::Invoke(
 
   // Re-check permissions right before invoking — cheap, and catches
   // the "user unplugged the camera between install and use" case.
-  const auto check = permissions_->Request(m->Permissions());
-if (check.at("ok") != "true") {
-  return {
-      {"ok", "false"},
-      {"error", "permission_not_granted"},
-      {"denied", check.at("denied")},
-  };
-}
+  // Permissions are tracked per plugin (keyed by native module), never globally.
+  const auto check = permissions_->Request(native_module, m->Permissions());
+  if (check.at("ok") != "true") {
+    return {
+        {"ok", "false"},
+        {"error", "permission_not_granted"},
+        {"denied", check.at("denied")},
+    };
+  }
 
   try {
     return m->Invoke(capability, params);

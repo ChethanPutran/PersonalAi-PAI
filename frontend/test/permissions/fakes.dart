@@ -113,7 +113,7 @@ class FakeTesterManager implements PluginManager {
   @override
   bool isEnabledOnDevice(String pluginId, String deviceId) => true;
   @override
-  Future<void> loadCatalog() async {}
+  Future<void> loadCatalog({Duration? maxAge}) async {}
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }

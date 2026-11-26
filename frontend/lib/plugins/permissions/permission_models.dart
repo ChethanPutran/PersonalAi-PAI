@@ -123,6 +123,7 @@ class ConfirmationRequest {
     this.allowedScopes = const [ConfirmationScope.once],
     this.canBindParams = false,
     this.defaultBinding = ParamBinding.exact,
+    this.requiredBindingKeys = const [],
     this.reason,
   });
 
@@ -139,6 +140,9 @@ class ConfirmationRequest {
   final List<ConfirmationScope> allowedScopes;
   final bool canBindParams;
   final ParamBinding defaultBinding;
+
+  /// Parameters a remembered approval must be tied to (shell: the command). 'Any' is never offered.
+  final List<String> requiredBindingKeys;
   final String? reason;
 
   bool get allowsOnly => allowedScopes.length == 1;
@@ -172,6 +176,10 @@ class ConfirmationRequest {
       allowedScopes: scopes,
       canBindParams: json['can_bind_params'] == true,
       defaultBinding: ParamBinding.fromJson(json['default_binding']),
+      requiredBindingKeys: [
+        for (final k in (json['required_binding_keys'] is List ? json['required_binding_keys'] as List : const []))
+          k.toString()
+      ],
       reason: (reason == null || reason.isEmpty) ? null : reason,
     );
   }
@@ -191,6 +199,7 @@ class ConfirmationRequest {
         ],
         canBindParams: canBindParams,
         defaultBinding: defaultBinding,
+        requiredBindingKeys: requiredBindingKeys,
         reason: reason,
       );
 
@@ -204,6 +213,7 @@ class ConfirmationRequest {
         allowedScopes: allowedScopes,
         canBindParams: canBindParams,
         defaultBinding: defaultBinding,
+        requiredBindingKeys: requiredBindingKeys,
         reason: reason,
       );
 

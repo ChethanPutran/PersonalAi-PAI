@@ -1,3 +1,5 @@
+import 'dart:async';
+
 
 import 'package:flutter/foundation.dart';
 import 'package:pai_mobile/plugins/capability_dispatcher.dart';
@@ -8,6 +10,7 @@ import '../core/app_version.dart';
 import 'models/catalog_response.dart';
 import 'models/plugin_update.dart';
 import 'models/plugin_info.dart';
+import 'models/plugin_operation.dart';
 import 'models/plugin_state.dart';
 import 'permission_reporter.dart';
 import 'plugin_service.dart';
@@ -23,15 +26,32 @@ enum RemotePhase {
   succeeded,
 }
 
-/// Tracks the state of a remote plugin operation.
+/// Tracks the state of a remote plugin operation (what the UI shows).
 class RemoteOp {
   final RemotePhase phase;
+
+  /// Plain-language failure text (never a raw exception) - shown with [hint].
   final String? error;
+
+  /// What to do about the failure.
+  final String? hint;
+
+  /// While installing: requested | delivered | downloading | verifying | installing |
+  /// awaiting_permission (see [remoteStageLabel]).
+  final String? stage;
+
+  /// The backend operation this tracks.
+  final String? operationId;
 
   const RemoteOp({
     this.phase = RemotePhase.idle,
     this.error,
+    this.hint,
+    this.stage,
+    this.operationId,
   });
+
+  String get stageLabel => remoteStageLabel(stage);
 }
 
 // ---------------------------------------------------------------------------
@@ -153,11 +173,15 @@ class PluginManager extends ChangeNotifier {
     if (reporter == null) return;
     try {
       final declared = <String, List<String>>{};
+      final modules = <String, String>{};
       for (final id in _localInstalledIds) {
         final perms = _plugins[id]?.permissions ?? const <String>[];
-        if (perms.isNotEmpty) declared[id] = perms;
+        if (perms.isEmpty) continue;
+        declared[id] = perms;
+        final module = _plugins[id]?.runtimeSpec.nativeModule;
+        if (module != null && module.isNotEmpty) modules[id] = module;
       }
-      await reporter.report(declared, force: force);
+      await reporter.report(declared, nativeModules: modules, force: force);
     } catch (e) {
       debugPrint('[PluginManager] permission report failed: $e');
     }
@@ -308,7 +332,19 @@ class PluginManager extends ChangeNotifier {
   // -------------------------------------------------------------------------
 
   /// Loads the plugin catalog from the backend and refreshes local state.
-  Future<void> loadCatalog() async {
+  DateTime? _catalogLoadedAt;
+
+  /// True when the last reconcile changed what the backend knows about this device (so the catalog is stale).
+  bool lastReconcileChangedBackend = false;
+
+  /// [maxAge]: skip the request when the catalog was loaded that recently (startup loads it, then the
+  /// reconcile after the socket connects would load the very same data again).
+  Future<void> loadCatalog({Duration? maxAge}) async {
+    final at = _catalogLoadedAt;
+    if (maxAge != null && at != null && DateTime.now().difference(at) < maxAge) {
+      debugPrint('[PluginManager] Catalog is fresh; not reloading');
+      return;
+    }
     _loading = true;
     notifyListeners();
 
@@ -354,6 +390,7 @@ class PluginManager extends ChangeNotifier {
         '${_thisDevicePlugins.length} for this device, '
         '${_otherDeviceGroups.length} other device group(s)',
       );
+      _catalogLoadedAt = DateTime.now();
     } catch (e, st) {
       debugPrint('[PluginManager] loadCatalog failed: $e');
       debugPrintStack(stackTrace: st);
@@ -665,8 +702,9 @@ class PluginManager extends ChangeNotifier {
 
   /// Requests installation of a plugin on another device.
   ///
-  /// The actual installation runs on the target device. This method tracks
-  /// the remote operation and polls the backend for its result.
+  /// The backend answers at once with an operation; its progress then arrives as `plugin.operation`
+  /// frames on the device WebSocket (see [handleOperationFrame]), so nothing polls. Rejections the
+  /// user can act on (remote install off on that device, ...) are shown in plain words.
   Future<void> installOnDevice(
     String pluginId,
     String version,
@@ -676,110 +714,139 @@ class PluginManager extends ChangeNotifier {
 
     _remoteOps[key] = const RemoteOp(
       phase: RemotePhase.installing,
+      stage: 'requested',
     );
 
     notifyListeners();
 
     try {
-      await api.post('/plugins/$pluginId/install', {
+      final response = await api.post('/plugins/$pluginId/install', {
         'device_id': targetDeviceId,
         'version': version,
       });
+
+      // The push frame may already have arrived; applying the same operation twice is harmless.
+      final op = PluginOperation.tryParse(response is Map ? response['operation'] : null);
+      if (op != null) handleOperation(op);
     } catch (e) {
+      final text = describeRemoteRequestError(e is ApiException ? e.body : null);
       _remoteOps[key] = RemoteOp(
         phase: RemotePhase.failed,
-        error: e.toString(),
+        error: e is ApiException ? text.message : "Couldn't reach the server. Check your connection and try again.",
+        hint: e is ApiException ? text.hint : null,
       );
 
       notifyListeners();
       rethrow;
     }
-
-    // Poll asynchronously so the UI does not wait for the full operation.
-    _pollRemoteInstall(
-      targetDeviceId,
-      pluginId,
-      version,
-    );
   }
 
-  /// Polls backend state until the remote installation succeeds, fails,
-  /// or times out.
-  Future<void> _pollRemoteInstall(
-    String targetDeviceId,
-    String pluginId,
-    String expectedVersion, {
-    Duration interval = const Duration(seconds: 2),
-    Duration timeout = const Duration(minutes: 5),
-  }) async {
-    final key = _remoteKey(targetDeviceId, pluginId);
-    final deadline = DateTime.now().add(timeout);
+  /// Operations whose success was already handled (the frame can repeat, e.g. after a reconnect).
+  final Set<String> _settledOps = {};
 
-    while (DateTime.now().isBefore(deadline)) {
-      await Future.delayed(interval);
+  /// Applies a `plugin.operation` WebSocket frame (`{type, operation: {...}}`).
+  void handleOperationFrame(Map<String, dynamic> frame) {
+    final op = PluginOperation.tryParse(frame['operation']);
+    if (op != null) handleOperation(op);
+  }
 
-      try {
-        final response = await api.get(
-          '/plugins/device/$targetDeviceId/installed',
-        );
+  /// Moves the remote-install state for (device, plugin) to what the backend reports.
+  /// Only installs on OTHER devices are tracked here; a finished operation never goes back.
+  void handleOperation(PluginOperation op) {
+    if (op.kind != 'install' || op.deviceId == deviceId) return;
+    final key = _remoteKey(op.deviceId, op.pluginId);
+    final current = _remoteOps[key];
 
-        final entries = response['plugins'] as List? ?? [];
+    // A finished operation is final, and an older operation never overwrites a newer one.
+    if (current?.operationId == op.id && current!.phase != RemotePhase.installing) return;
 
-        final matchingEntries = entries.where(
-          (item) =>
-              item is Map &&
-              item['plugin_id']?.toString() == pluginId,
-        );
-
-        if (matchingEntries.isEmpty) continue;
-
-        final entry = matchingEntries.first as Map;
-
-        final error = entry['last_error']?.toString();
-        final installed = entry['is_installed'] == true;
-        final installedVersion = entry['version']?.toString();
-
-        if (error != null &&
-            error.isNotEmpty &&
-            error != 'install_requested') {
-          _remoteOps[key] = RemoteOp(
-            phase: RemotePhase.failed,
-            error: error,
-          );
-
-          notifyListeners();
-          return;
-        }
-
-        if (installed && installedVersion == expectedVersion) {
-          _remoteOps[key] = const RemoteOp(
-            phase: RemotePhase.succeeded,
-          );
-
-          notifyListeners();
-
-          // The other device enabled it locally on install; make the server agree (see _enableOnBackend).
-          await _enableOnBackend(pluginId, targetDeviceId);
-
-          // Refresh catalog after the remote installation completes.
-          await loadCatalog();
-          return;
-        }
-      } catch (e) {
-        debugPrint(
-          '[PluginManager] remote poll error: $e',
-        );
-      }
+    if (op.failed) {
+      _remoteOps[key] = RemoteOp(
+        phase: RemotePhase.failed,
+        operationId: op.id,
+        error: op.errorMessage ?? "The device couldn't finish the installation.",
+        hint: op.errorHint,
+      );
+    } else if (op.succeeded) {
+      _remoteOps[key] = RemoteOp(phase: RemotePhase.succeeded, operationId: op.id);
+      if (_settledOps.add(op.id)) unawaited(_afterRemoteInstall(op));
+    } else {
+      _remoteOps[key] = RemoteOp(phase: RemotePhase.installing, stage: op.status, operationId: op.id);
     }
-
-    _remoteOps[key] = RemoteOp(
-      phase: RemotePhase.failed,
-      error:
-          'Timed out after ${timeout.inMinutes} minutes. '
-          'Check the device agent log.',
-    );
-
     notifyListeners();
+  }
+
+  Future<void> _afterRemoteInstall(PluginOperation op) async {
+    try {
+      // The other device enabled it locally on install; make the server agree (see _enableOnBackend).
+      await _enableOnBackend(op.pluginId, op.deviceId);
+      // Refresh catalog after the remote installation completes.
+      await loadCatalog();
+    } catch (e) {
+      debugPrint('[PluginManager] post-install refresh failed: $e');
+    }
+  }
+
+  /// First load / reconnect: pick up operations that are still running (their frames may have been
+  /// missed while the socket was down).
+  Future<void> loadActiveOperations() async {
+    try {
+      final response = await api.get('/plugins/operations', query: {'active': 'true'});
+      final list = response is Map ? response['operations'] : null;
+      if (list is! List) return;
+      for (final raw in list) {
+        final op = PluginOperation.tryParse(raw);
+        if (op != null) handleOperation(op);
+      }
+    } catch (e) {
+      debugPrint('[PluginManager] loading active operations failed: $e');
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Results of install/uninstall COMMANDS this device ran for someone else
+  // -------------------------------------------------------------------------
+
+  /// Tells the backend how a requested install ended on THIS device (the final result of the
+  /// operation; the stages go over the WebSocket as `plugin.progress`).
+  Future<void> reportCommandInstall({
+    required String pluginId,
+    required String? version,
+    String? operationId,
+    required bool success,
+    String? error,
+    bool enabled = true,
+  }) async {
+    try {
+      await api.post('/plugins/$pluginId/report-install', {
+        'device_id': deviceId,
+        'operation_id': operationId,
+        'version': version ?? '',
+        'success': success,
+        if (!enabled) 'enabled': false,
+        if (error != null) 'error': error,
+      });
+    } catch (e) {
+      debugPrint('[PluginManager] report-install failed: $e');
+    }
+  }
+
+  Future<void> reportCommandUninstall({
+    required String pluginId,
+    String? operationId,
+    required bool success,
+    String? error,
+  }) async {
+    try {
+      await api.post('/plugins/$pluginId/report-uninstall', {
+        'device_id': deviceId,
+        'operation_id': operationId,
+        'success': success,
+        if (error != null) 'error': error,
+      });
+    } catch (e) {
+      debugPrint('[PluginManager] report-uninstall failed: $e');
+    }
   }
 
   /// Retries a failed remote installation.
@@ -864,6 +931,8 @@ class PluginManager extends ChangeNotifier {
         'removed=${response['removed']}',
       );
 
+      bool nonEmpty(Object? v) => v is Iterable && v.isNotEmpty;
+      lastReconcileChangedBackend = nonEmpty(response['added']) || nonEmpty(response['updated']) || nonEmpty(response['removed']);
       await _refreshLocalPluginStates();
       notifyListeners();
       await reportPermissions(force: true);   // a reconcile may follow a server restart
@@ -1143,6 +1212,7 @@ class PluginManager extends ChangeNotifier {
     _localVersions.clear();
     _updates.clear();
     _remoteOps.clear();
+    _settledOps.clear();
     _capConfigCache.clear();
     _devicePluginStates.clear();
 

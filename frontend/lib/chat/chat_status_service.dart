@@ -1,4 +1,5 @@
 import 'dart:async';
+import '../core/redact.dart';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
@@ -117,7 +118,7 @@ static const _maxFailures = 5;
         '$wsBase/api/v1/chat/$sessionId/stream'
         '?token=${Uri.encodeComponent(token)}',
       );
-       debugPrint('[ChatStatus] connecting to $url');
+      debugPrint('[ChatStatus] connecting to ${redactUrl(url)}');
 
       _ws = WebSocketChannel.connect(url);
       
@@ -139,7 +140,6 @@ static const _maxFailures = 5;
       // optimistic — the next `_handleDisconnect` will restore backoff
       // if it turns out the connection didn't actually establish.
       _backoff = const Duration(seconds: 1);
-      debugPrint('[ChatStatus] connecting to $url');
     } catch (e) {
       debugPrint('[ChatStatus] connect failed: $e');
       _scheduleReconnect();

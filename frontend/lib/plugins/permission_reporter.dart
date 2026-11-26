@@ -12,7 +12,8 @@ class PermissionReporter {
   final String deviceId;
 
   /// Read-only permission query (see PluginRuntime.permissionStatus). Null = this platform can't say.
-  final Future<Map<String, String>?> Function(List<String> permissions) status;
+  /// Asked per plugin ([nativeModule]): each plugin's decisions are its own.
+  final Future<Map<String, String>?> Function(String nativeModule, List<String> permissions) status;
 
   String? _lastSent;
 
@@ -23,22 +24,28 @@ class PermissionReporter {
   /// Reports for [declared] (installed plugin id -> permissions its manifest declares).
   /// Skips the call when nothing changed since the last successful report, unless [force].
   /// Never throws. Returns true if a report was sent.
-  Future<bool> report(Map<String, List<String>> declared, {bool force = false}) async {
+  ///
+  /// [nativeModules] maps a plugin id to the native module its decisions are stored under (defaults to the id).
+  Future<bool> report(
+    Map<String, List<String>> declared, {
+    Map<String, String> nativeModules = const {},
+    bool force = false,
+  }) async {
     try {
-      final all = {for (final p in declared.values) ...p}.toList()..sort();
-      if (all.isEmpty) return false;
-      final answers = await status(all);
-      if (answers == null) return false;
-
       final plugins = <String, Map<String, String>>{};
-      declared.forEach((pluginId, perms) {
+      for (final entry in declared.entries) {
+        final pluginId = entry.key;
+        final perms = entry.value;
+        if (perms.isEmpty) continue;
+        final answers = await status(nativeModules[pluginId] ?? pluginId, perms);
+        if (answers == null) continue; // this platform cannot say: unknown, never granted or denied
         final per = <String, String>{};
         for (final p in perms) {
           final a = answers[p];
           if (a != null && _valid.contains(a)) per[p] = a;
         }
         if (per.isNotEmpty) plugins[pluginId] = per;
-      });
+      }
       if (plugins.isEmpty) return false;
 
       final key = _canonical(plugins);

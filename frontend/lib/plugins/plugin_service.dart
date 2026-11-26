@@ -542,6 +542,12 @@ class PluginService {
       await _unloadSafely(nativeModule);
     }
 
+    // The plugin's permission decisions go with it: a reinstall must ask again, and a different plugin
+    // installed later never inherits what the user allowed this one.
+    if (nativeModule != null) {
+      await runtime.forgetPermissions(nativeModule);
+    }
+
     await installer.remove(id);
     registry.remove(id);
 

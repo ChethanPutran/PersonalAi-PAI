@@ -62,6 +62,7 @@ class ScheduleService {
     String timezone = 'UTC',
     String capability = kReminderCapability,
     String catchUp = 'once',
+    int? misfireGraceSeconds,         // null = a missed run never expires
     String? targetDeviceId,
     Map<String, dynamic>? parameters, // plugin-action parameters; default = the reminder text
   }) async {
@@ -73,6 +74,7 @@ class ScheduleService {
       'capability': capability,
       'parameters': parameters ?? {'title': title, 'body': body ?? ''},
       'catch_up': catchUp,
+      'misfire_grace_seconds': misfireGraceSeconds,
       'target_device_id': targetDeviceId,
     };
     if (fireAt != null) payload['fire_at'] = fireAt.toUtc().toIso8601String();
@@ -97,6 +99,8 @@ class ScheduleService {
     String? capability,
     Map<String, dynamic>? parameters,
     String? catchUp,
+    int? misfireGraceSeconds,
+    bool clearMisfireGrace = false,  // explicit null: "no limit"
     String? targetDeviceId,
     bool? enabled,
   }) async {
@@ -111,6 +115,8 @@ class ScheduleService {
       'capability': ?capability,
       'parameters': ?parameters,
       'catch_up': ?catchUp,
+      if (clearMisfireGrace) 'misfire_grace_seconds': null
+      else 'misfire_grace_seconds': ?misfireGraceSeconds,
       'target_device_id': ?targetDeviceId,
       'enabled': ?enabled,
     };

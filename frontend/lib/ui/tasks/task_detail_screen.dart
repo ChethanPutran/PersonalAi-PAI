@@ -242,9 +242,9 @@ class _TaskDetailScreenState extends State<TaskDetailScreen> {
               const SizedBox(height: 16),
               _resultSection(_task.result),
             ],
-            if ((_task.error ?? '').isNotEmpty) ...[
+            if (_task.status.name == 'failed' || (_task.error ?? '').isNotEmpty) ...[
               const SizedBox(height: 16),
-              _errorBox(_task.error!),
+              _errorBox(_task),
             ],
             if (_task.metadata.isNotEmpty) ...[
               const SizedBox(height: 16),
@@ -454,15 +454,34 @@ class _TaskDetailScreenState extends State<TaskDetailScreen> {
     ]);
   }
 
-  Widget _errorBox(String error) {
+  Widget _errorBox(Task task) {
+    final info = task.errorInfo;
+    final raw = info?.raw ?? task.error;
+    final text = Theme.of(context).textTheme;
     return HudPanel(
-      title: 'Error',
+      title: 'What went wrong',
       leadingIcon: Icons.warning_amber_rounded,
       accent: PaiColors.red,
       padding: const EdgeInsets.all(PaiSpacing.md),
-      child: SelectableText(
-        error,
-        style: context.pai.mono(size: 12.5, strong: true),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SelectableText(
+            info?.message ?? taskFailureText(task),
+            key: const Key('task-error-message'),
+            style: text.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
+          ),
+          if (info?.hint != null) ...[
+            const SizedBox(height: 6),
+            Text(info!.hint!, key: const Key('task-error-hint'), style: text.bodyMedium),
+          ],
+          if (raw != null && raw.trim().isNotEmpty && raw != info?.message) ...[
+            const SizedBox(height: 10),
+            Text('TECHNICAL DETAILS', style: text.labelSmall),
+            const SizedBox(height: 2),
+            SelectableText(raw, key: const Key('task-error-raw'), style: context.pai.mono(size: 11.5)),
+          ],
+        ],
       ),
     );
   }

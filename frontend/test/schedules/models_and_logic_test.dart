@@ -391,6 +391,28 @@ void main() {
       expect(logs.join('\n'), contains('skipping malformed capability junk'));
     });
 
+    test('misfire grace: parsed (absent = null) and sent on create / PATCH, null only when cleared', () async {
+      expect(Schedule.fromJson(scheduleJson()).misfireGraceSeconds, isNull);
+      expect(Schedule.fromJson(scheduleJson({'misfire_grace_seconds': 3600})).misfireGraceSeconds, 3600);
+
+      final bodies = <Map<String, dynamic>>[];
+      final mock = MockClient((req) async {
+        bodies.add(jsonDecode(req.body) as Map<String, dynamic>);
+        return http.Response(jsonEncode(scheduleJson()), 200);
+      });
+      await withClient(mock, () async {
+        await svc().create(title: 't', kind: 'cron', cron: '0 9 * * *', catchUp: 'all', misfireGraceSeconds: 600);
+        await svc().update('s1', misfireGraceSeconds: 300);
+        await svc().update('s1', clearMisfireGrace: true);
+        await svc().update('s1', title: 'x');
+      });
+      expect(bodies[0]['catch_up'], 'all');
+      expect(bodies[0]['misfire_grace_seconds'], 600);
+      expect(bodies[1]['misfire_grace_seconds'], 300);
+      expect(bodies[2].containsKey('misfire_grace_seconds') && bodies[2]['misfire_grace_seconds'] == null, isTrue);
+      expect(bodies[3].containsKey('misfire_grace_seconds'), isFalse);     // untouched stays untouched
+    });
+
     test('approve posts the days; revoke deletes; both return the schedule', () async {
       final seen = <String>[];
       final mock = MockClient((req) async {

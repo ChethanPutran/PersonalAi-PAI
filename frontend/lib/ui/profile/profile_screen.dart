@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:pai_mobile/models/device.dart';
 
+import '../../device/remote_access.dart';
 import '../../models/user.dart';
 import '../../profile/profile_service.dart';
 import '../../profile/settings_service.dart';
@@ -13,12 +14,16 @@ class ProfileScreen extends StatefulWidget {
   final String? currentDeviceId;
   final Future<void> Function() onLogout;
 
+  /// This device's remote-access switches. When null the "Remote access" section is hidden.
+  final RemoteAccessController? remoteAccess;
+
   const ProfileScreen({
     super.key,
     required this.service,
     required this.settings,
     required this.onLogout,
     this.currentDeviceId,
+    this.remoteAccess,
   });
 
   @override
@@ -252,6 +257,18 @@ class _ProfileScreenState extends State<ProfileScreen> {
             ),
           ),
         ),
+
+        if (widget.remoteAccess != null) ...[
+          _SectionHeader('Remote access'),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: PaiSpacing.lg),
+            child: HudPanel(
+              brackets: false,
+              padding: const EdgeInsets.symmetric(vertical: PaiSpacing.xs),
+              child: _RemoteAccessSwitches(controller: widget.remoteAccess!),
+            ),
+          ),
+        ],
 
         const SizedBox(height: PaiSpacing.xl),
         Padding(
@@ -572,6 +589,53 @@ class _DeviceTileState extends State<_DeviceTile> {
             : theme.colorScheme.outline,
         size: 22,
       ),
+    );
+  }
+}
+
+/// The two switches that decide what your OTHER devices (and the web, schedules, agents) may do to
+/// THIS device. Both are off until you turn them on here; the device enforces them itself.
+class _RemoteAccessSwitches extends StatelessWidget {
+  final RemoteAccessController controller;
+  const _RemoteAccessSwitches({required this.controller});
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: controller,
+      builder: (context, _) {
+        final enabled = !controller.saving;
+        return Column(
+          children: [
+            SwitchListTile(
+              key: const ValueKey('remote-install-switch'),
+              secondary: const Icon(Icons.download_for_offline_outlined),
+              title: const Text('Allow remote plugin install'),
+              subtitle: const Text('Let your other devices install and remove plugins on this one'),
+              value: controller.value.install,
+              onChanged: enabled ? controller.setInstall : null,
+            ),
+            const Divider(),
+            SwitchListTile(
+              key: const ValueKey('remote-invoke-switch'),
+              secondary: const Icon(Icons.settings_remote_outlined),
+              title: const Text('Allow remote plugin use'),
+              subtitle: const Text('Let your other devices, schedules and agents run plugins on this one'),
+              value: controller.value.invoke,
+              onChanged: enabled ? controller.setInvoke : null,
+            ),
+            if (controller.error != null)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(PaiSpacing.lg, PaiSpacing.xs, PaiSpacing.lg, PaiSpacing.sm),
+                child: Text(
+                  controller.error!,
+                  key: const ValueKey('remote-access-error'),
+                  style: TextStyle(color: Theme.of(context).colorScheme.error, fontSize: 12),
+                ),
+              ),
+          ],
+        );
+      },
     );
   }
 }

@@ -513,7 +513,10 @@ Future<void> _handleInstall(String pluginId, String version) async {
         leading: const Icon(Icons.devices_other_outlined),
         title: Text(plugin.name),
         subtitle: Text(
-          'Installing on ${device.name}…',
+          // The live stage the device reports: Downloading…, Verifying…, Installing…, or
+          // "Waiting for permission on the device".
+          '${remote.stageLabel} · ${device.name}',
+          key: const ValueKey('remote-stage'),
           style: TextStyle(fontSize: 12, color: context.pai.muted),
         ),
         trailing: const SizedBox(
@@ -528,11 +531,26 @@ Future<void> _handleInstall(String pluginId, String version) async {
       return _PluginRow(
         leading: const Icon(Icons.error_outline, color: PaiColors.red),
         title: Text(plugin.name),
-        subtitle: Text(
-          remote.error ?? 'Install failed',
-          style: const TextStyle(fontSize: 12, color: PaiColors.red),
-          maxLines: 3,
-          overflow: TextOverflow.ellipsis,
+        // A clear reason and what to do about it, never a raw exception.
+        subtitle: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              remote.error ?? "The installation didn't finish.",
+              key: const ValueKey('remote-error'),
+              style: const TextStyle(fontSize: 12, color: PaiColors.red),
+              maxLines: 3,
+              overflow: TextOverflow.ellipsis,
+            ),
+            if (remote.hint != null && remote.hint!.isNotEmpty)
+              Text(
+                remote.hint!,
+                key: const ValueKey('remote-hint'),
+                style: TextStyle(fontSize: 12, color: context.pai.muted),
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
+              ),
+          ],
         ),
         trailing: FilledButton(
           onPressed: device.connected
@@ -653,11 +671,13 @@ Future<void> _handleInstall(String pluginId, String version) async {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Install requested on ${device.name}')),
       );
-    } catch (e) {
+    } catch (_) {
+      // The manager already recorded a plain-language reason; the tile shows it with a Retry.
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Install failed: $e')));
+      final op = widget.manager.remoteStateFor(device.id, plugin.id);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(op.error ?? "Couldn't start the install on ${device.name}.")),
+      );
     }
   }
 
@@ -668,11 +688,12 @@ Future<void> _handleInstall(String pluginId, String version) async {
         plugin.version,
         deviceId,
       );
-    } catch (e) {
+    } catch (_) {
       if (!mounted) return;
+      final op = widget.manager.remoteStateFor(deviceId, plugin.id);
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(SnackBar(content: Text('Retry failed: $e')));
+      ).showSnackBar(SnackBar(content: Text(op.error ?? "Couldn't retry the install.")));
     }
   }
 

@@ -19,6 +19,12 @@ Map<String, dynamic> event({Map<String, dynamic>? confirmation, String key = 'ty
 ConfirmationService make(FakeApi api) => ConfirmationService(api: api, sessionId: 's1');
 
 void main() {
+  test('the socket URL is the WebSocket route the backend serves (WS /tasks/{session}/stream)', () {
+    final u = confirmationSocketUri(wsBase: 'ws://h:8000', apiPrefix: '/api/v1', sessionId: 's 1', token: 'a+b');
+    expect(u.toString(), 'ws://h:8000/api/v1/tasks/s%201/stream?token=a%2Bb');
+    expect(u.path.endsWith('/tasks/stream'), isFalse);      // not a WebSocket route
+  });
+
   test('an event with a confirmation block yields the server-provided scopes', () {
     final svc = make(FakeApi())..handleMessage(jsonEncode(event(confirmation: confirmationJson(scopes: const ['once', 'session']))));
     final p = svc.pending!;

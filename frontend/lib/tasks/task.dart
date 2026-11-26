@@ -271,6 +271,54 @@ class TaskResult {
 /// so constructing a `Task` from a slim list response (which may only
 /// include id/title/status/device_id/plugin) works without null-checking
 /// every field at the call site.
+/// A failure explained in plain words by the backend (`error_info` on every task payload and
+/// `task.*` event). [message] is for the user, [hint] is what they can do next, [raw] is the
+/// developer string (shown only under "Technical details").
+class TaskErrorInfo {
+  final String code;
+  final String kind; // denied | declined | unavailable | timeout | cancelled | failed
+  final String message;
+  final String? hint;
+  final String? raw;
+
+  const TaskErrorInfo({
+    required this.code,
+    required this.kind,
+    required this.message,
+    this.hint,
+    this.raw,
+  });
+
+  static TaskErrorInfo? fromJson(dynamic j) {
+    if (j is! Map) return null;
+    final message = _strOrNull(j['message']);
+    if (message == null) return null;
+    return TaskErrorInfo(
+      code: _strOrNull(j['code']) ?? 'unknown',
+      kind: _strOrNull(j['kind']) ?? 'failed',
+      message: message,
+      hint: _strOrNull(j['hint']),
+      raw: _strOrNull(j['raw']),
+    );
+  }
+
+  Map<String, dynamic> toJson() =>
+      {'code': code, 'kind': kind, 'message': message, 'hint': hint, 'raw': raw};
+
+  /// "message hint" on one line (cards).
+  String get oneLine => hint == null ? message : '$message $hint';
+}
+
+/// What to tell the user about a failed task: the backend's plain explanation if it sent one,
+/// else the raw error, else an honest "no reason given" (never a bare "Failed").
+String taskFailureText(Task task) {
+  final info = task.errorInfo;
+  if (info != null) return info.oneLine;
+  final raw = task.error;
+  if (raw != null && raw.trim().isNotEmpty) return raw;
+  return "This didn't finish, and nothing reported why. Try again.";
+}
+
 class Task {
   final String id;
   final String title;
@@ -307,6 +355,7 @@ class Task {
 
   final TaskResult? result;
   final String? error;
+  final TaskErrorInfo? errorInfo; // plain-language explanation of [error]
 
   final Map<String, dynamic> metadata;
 
@@ -350,6 +399,7 @@ class Task {
     this.completedAt,
     this.result,
     this.error,
+    this.errorInfo,
     this.metadata = const {},
     this.parentTaskId,
     this.childTaskIds = const [],
@@ -454,6 +504,7 @@ class Task {
       completedAt: _parseDate(json['completed_at']),
       result: parsedResult,
       error: _strOrNull(json['error']),
+      errorInfo: TaskErrorInfo.fromJson(json['error_info']),
       metadata:
           (json['metadata'] as Map?)?.cast<String, dynamic>() ?? const {},
       parentTaskId: _strOrNull(json['parent_task_id']),
@@ -497,6 +548,7 @@ class Task {
         'completed_at': completedAt?.toIso8601String(),
         'result': result?.toJson(),
         'error': error,
+        'error_info': errorInfo?.toJson(),
         'metadata': metadata,
         'parent_task_id': parentTaskId,
         'child_task_ids': childTaskIds,
@@ -542,6 +594,7 @@ class Task {
     DateTime? completedAt,
     TaskResult? result,
     String? error,
+    TaskErrorInfo? errorInfo,
     Map<String, dynamic>? metadata,
     String? parentTaskId,
     List<String>? childTaskIds,
@@ -578,6 +631,7 @@ class Task {
       completedAt: completedAt ?? this.completedAt,
       result: result ?? this.result,
       error: error ?? this.error,
+      errorInfo: errorInfo ?? this.errorInfo,
       metadata: metadata ?? this.metadata,
       parentTaskId: parentTaskId ?? this.parentTaskId,
       childTaskIds: childTaskIds ?? this.childTaskIds,
