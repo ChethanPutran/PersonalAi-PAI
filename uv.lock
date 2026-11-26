@@ -7,6 +7,12 @@ resolution-markers = [
     "python_full_version < '3.13'",
 ]
 
+[manifest]
+members = [
+    "ai-personal-agent",
+    "pai-device",
+]
+
 [[package]]
 name = "ai-personal-agent"
 version = "1.0.0"
@@ -27,6 +33,7 @@ dependencies = [
     { name = "numpy" },
     { name = "openai" },
     { name = "packaging" },
+    { name = "pai-device" },
     { name = "pydantic", extra = ["email"] },
     { name = "pydantic-settings" },
     { name = "pyjwt" },
@@ -73,6 +80,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=1.26.4" },
     { name = "openai", specifier = ">=3.49.0" },
     { name = "packaging", specifier = ">=24.0" },
+    { name = "pai-device", editable = "device" },
     { name = "piper-tts", marker = "extra == 'voice-local'", specifier = ">=1.3" },
     { name = "pydantic", extras = ["email"], specifier = ">=2.14.3" },
     { name = "pydantic-settings", specifier = ">=2.15.0" },
@@ -2923,6 +2931,34 @@ sdist = { url = "https://files.pythonhosted.org/packages/a1/d4/1fc4078c65507b51b
 wheels = [
     { url = "https://files.pythonhosted.org/packages/20/12/38679034af332785aac8774540895e234f4d07f7545804097de4b666afd8/packaging-25.0-py3-none-any.whl", hash = "sha256:29572ef2b1f17581046b3a2227d5c611fb25ec70ca1ba8554b24b0e69331a484", size = 66469, upload-time = "2025-04-19T11:48:57.875Z" },
 ]
+
+[[package]]
+name = "pai-device"
+version = "1.0.0"
+source = { editable = "device" }
+dependencies = [
+    { name = "argcomplete" },
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "websockets" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "argcomplete", specifier = ">=3.0" },
+    { name = "httpx", specifier = ">=0.27.0" },
+    { name = "pydantic", specifier = ">=2.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
+    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
+    { name = "websockets", specifier = ">=12.0" },
+]
+provides-extras = ["dev"]
 
 [[package]]
 name = "pathspec"

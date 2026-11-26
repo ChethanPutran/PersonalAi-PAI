@@ -114,7 +114,7 @@ flutter pub get
 flutter run -d linux          # or an Android device id
 ```
 
-> `pai-server` is the *device agent* entry point (the device-side runtime in `src/pai/server/`), not the API. The API is
+> `pai-server` is the *device agent* entry point (the device-side runtime: the separate `pai-device` package in `device/`), not the API. The API is
 > `uv run pai` (or `uvicorn pai.server.app:create_app --factory --reload`).
 
 ---
@@ -256,7 +256,7 @@ docs/               earlier design notes and status documents
 | Realtime voice protocol | [`src/pai/voice/README.md`](src/pai/voice/README.md) |
 | Agents | [`src/pai/agent/README.md`](src/pai/agent/README.md) |
 | Security model | [`src/pai/security/README.md`](src/pai/security/README.md) |
-| Device agent | [`src/pai/server/README.md`](src/pai/server/README.md) |
+| Device agent | [`device/README.md`](device/README.md) |
 | Flutter client | [`frontend/README.md`](frontend/README.md) |
 | Architecture and conventions | [`CLAUDE.md`](CLAUDE.md), [`docs/`](docs/) |
 

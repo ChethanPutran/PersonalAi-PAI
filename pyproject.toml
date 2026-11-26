@@ -30,6 +30,7 @@ dependencies = [
     "jsonschema>=4.26.0",
     "pydantic-settings>=2.15.0",
     "packaging>=24.0",            # version parsing (pai.version, plugin versioning)
+    "pai-device",                 # the device agent, for the optional embedded agent (PAI_EMBED_AGENT)
 ]
 [project.optional-dependencies]
 # Free, offline voice (no API key): Vosk speech-to-text + Piper text-to-speech.
@@ -86,7 +87,6 @@ where = ["src"]
 [project.scripts]
 pai = "pai.main:main"
 bump-plugin = "scripts.bump_plugin:main"
-pai-server = "pai.server._entry:main"
 pai-validate-manifests = "pai.plugins.manifest_install:main"
 pai-sync-versions = "pai.plugins.versioning:sync_main"
 pai-check-plugin-versions = "pai.plugins.versioning:check_main"
@@ -94,8 +94,11 @@ pai-package-plugin = "pai.plugins.release:main"
 pai-validate-config = "pai.config.strict:main"
 [tool.uv.workspace]
 members = [
-    "server",
+    "device",
 ]
+
+[tool.uv.sources]
+pai-device = { workspace = true }
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Awaitable, Callable, Dict
 
-from pai.server.agent.notifications import show_notification
+from pai_device.agent.notifications import show_notification
 
 logger = logging.getLogger(__name__)
 

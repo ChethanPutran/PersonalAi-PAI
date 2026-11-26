@@ -28,7 +28,7 @@ import logging
 import platform as _platform
 import signal
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Awaitable, Callable, Dict, Optional
 
 from websockets.exceptions import ConnectionClosed
 
@@ -39,7 +39,7 @@ from ..config import (
 )
 from ..plugins import DevicePluginManager
 from ..transport import APIClient, WSClient, sha256_file
-from pai.server.agent.capabilities import BuiltinCapabilities
+from pai_device.agent.capabilities import BuiltinCapabilities
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +87,9 @@ class DeviceAgent:
 
         # --- runtime state ---------------------------------------------------
         self.device_id: Optional[str] = None
+        # What the owner allows OTHER devices to do to this one. Fail closed: nothing is allowed
+        # until the backend says so (in the ``connected`` frame, then ``device.remote_access``).
+        self.remote_access: Dict[str, bool] = {"install": False, "invoke": False}
         # ``_stop`` is set by the signal handlers (or by the WS loop when the
         # backend sends a terminal close code) to tear everything down.
         self._stop = asyncio.Event()
@@ -211,6 +214,7 @@ class DeviceAgent:
             try:
                 resp = await self.api.register(payload.model_dump())
                 self.device_id = resp["device_id"]
+                self.api.device_id = self.device_id       # X-PAI-Device-Id on every later call
                 self.device_id_file.write_text(self.device_id)
                 logger.info(
                     "Registered as device %s (%s)",
@@ -370,6 +374,11 @@ class DeviceAgent:
 
         if msg_type == "connected":
             logger.info("WS handshake complete for %s", self.device_id)
+            self._apply_remote_access(message.get("remote_access"))
+            return
+
+        if msg_type == "device.remote_access":
+            self._apply_remote_access(message.get("remote_access"))
             return
 
         # Trivial control messages — nothing to do but acknowledge.
@@ -409,24 +418,68 @@ class DeviceAgent:
     # Install / uninstall
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Remote access (the owner's switches for this device)
+    # ------------------------------------------------------------------
+
+    def _apply_remote_access(self, raw: Optional[Dict[str, Any]]) -> None:
+        if not isinstance(raw, dict):
+            return
+        self.remote_access = {"install": bool(raw.get("install")), "invoke": bool(raw.get("invoke"))}
+        logger.info("Remote access on this device: install=%s invoke=%s",
+                    self.remote_access["install"], self.remote_access["invoke"])
+
+    def _is_remote(self, source_device_id: Optional[str]) -> bool:
+        """Anything not asked by this device itself is remote."""
+        return not source_device_id or source_device_id != self.device_id
+
+    async def _progress(self, operation_id: Optional[str], status: str, **extra: Any) -> None:
+        """Tell the backend how far an install/uninstall got (best effort; the final result also
+        goes through the report endpoints)."""
+        if not operation_id:
+            return
+        try:
+            await self.ws.send({"type": "plugin.progress", "operation_id": operation_id,
+                                "status": status, **extra})
+        except Exception:
+            logger.debug("progress frame %s not sent", status, exc_info=True)
+
+    # ------------------------------------------------------------------
+    # Install / uninstall
+    # ------------------------------------------------------------------
+
     async def _handle_install(self, message: Dict[str, Any]) -> None:
         """Handle a ``plugin.install`` command from the backend.
 
-        Downloads, verifies, and installs the requested plugin version,
-        then reports success/failure via the ``/report/install`` endpoint.
+        Refuses a remote request unless the owner allowed remote installs on this device, then
+        downloads, verifies and installs, reporting each stage (``plugin.progress``) and the final
+        result (``/report-install``).
         """
         plugin_meta = message.get("plugin") or {}
         plugin_id = plugin_meta.get("id")
         version = plugin_meta.get("version")
+        op_id = message.get("operation_id")
         if not plugin_id or not version:
             logger.warning("Malformed plugin.install: %s", message)
+            await self._progress(op_id, "failed", error="Malformed install request")
+            return
+
+        if self._is_remote(message.get("requested_by_device")) and not self.remote_access["install"]:
+            logger.warning("Refused remote install of %s: remote install is off on this device", plugin_id)
+            err = "Remote plugin install is turned off on this device"
+            await self._progress(op_id, "failed", error=err, error_code="remote_install_disabled")
+            await self._report_install_failure(plugin_id, version, op_id, err)
             return
 
         logger.info("Installing plugin %s@%s", plugin_id, version)
         try:
-            await self._install_plugin(plugin_id, version)
+            async def stage(name: str) -> None:
+                await self._progress(op_id, name)
+
+            await self._install_plugin(plugin_id, version, stage=stage)
             await self.api.report_install(plugin_id, {
                 "device_id": self.device_id,
+                "operation_id": op_id,
                 "version": version,
                 "success": True,
                 "artifact_sha256": self._sha_for(plugin_id),
@@ -434,12 +487,19 @@ class DeviceAgent:
             logger.info("Install complete: %s@%s", plugin_id, version)
         except Exception as exc:
             logger.exception("Install %s failed", plugin_id)
+            await self._report_install_failure(plugin_id, version, op_id, str(exc)[:500])
+
+    async def _report_install_failure(
+        self, plugin_id: str, version: str, op_id: Optional[str], error: str,
+    ) -> None:
+        try:
             await self.api.report_install(plugin_id, {
-                "device_id": self.device_id,
-                "version": version,
-                "success": False,
-                "error": str(exc)[:500],
+                "device_id": self.device_id, "operation_id": op_id, "version": version,
+                "success": False, "error": error,
             })
+        except Exception:
+            logger.exception("Could not report the install failure of %s", plugin_id)
+            await self._progress(op_id, "failed", error=error)
 
     async def _handle_uninstall(self, message: Dict[str, Any]) -> None:
         """Handle a ``plugin.uninstall`` command from the backend."""
@@ -447,13 +507,23 @@ class DeviceAgent:
             (message.get("plugin") or {}).get("id")
             or message.get("plugin_id")
         )
+        op_id = message.get("operation_id")
         if not plugin_id:
             return
+        if self._is_remote(message.get("requested_by_device")) and not self.remote_access["install"]:
+            logger.warning("Refused remote uninstall of %s: remote install is off on this device", plugin_id)
+            err = "Remote plugin install is turned off on this device"
+            await self._progress(op_id, "failed", error=err, error_code="remote_install_disabled")
+            await self.api.report_uninstall(plugin_id, {
+                "device_id": self.device_id, "operation_id": op_id, "success": False, "error": err})
+            return
         logger.info("Uninstalling plugin %s", plugin_id)
+        await self._progress(op_id, "installing")            # "working on it"
         try:
             await self.plugins.uninstall(plugin_id)
             await self.api.report_uninstall(plugin_id, {
                 "device_id": self.device_id,
+                "operation_id": op_id,
                 "success": True,
             })
             logger.info("Uninstall complete: %s", plugin_id)
@@ -461,6 +531,7 @@ class DeviceAgent:
             logger.exception("Uninstall %s failed", plugin_id)
             await self.api.report_uninstall(plugin_id, {
                 "device_id": self.device_id,
+                "operation_id": op_id,
                 "success": False,
                 "error": str(exc)[:500],
             })
@@ -478,6 +549,18 @@ class DeviceAgent:
         request_id = message["request_id"]
         capability = message.get("capability")
         parameters = message.get("parameters") or {}
+
+        if self._is_remote(message.get("source_device_id")) and not self.remote_access["invoke"]:
+            logger.warning("Refused remote task %s (%s): remote use is off on this device",
+                           request_id, capability)
+            await self.ws.send({
+                "type": "result",
+                "request_id": request_id,
+                "error": "Remote plugin use is turned off on this device.",
+                "success": False,
+                "result": {"ok": False, "error": "Remote plugin use is turned off on this device."},
+            })
+            return
 
         if not capability:
             logger.warning("Task %s missing capability", request_id)
@@ -734,7 +817,10 @@ class DeviceAgent:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
-    async def _install_plugin(self, plugin_id: str, version: str) -> None:
+    async def _install_plugin(
+        self, plugin_id: str, version: str,
+        stage: Optional[Callable[[str], Awaitable[None]]] = None,
+    ) -> None:
         """Download, verify, and install a single plugin version.
 
         Steps:
@@ -747,13 +833,10 @@ class DeviceAgent:
         """
         logger.debug("Fetching manifest for %s@%s", plugin_id, version)
         manifest = await self.api.fetch_manifest(plugin_id, version)
-        index = await self.api.fetch_index()
-        entry = next((p for p in index["plugins"] if p["id"] == plugin_id), None)
-        if entry is None:
-            raise RuntimeError(f"{plugin_id} missing from registry index")
-        vinfo = entry["versions"].get(version)
-        if vinfo is None:
-            raise RuntimeError(f"{plugin_id}@{version} missing from index")
+        info = await self.api.fetch_plugin_info(plugin_id, version)
+        vinfo = self.api.version_entry(info)
+        if not vinfo["artifacts"]:
+            raise RuntimeError(f"{plugin_id}@{version} has no downloadable package")
 
         # NOTE: The following prints are developer-facing debug output. They
         # are kept verbatim to avoid changing behaviour; a future refactor
@@ -814,11 +897,15 @@ class DeviceAgent:
             / "_downloads"
             / f"{plugin_id}-{version}{suffix}"
         )
+        if stage:
+            await stage("downloading")
         await self.api.download_artifact(
-            plugin_id, version, effective_platform, tmp
+            vinfo["artifacts"][effective_platform], tmp
         )
         logger.debug("Downloaded %s@%s to %s", plugin_id, version, tmp)
 
+        if stage:
+            await stage("verifying")
         actual = sha256_file(tmp)
         if expected_sha and actual != expected_sha:
             tmp.unlink(missing_ok=True)
@@ -827,6 +914,8 @@ class DeviceAgent:
             )
         logger.debug("SHA256 verified for %s@%s", plugin_id, version)
 
+        if stage:
+            await stage("installing")
         await self.plugins.install(
             plugin_id, version, manifest, tmp, expected_sha
         )

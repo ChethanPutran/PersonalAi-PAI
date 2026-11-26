@@ -21,6 +21,8 @@ import httpx
 import websockets
 from websockets.protocol import State
 
+API_PREFIX = "/api/v1"      # the backend's REST prefix (this package never imports the backend)
+
 logger = logging.getLogger(__name__)
 
 
@@ -77,6 +79,9 @@ class APIClient:
         self._password = password
         self._token: Optional[str] = None
         self._user_id: Optional[str] = None
+        # Sent as X-PAI-Device-Id on every call so the backend can tell "this device acting on
+        # itself" (local) from "acting on another device" (needs that device's opt-in).
+        self.device_id: Optional[str] = None
 
         # No default Authorization header — we set it per request so
         # rotated tokens are always used.
@@ -210,6 +215,8 @@ class APIClient:
 
         headers = dict(kwargs.pop("headers", {}) or {})
         headers["Authorization"] = f"Bearer {self._token}"
+        if self.device_id:
+            headers["X-PAI-Device-Id"] = self.device_id
 
         r = await self._http.request(
             method, url, headers=headers, **kwargs
@@ -254,47 +261,89 @@ class APIClient:
     # Plugin registry
     # ------------------------------------------------------------------
 
-    async def fetch_index(self) -> Dict[str, Any]:
-        r = await self._request("GET", "/plugins/index.json")
+    async def fetch_plugin_info(
+        self, plugin_id: str, version: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """``GET /plugins/{id}[?version=]``: one catalog entry (with ``packageUrl``/``checksum``)."""
+        params = {"version": version} if version else None
+        r = await self._request("GET", f"/plugins/{plugin_id}", params=params)
         return r.json()
+
+    @staticmethod
+    def version_entry(info: Dict[str, Any]) -> Dict[str, Any]:
+        """Per-version install data from a catalog entry: ``artifacts`` (platform -> package URL)
+        and ``sha256`` (platform -> checksum), one key per platform the entry targets."""
+        platforms = list((info.get("platforms") or {}).keys())
+        url, sha = info.get("packageUrl"), info.get("checksum")
+        if sha:                       # the backend sends "sha256:<hex>"; hashes here are bare hex
+            sha = sha.removeprefix("sha256:").lower()
+        return {
+            "artifacts": {p: url for p in platforms if url},
+            "sha256": {p: sha for p in platforms if sha},
+        }
+
+    async def fetch_index(self) -> Dict[str, Any]:
+        """Registry index built from ``GET /plugins/catalog``.
+
+        Shape: ``{"plugins": [{id, name, latest, versions: {ver: {artifacts, sha256}}}]}``.
+        The catalog lists, per device of this user, the newest runnable version of each plugin,
+        so ``versions`` holds those versions only; use :meth:`fetch_plugin_info` for another one.
+        """
+        r = await self._request("GET", "/plugins/catalog")
+        merged: Dict[str, Dict[str, Any]] = {}
+        for entries in (r.json() or {}).values():
+            for info in entries:
+                if not info.get("compatible", True):
+                    continue
+                entry = merged.setdefault(info["id"], {
+                    "id": info["id"], "name": info.get("name"),
+                    "latest": info["version"], "versions": {},
+                })
+                v = entry["versions"].setdefault(
+                    info["version"], {"artifacts": {}, "sha256": {}})
+                data = self.version_entry(info)
+                v["artifacts"].update(data["artifacts"])
+                v["sha256"].update(data["sha256"])
+        return {"plugins": list(merged.values())}
 
     async def fetch_manifest(
         self, plugin_id: str, version: str
     ) -> Dict[str, Any]:
         r = await self._request(
-            "GET", f"/plugins/{plugin_id}/{version}/manifest.json"
+            "GET", f"/plugins/{plugin_id}/manifest.json",
+            params={"version": version},
         )
         return r.json()
 
-    async def download_artifact(
-        self, plugin_id: str, version: str, platform: str, dest: Path
-    ) -> Path:
-        await self.ensure_token()
-        url = f"/plugins/{plugin_id}/{version}/artifact/{platform}"
-        headers = {"Authorization": f"Bearer {self._token}"}
+    async def download_artifact(self, package_url: str, dest: Path) -> Path:
+        """Stream a plugin package (``packageUrl`` from the catalog) to ``dest``.
+
+        A backend-relative URL (``/api/v1/plugins/artifacts/...``) is fetched with our token; an
+        absolute one (e.g. a presigned S3 URL) is fetched as is, never with our credentials.
+        """
+        if package_url.startswith("file:"):
+            raise RuntimeError(f"cannot download a file:// package over HTTP: {package_url}")
+        own = not package_url.startswith(("http://", "https://"))
+        url = package_url.removeprefix(API_PREFIX) if own else package_url
+        if own:
+            await self.ensure_token()
 
         dest.parent.mkdir(parents=True, exist_ok=True)
 
-        async def _stream(hdrs: Dict[str, str]) -> None:
-            async with self._http.stream(
-                "GET", url, headers=hdrs
-            ) as r:
-                if r.status_code == 401:
-                    raise httpx.HTTPStatusError(
-                        "401", request=r.request, response=r
-                    )
+        async def _stream() -> None:
+            headers = {"Authorization": f"Bearer {self._token}"} if own else {}
+            async with self._http.stream("GET", url, headers=headers) as r:
                 r.raise_for_status()
                 with dest.open("wb") as f:
                     async for chunk in r.aiter_bytes():
                         f.write(chunk)
 
         try:
-            await _stream(headers)
+            await _stream()
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 401:
+            if own and exc.response.status_code == 401:
                 await self.login()
-                headers["Authorization"] = f"Bearer {self._token}"
-                await _stream(headers)
+                await _stream()
             else:
                 raise
         return dest

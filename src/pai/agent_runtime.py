@@ -79,8 +79,8 @@ class EmbeddedAgent:
             return
 
         try:
-            from pai.server.agent.agent import DeviceAgent
-            from pai.server.config import DeviceConfig
+            from pai_device.agent.agent import DeviceAgent
+            from pai_device.config import DeviceConfig
         except ImportError as exc:
             logger.warning("Embedded agent: cannot import server: %s", exc)
             return

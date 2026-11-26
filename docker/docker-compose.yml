@@ -75,7 +75,7 @@ services:
   pai-api:
     build:
       context: ..
-      dockerfile: docker/Dockerfile
+      dockerfile: docker/Dockerfile.backend
     environment:
       - PAI_ENV=production
       - DATABASE_URL=postgresql+asyncpg://pai_user:${DB_PASSWORD:-pai_secure_password}@postgres:5432/pai_db

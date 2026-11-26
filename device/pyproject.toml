@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pai-device"
+version = "1.0.0"
+description = "PAI device agent: install on a device and connect it to a PAI backend"
+readme = "README.md"
+requires-python = ">=3.12"
+# Deliberately tiny: nothing from the backend (no pai package, FastAPI, SQLAlchemy, LLM SDKs ...).
+dependencies = [
+    "httpx>=0.27.0",
+    "websockets>=12.0",
+    "pydantic>=2.0",
+    "argcomplete>=3.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+
+[project.scripts]
+pai-server = "pai_device._entry:main"      # the device agent (kept name; not the API server)
+pai-device = "pai_device._entry:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

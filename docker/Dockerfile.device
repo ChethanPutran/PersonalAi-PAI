@@ -1,0 +1,23 @@
+# PAI device agent (`pai-server`). Standalone: it only needs the backend's URL and credentials.
+# Build from the repo root:
+#   docker build -f docker/Dockerfile.device -t pai-device .
+#   docker run -e PAI_BACKEND_URL=http://host:8000 -e PAI_SERVER_EMAIL=... -e PAI_SERVER_PASSWORD=... \
+#              -v pai-device:/home/pai/.pai pai-device
+FROM python:3.12-slim AS build
+WORKDIR /src
+COPY device/ ./device/
+RUN pip install --no-cache-dir --prefix=/install ./device
+
+FROM python:3.12-slim
+# The state dir must exist and belong to `pai` BEFORE it is declared a VOLUME: a new named volume
+# copies its ownership from the image, so without this it is created root-owned and the agent
+# cannot write its device id / plugins ("Permission denied: /home/pai/.pai/state").
+RUN useradd --create-home --uid 1000 pai \
+ && mkdir -p /home/pai/.pai && chown -R pai:pai /home/pai
+COPY --from=build /install /usr/local
+ENV PYTHONUNBUFFERED=1 PAI_DEVICE_TYPE=server
+USER pai
+WORKDIR /home/pai
+# Registered device id, downloaded plugins and logs live here: mount a volume to keep them.
+VOLUME ["/home/pai/.pai"]
+ENTRYPOINT ["pai-server"]
