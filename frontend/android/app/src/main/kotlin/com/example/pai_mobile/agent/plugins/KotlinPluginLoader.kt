@@ -15,6 +15,10 @@ import java.io.File
 class KotlinPluginLoader(private val appContext: Context) {
 
     fun load(dexPath: String, className: String): Result<PluginModule> = runCatching {
+        // 0. Android 14+ throws SecurityException ("Writable dex file ... is not allowed") for a dex the app
+        //    can still write to: the downloaded plugin must be read-only before it is loaded.
+        File(dexPath).let { if (it.canWrite()) it.setReadOnly() }
+
         // 1. Create DexClassLoader with the host's classloader as parent
         val optimizedDir = File(appContext.codeCacheDir, "pai_kotlin_plugins")
             .apply { mkdirs() }

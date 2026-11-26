@@ -43,7 +43,8 @@ class PluginChannel(
             // ---- Unified load: native OR kotlin ----
             "loadNativeModule" -> {
                 val path = call.argument<String>("artifactPath")!!
-                val type = call.argument<String>("type") ?: "native"
+                // "kotlin" (accept the Dart enum's long form "PluginLanguage.kotlin" too)
+                val type = (call.argument<String>("type") ?: "native").substringAfterLast('.').lowercase()
                 val entrypoint = call.argument<String>("entrypoint") ?: ""
                 scope.launch(Dispatchers.IO) {
                     val out = when (type) {

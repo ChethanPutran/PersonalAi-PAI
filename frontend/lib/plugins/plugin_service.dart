@@ -156,7 +156,7 @@ class PluginService {
         entrypoint: spec.entrypoint,
         capabilities: capabilities.map((c) => c.id).toList(),
         permissions: pluginInfo.permissions,
-        type: pluginInfo.type.toString(),
+        type: pluginInfo.type.name,
         onPermissionConsent: onPermissionConsent,
       );
 
@@ -445,7 +445,7 @@ class PluginService {
         entrypoint: spec.entrypoint,
         capabilities: plugin.capabilities.map((c) => c.id).toList(),
         permissions: info.permissions,
-        type: info.type.toString(),
+        type: info.type.name,
         onPermissionConsent: onPermissionConsent,
       );
 
@@ -949,7 +949,7 @@ class PluginService {
         entrypoint: spec.entrypoint,
         capabilities: plugin.capabilities.map((c) => c.id).toList(),
         permissions: info.permissions,
-        type: info.type.toString(),
+        type: info.type.name,
       );
 
       return result['ok'] == true;

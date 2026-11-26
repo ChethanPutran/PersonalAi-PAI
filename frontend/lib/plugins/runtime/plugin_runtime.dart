@@ -3,6 +3,16 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
+/// The plugin language as the native side expects it: `kotlin`, `native`, ...
+///
+/// Callers used to pass `PluginLanguage.kotlin.toString()`, which is `"PluginLanguage.kotlin"`; the Android
+/// side matches `"kotlin"` exactly, so every Kotlin plugin fell through to the native `.so` loader and failed
+/// with "bad ELF magic" on its `plugin.dex`.
+String wireLanguage(String type) {
+  final t = type.contains('.') ? type.split('.').last : type;
+  return t.trim().toLowerCase();
+}
+
 class PluginRuntime {
   static const _tag = '[PluginRuntime]';
   static const _channel = MethodChannel('pai/plugin_runtime');
@@ -60,7 +70,7 @@ class PluginRuntime {
         'entrypoint': entrypoint,
         'capabilities': capabilities,
         'permissions': permissions,
-        'type': type,             
+        'type': wireLanguage(type),
       },
     );
 
