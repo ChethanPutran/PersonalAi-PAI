@@ -9,8 +9,8 @@ Everything the agent used to hardcode or take only from the environment can be s
     timing:         heartbeat / reconcile / reconnect intervals
     remote_access:  the STARTING value of the owner's remote-install / remote-use switches
 
-Lookup order for the file: ``--config`` / the explicit argument, ``$PAI_DEVICE_CONFIG``, ``./pai-device.yaml``,
-``$PAI_HOME/pai-device.yaml`` (``~/.pai/pai-device.yaml``). Precedence for every value: environment variable,
+Lookup order for the file: ``--config`` / the explicit argument, ``$PAI_DEVICE_CONFIG``, ``./pai-device.local.yaml``
+(personal settings, git-ignored), ``./pai-device.yaml``, ``$PAI_HOME/pai-device.yaml`` (``~/.pai/pai-device.yaml``). Precedence for every value: environment variable,
 then the file, then the built-in default. An unknown key is an error (a typo must not silently do nothing).
 See ``pai-device.yaml`` in the package folder for every key with its meaning.
 """
@@ -28,6 +28,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 logger = logging.getLogger(__name__)
 
 FILE_NAME = "pai-device.yaml"
+LOCAL_FILE_NAME = "pai-device.local.yaml"      # personal settings; git-ignored, looked up before FILE_NAME
 ENV_VAR = "PAI_DEVICE_CONFIG"
 
 
@@ -70,11 +71,15 @@ class TimingSection(_Section):
 
 
 class RemoteAccessSection(_Section):
-    """STARTING value of what other devices may do to this one, used until the backend reports the owner's
-    setting (it does so as soon as the device connects, and again whenever the owner changes it). Fail closed:
-    leave both false unless you have a reason to accept remote requests before that report arrives."""
-    install: bool = False
-    invoke: bool = False
+    """What other devices (your other devices, the web, schedules, agents) may do to THIS one.
+
+    ``true`` / ``false``: this file decides. When the agent starts it applies the value to the backend for this
+    device (it signs in as the device's owner, the same authority as the switch in Settings or the app), so the
+    setting is on or off exactly as written. ``null`` (the default): the file says nothing and the agent follows
+    whatever the owner set in the app or on the web. Either way the device refuses remote requests until it has
+    heard the owner's setting from the backend (fail closed)."""
+    install: Optional[bool] = None
+    invoke: Optional[bool] = None
 
 
 class DeviceFile(_Section):
@@ -95,7 +100,7 @@ def find_config_file(explicit: Optional[str] = None, *, home: Optional[Path] = N
         if not path.is_file():
             raise ConfigFileError(f"Config file not found: {path}")
         return path
-    candidates: List[Path] = [Path.cwd() / FILE_NAME]
+    candidates: List[Path] = [Path.cwd() / LOCAL_FILE_NAME, Path.cwd() / FILE_NAME]
     base = home if home is not None else _default_home()
     if base is not None:
         candidates.append(base / FILE_NAME)

@@ -73,3 +73,6 @@ GeneratedPluginRegistrant.*
 Generated.xcconfig
 flutter_export_environment.sh
 frontend/com.android.builder.sdk.*
+
+# device agent: personal settings (credentials, device name); never commit
+pai-device.local.yaml

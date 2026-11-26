@@ -35,10 +35,12 @@ timing:                               # seconds
   progress_keepalive: 20              # "still installing" frames during a long install (keep well under 120)
 
 # What OTHER devices (your other devices, the web, schedules, agents) may do to THIS one.
-# These are only the STARTING values, used until the backend reports the owner's setting, which it does
-# as soon as the device connects and again whenever the owner changes it (Settings page or the app).
-# Fail closed: leave both false unless you have a reason to accept remote requests before that report.
+#   true / false  this file decides: when the agent starts it applies the value to the backend for this device
+#                 (it signs in as the device's owner, the same authority as the switch in Settings or the app).
+#   null          this file says nothing: the agent follows whatever the owner set in the app or on the web.
+# Applied once per start; a later change by the owner (Settings / app) is respected until the next start.
+# Until the device has heard the owner's setting from the backend it refuses remote requests (fail closed).
 # PAI_REMOTE_INSTALL / PAI_REMOTE_INVOKE (true/false) override these.
 remote_access:
-  install: false                      # remote plugin install / uninstall / enable / disable
-  invoke: false                       # running this device's plugins remotely (camera, files, ...)
+  install: null                       # remote plugin install / uninstall / enable / disable
+  invoke: null                        # running this device's plugins remotely (camera, files, ...)

@@ -225,7 +225,7 @@ def _local_config(ctx: Ctx) -> Dict[str, Any]:
         "heartbeat_interval": c.heartbeat_interval, "reconcile_interval": c.reconcile_interval,
         "reconnect_min": c.reconnect_min, "reconnect_max": c.reconnect_max,
         "progress_keepalive": c.progress_keepalive_seconds,
-        "starting_remote_install": c.remote_access_install, "starting_remote_invoke": c.remote_access_invoke,
+        "config_remote_install": c.remote_access_install, "config_remote_invoke": c.remote_access_invoke,
         "config_file": str(c.config_file) if c.config_file else None,
     }
 
@@ -240,7 +240,7 @@ async def cmd_config(args, ctx: Ctx) -> int:
         print(f"{k:<{width}}  {v}")
     dim("Local settings: environment variables, then the config file (--config / $PAI_DEVICE_CONFIG / "
         "./pai-device.yaml / ~/.pai/pai-device.yaml), then defaults. The password is never shown. "
-        "starting_remote_* are only the values used until the backend reports the owner's setting.")
+        "config_remote_* are what the config file applies to the backend when the agent starts (None = follow the owner).")
     return 0
 
 

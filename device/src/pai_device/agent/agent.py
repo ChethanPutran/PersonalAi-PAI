@@ -88,13 +88,12 @@ class DeviceAgent:
 
         # --- runtime state ---------------------------------------------------
         self.device_id: Optional[str] = None
-        # What the owner allows OTHER devices to do to this one. Starts from the config file
-        # (``remote_access.install`` / ``.invoke``; both False by default: fail closed) and is replaced by
-        # the backend's report as soon as it arrives (the ``connected`` frame, then ``device.remote_access``).
-        self.remote_access: Dict[str, bool] = {
-            "install": bool(config.remote_access_install),
-            "invoke": bool(config.remote_access_invoke),
-        }
+        # What the owner allows OTHER devices to do to this one: fail closed (nothing) until the backend
+        # reports the owner's setting (the ``connected`` frame, then ``device.remote_access`` frames).
+        # A value in the config file is not trusted here: it is APPLIED to the backend once per start (see
+        # _sync_remote_access_from_config), and then comes back as the owner's setting like any other.
+        self.remote_access: Dict[str, bool] = {"install": False, "invoke": False}
+        self._remote_access_synced = False
         # One plugin change at a time. Without it the sync loop (which uninstalls local plugins the
         # backend "does not know") ran in the middle of an install, whose dependency step takes tens
         # of seconds, and removed the plugin that was being installed.
@@ -384,6 +383,9 @@ class DeviceAgent:
         if msg_type == "connected":
             logger.info("WS handshake complete for %s", self.device_id)
             self._apply_remote_access(message.get("remote_access"))
+            if not self._remote_access_synced:                  # once per start: a reconnect must not undo the owner
+                self._remote_access_synced = True
+                self._background.append(asyncio.create_task(self._sync_remote_access_from_config()))
             return
 
         if msg_type == "device.remote_access":
@@ -436,6 +438,29 @@ class DeviceAgent:
     # ------------------------------------------------------------------
     # Remote access (the owner's switches for this device)
     # ------------------------------------------------------------------
+
+    async def _sync_remote_access_from_config(self) -> None:
+        """Make the backend's setting for THIS device match the config file (``remote_access.install`` /
+        ``.invoke``), for the keys the file sets. The agent signs in as the device's owner, so this is the
+        owner's own setting, written from the device. Done once per start: if the owner later turns it off in the
+        app, a network blip must not turn it back on. A key the file leaves null is not touched."""
+        wanted = {k: v for k, v in (("install", self.config.remote_access_install),
+                                    ("invoke", self.config.remote_access_invoke)) if v is not None}
+        differing = {k: v for k, v in wanted.items() if self.remote_access.get(k) != v}
+        if not differing or not self.device_id:
+            return
+        logger.info("The config file sets remote access %s but the owner's setting on the backend is %s: "
+                    "applying the config file's value to the backend", wanted,
+                    {k: self.remote_access[k] for k in differing})
+        try:
+            reply = await self.api.set_remote_access(
+                self.device_id, install=differing.get("install"), invoke=differing.get("invoke"))
+        except Exception as exc:
+            logger.warning("Could not apply remote access from the config file (%s); staying with the owner's "
+                           "setting on the backend", exc)
+            return
+        self._apply_remote_access({"install": reply.get("allow_remote_install"),
+                                   "invoke": reply.get("allow_remote_invoke")})
 
     def _apply_remote_access(self, raw: Optional[Dict[str, Any]]) -> None:
         if not isinstance(raw, dict):

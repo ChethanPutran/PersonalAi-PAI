@@ -68,7 +68,7 @@ def test_no_file_means_env_only_and_fail_closed_defaults(monkeypatch):
     monkeypatch.setenv("PAI_SERVER_PASSWORD", "pw")
     cfg = DeviceConfig.from_env()                         # the old entry point still works
     assert cfg.config_file is None
-    assert (cfg.remote_access_install, cfg.remote_access_invoke) == (False, False)
+    assert (cfg.remote_access_install, cfg.remote_access_invoke) == (None, None)     # unset: follow the owner
     assert (cfg.heartbeat_interval, cfg.progress_keepalive_seconds) == (20.0, 20.0)
 
 
@@ -80,15 +80,11 @@ def test_missing_required_values_say_where_to_set_them(tmp_path):
     assert "c.yaml" in msg
 
 
-def test_the_agent_starts_from_the_configured_remote_access_values(tmp_path):
+def test_the_agent_never_trusts_the_file_before_the_backend_has_reported(tmp_path):
     base = dict(backend_url="http://x", email="e", password="p", device_name="d",
                 state_dir=tmp_path / "s", plugin_dir=tmp_path / "p")
-    closed = DeviceAgent(DeviceConfig(**base))
-    assert closed.remote_access == {"install": False, "invoke": False}            # the default: fail closed
-    configured = DeviceAgent(DeviceConfig(**base, remote_access_install=True, remote_access_invoke=True))
-    assert configured.remote_access == {"install": True, "invoke": True}
-    configured._apply_remote_access({"install": False, "invoke": False})          # the backend's report replaces it
-    assert configured.remote_access == {"install": False, "invoke": False}
+    for cfg in (DeviceConfig(**base), DeviceConfig(**base, remote_access_install=True, remote_access_invoke=True)):
+        assert DeviceAgent(cfg).remote_access == {"install": False, "invoke": False}     # fail closed until told
 
 
 def test_a_typo_or_bad_value_is_an_error_naming_the_key(tmp_path):
@@ -107,7 +103,7 @@ def test_a_typo_or_bad_value_is_an_error_naming_the_key(tmp_path):
 
 def test_an_empty_file_is_all_defaults(tmp_path):
     f = load_config_file(__import__("pathlib").Path(write(tmp_path / "e.yaml", "")))
-    assert f.remote_access.install is False and f.timing.heartbeat_interval == 20
+    assert f.remote_access.install is None and f.remote_access.invoke is None and f.timing.heartbeat_interval == 20
 
 
 def test_lookup_order_and_a_requested_file_must_exist(tmp_path, monkeypatch):
@@ -118,6 +114,9 @@ def test_lookup_order_and_a_requested_file_must_exist(tmp_path, monkeypatch):
     assert find_config_file() == home_file
     (tmp_path / "pai-device.yaml").write_text("")                                  # ./ beats ~/.pai
     assert find_config_file() == tmp_path / "pai-device.yaml"
+    (tmp_path / "pai-device.local.yaml").write_text("")                            # the personal, git-ignored file wins
+    assert find_config_file() == tmp_path / "pai-device.local.yaml"
+    (tmp_path / "pai-device.local.yaml").unlink()
     monkeypatch.setenv("PAI_DEVICE_CONFIG", str(home_file))                       # env beats ./
     assert find_config_file() == home_file
     assert find_config_file(str(tmp_path / "pai-device.yaml")) == tmp_path / "pai-device.yaml"   # argument beats env
@@ -141,6 +140,8 @@ def test_a_password_in_a_readable_file_gets_a_warning(tmp_path, caplog):
 
 def test_the_shipped_default_file_is_valid_and_fail_closed():
     shipped = __import__("pathlib").Path(__file__).resolve().parents[1] / "pai-device.yaml"
+    if shipped.read_text().count("password:") and "password: null" not in shipped.read_text():
+        pytest.skip("this checkout has personal settings in pai-device.yaml (use pai-device.local.yaml for those)")
     f = load_config_file(shipped)
-    assert f.remote_access.install is False and f.remote_access.invoke is False
+    assert f.remote_access.install is None and f.remote_access.invoke is None     # follow the owner by default
     assert f.backend.url == "http://localhost:8000" and f.account.password is None

@@ -115,7 +115,8 @@ uv run --active --env-file .env pai-device install browser --watch
 ## Configuration
 
 Settings come from, in this order: **environment variables**, then a **YAML config file**, then built-in defaults.
-The file is looked for at `--config FILE` / `$PAI_DEVICE_CONFIG` (must exist), `./pai-device.yaml`, then
+The file is looked for at `--config FILE` / `$PAI_DEVICE_CONFIG` (must exist), `./pai-device.local.yaml`
+(personal settings; **git-ignored**, so put credentials and your device name there), `./pai-device.yaml`, then
 `~/.pai/pai-device.yaml`. [`pai-device.yaml`](pai-device.yaml) in this folder is the template: it lists every key
 with its meaning and the environment variable that overrides it. An unknown key is an error, so a typo can't
 silently do nothing. `pai-device config show` prints the effective settings (the password is never shown).
@@ -137,11 +138,15 @@ pai-server                                       # or: pai-server --config /path
 | `timing.heartbeat_interval` / `reconcile_interval` | | `20` / `60` seconds |
 | `timing.reconnect_min` / `reconnect_max` | | `1` / `60` seconds |
 | `timing.progress_keepalive` | | `20` seconds (keep well under the backend's 120 s stall limit) |
-| `remote_access.install` / `.invoke` | `PAI_REMOTE_INSTALL` / `PAI_REMOTE_INVOKE` | `false` / `false` |
+| `remote_access.install` / `.invoke` | `PAI_REMOTE_INSTALL` / `PAI_REMOTE_INVOKE` | unset (`null`) |
 
-`remote_access.*` are only the **starting** values: what other devices may do to this one is the owner's setting on
-the backend, which the agent receives as soon as it connects (and on every change) and which then replaces them.
-Both default to `false` (fail closed), so until that report arrives nothing remote is accepted. See
+`remote_access.*`: what other devices may do to **this** one. `true` / `false` means *this file decides*: when the
+agent starts it applies the value to the backend for this device (it signs in as the device's owner, the same
+authority as the switch in Settings or the app), and the log then shows it on or off exactly as written. `null`
+(the default) means the file says nothing and the agent follows whatever the owner set in the app or on the web.
+It is applied once per start, so a change the owner makes later is not undone by a reconnect. Until the device has
+heard the owner's setting from the backend it refuses remote requests (fail closed). Note the switches belong to
+each device separately: turning them on for your phone does not turn them on for this machine. See
 [Remote access](#remote-access-who-may-install--run-plugins-on-this-device).
 
 ### State and data locations

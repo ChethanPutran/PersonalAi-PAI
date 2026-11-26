@@ -97,10 +97,11 @@ class DeviceConfig:
     reconnect_max: float = 60.0
     progress_keepalive_seconds: float = 20.0           # "still installing" frames; under the backend's 120 s stall limit
 
-    # What other devices may do to this one BEFORE the backend reports the owner's setting (it does on
-    # connect, and again on every change). Fail closed: both False unless the config says otherwise.
-    remote_access_install: bool = False
-    remote_access_invoke: bool = False
+    # Remote access from the config file / environment: True or False = apply that to the backend when the agent
+    # starts; None = follow the owner's setting. The device refuses remote requests until the backend has
+    # reported that setting (fail closed), whatever these say.
+    remote_access_install: Optional[bool] = None
+    remote_access_invoke: Optional[bool] = None
 
     config_file: Optional[Path] = None                 # the file these settings came from, if any
 
@@ -171,8 +172,9 @@ class DeviceConfig:
         )
 
 
-def _flag(env_value: Optional[str], file_value: bool) -> bool:
-    """A true/false setting: the environment variable (1/true/yes/on or 0/false/no/off) wins over the file."""
+def _flag(env_value: Optional[str], file_value: Optional[bool]) -> Optional[bool]:
+    """A true/false/unset setting: the environment variable (1/true/yes/on or 0/false/no/off) wins over the
+    file; unset everywhere stays None."""
     if env_value is None or not env_value.strip():
         return file_value
     return env_value.strip().lower() in ("1", "true", "yes", "on")
