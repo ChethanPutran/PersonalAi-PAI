@@ -4,6 +4,7 @@
 #   PAI_SERVER_EMAIL=you@example.com PAI_SERVER_PASSWORD=... ./scripts/run_pai_server_device_docker.sh
 #
 #   --network host  so "localhost:8000" reaches the backend (inside a container, localhost is the container)
+# Optional settings file (see device/pai-device.yaml): PAI_DEVICE_CONFIG_FILE=$PWD/device/pai-device.yaml
 # A previous run with an older image may have left a root-owned volume: remove it once with
 #   docker volume rm pai-device
 # If the container cannot resolve names (plugin installs need PyPI), your network may block the DNS servers
@@ -14,4 +15,5 @@ docker run --rm --network host ${PAI_DOCKER_DNS:+--dns "$PAI_DOCKER_DNS"} \
   -e PAI_SERVER_EMAIL="${PAI_SERVER_EMAIL:?set PAI_SERVER_EMAIL}" \
   -e PAI_SERVER_PASSWORD="${PAI_SERVER_PASSWORD:?set PAI_SERVER_PASSWORD}" \
   -v pai-device:/home/pai/.pai \
+  ${PAI_DEVICE_CONFIG_FILE:+-v "$PAI_DEVICE_CONFIG_FILE":/home/pai/pai-device.yaml:ro} \
   pai-device

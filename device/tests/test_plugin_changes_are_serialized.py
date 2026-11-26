@@ -48,7 +48,7 @@ async def test_a_long_install_step_keeps_reporting_so_the_backend_does_not_give_
                                      state_dir=tmp_path / "s", plugin_dir=tmp_path / "p"))
     agent.device_id = "B"
     agent.remote_access = {"install": True, "invoke": False}
-    agent.PROGRESS_KEEPALIVE_SECONDS = 0.03
+    agent.config.progress_keepalive_seconds = 0.03
     sent = []
 
     async def ws_send(frame):

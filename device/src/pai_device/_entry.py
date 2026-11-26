@@ -18,6 +18,7 @@ from pathlib import Path
 
 from .agent.agent import DeviceAgent
 from .config import DeviceConfig, StorageNotWritable, pai_home
+from .config_file import ENV_VAR
 
 logger = logging.getLogger(__name__)
 
@@ -134,33 +135,42 @@ def main() -> int:
         help="directory for http.log (default: $PAI_HOME/logs, i.e. ~/.pai/logs)",
     )
     p.add_argument(
+        "--config", default=None, metavar="FILE",
+        help="YAML config file (default: $PAI_DEVICE_CONFIG, ./pai-device.yaml, ~/.pai/pai-device.yaml)",
+    )
+    p.add_argument(
         "--verbose-http", action="store_true",
         help="also print httpx logs to the terminal (default: file only)",
     )
     args = p.parse_args()
 
+    if args.config:
+        os.environ[ENV_VAR] = args.config        # the --reload child process reads it from here too
+
     try:
-        log_dir = Path(args.log_dir) if args.log_dir else pai_home() / "logs"
+        cfg = DeviceConfig.load(args.config)
     except StorageNotWritable as exc:
         print(f"storage error: {exc}", file=sys.stderr)
         return 3
-    _configure_logging(log_dir, verbose_http=args.verbose_http)
-
-    try:
-        cfg = DeviceConfig.from_env()
     except RuntimeError as exc:
         print(f"config error: {exc}", file=sys.stderr)
         print(
-            "\nRequired environment variables:\n"
-            "  PAI_BACKEND_URL   e.g. http://localhost:8000\n"
-            "  PAI_SERVER_EMAIL  registered user email\n"
-            "  PAI_SERVER_PASSWORD      that user's password\n"
+            "\nSet these in a YAML file (see pai-device.yaml) or as environment variables:\n"
+            "  backend.url       / PAI_BACKEND_URL       e.g. http://localhost:8000\n"
+            "  account.email     / PAI_SERVER_EMAIL      registered user email\n"
+            "  account.password  / PAI_SERVER_PASSWORD   that user's password (prefer the env var)\n"
             "Optional:\n"
-            "  PAI_DEVICE_NAME   defaults to hostname\n"
-            "  PAI_DEVICE_TYPE   defaults to 'server'\n",
+            "  device.name       / PAI_DEVICE_NAME       defaults to hostname\n"
+            "  device.type       / PAI_DEVICE_TYPE       defaults to 'server'\n"
+            "Config file: --config FILE, $PAI_DEVICE_CONFIG, ./pai-device.yaml or ~/.pai/pai-device.yaml\n",
             file=sys.stderr,
         )
         return 2
+
+    log_dir = Path(args.log_dir) if args.log_dir else (cfg.log_dir or pai_home() / "logs")
+    _configure_logging(log_dir, verbose_http=args.verbose_http)
+    if cfg.config_file:
+        logger.info("Config file: %s", cfg.config_file)
 
     if args.reload:
         return _run_reload()

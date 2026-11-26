@@ -221,7 +221,12 @@ def _local_config(ctx: Ctx) -> Dict[str, Any]:
         "device_name": c.device_name, "device_type": c.device_type, "platform": c.platform,
         "architecture": c.architecture, "device_id": ctx.device_id,
         "state_dir": str(c.state_dir), "plugin_dir": str(c.plugin_dir),
+        "log_dir": str(c.log_dir) if c.log_dir else None,
         "heartbeat_interval": c.heartbeat_interval, "reconcile_interval": c.reconcile_interval,
+        "reconnect_min": c.reconnect_min, "reconnect_max": c.reconnect_max,
+        "progress_keepalive": c.progress_keepalive_seconds,
+        "starting_remote_install": c.remote_access_install, "starting_remote_invoke": c.remote_access_invoke,
+        "config_file": str(c.config_file) if c.config_file else None,
     }
 
 
@@ -233,8 +238,9 @@ async def cmd_config(args, ctx: Ctx) -> int:
     width = max(len(k) for k in cfg)
     for k, v in cfg.items():
         print(f"{k:<{width}}  {v}")
-    dim("Local settings come from the environment (PAI_BACKEND_URL, PAI_SERVER_EMAIL, PAI_SERVER_PASSWORD, "
-        "PAI_DEVICE_NAME, PAI_DEVICE_TYPE, PAI_HOME); the password is never shown.")
+    dim("Local settings: environment variables, then the config file (--config / $PAI_DEVICE_CONFIG / "
+        "./pai-device.yaml / ~/.pai/pai-device.yaml), then defaults. The password is never shown. "
+        "starting_remote_* are only the values used until the backend reports the owner's setting.")
     return 0
 
 

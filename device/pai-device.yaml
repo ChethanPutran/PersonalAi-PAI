@@ -1,0 +1,44 @@
+# PAI device agent configuration  (pai-server / pai-device)
+#
+# Where this file is looked for (first match wins):
+#   --config FILE   or   $PAI_DEVICE_CONFIG      (must exist)
+#   ./pai-device.yaml                            (the folder you run the agent from)
+#   ~/.pai/pai-device.yaml                       ($PAI_HOME/pai-device.yaml)
+#
+# Precedence for every value:  environment variable  >  this file  >  built-in default.
+# An unknown key is an error, so a typo can't silently do nothing.
+# This file is safe to commit AS LONG AS it holds no password: put the password in the environment
+# (PAI_SERVER_PASSWORD) or keep a private copy (chmod 600) in ~/.pai/pai-device.yaml.
+
+backend:
+  url: http://localhost:8000          # PAI_BACKEND_URL     inside Docker use --network host or the host's address
+
+account:
+  email: null                         # PAI_SERVER_EMAIL    the PAI account this device belongs to
+  password: null                      # PAI_SERVER_PASSWORD prefer the environment variable
+
+device:
+  name: null                          # PAI_DEVICE_NAME     null = this machine's hostname
+  type: server                        # PAI_DEVICE_TYPE
+
+paths:
+  home: null                          # PAI_HOME            root of the three folders below; null = ~/.pai
+  state_dir: null                     # PAI_STATE_DIR       device id and local state      (default <home>/state)
+  plugin_dir: null                    # PAI_PLUGIN_DIR      downloaded plugins             (default <home>/plugins)
+  log_dir: null                       # PAI_LOG_DIR         http.log                       (default <home>/logs)
+
+timing:                               # seconds
+  heartbeat_interval: 20              # liveness signal to the backend
+  reconcile_interval: 60              # how often installed plugins are synced with the backend
+  reconnect_min: 1                    # WebSocket reconnect backoff: first wait ...
+  reconnect_max: 60                   # ... and the cap
+  progress_keepalive: 20              # "still installing" frames during a long install (keep well under 120)
+
+# What OTHER devices (your other devices, the web, schedules, agents) may do to THIS one.
+# These are only the STARTING values, used until the backend reports the owner's setting, which it does
+# as soon as the device connects and again whenever the owner changes it (Settings page or the app).
+# Fail closed: leave both false unless you have a reason to accept remote requests before that report.
+# PAI_REMOTE_INSTALL / PAI_REMOTE_INVOKE (true/false) override these.
+remote_access:
+  install: false                      # remote plugin install / uninstall / enable / disable
+  invoke: false                       # running this device's plugins remotely (camera, files, ...)

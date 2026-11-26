@@ -10,6 +10,8 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
 
+from .config_file import DeviceFile, find_config_file, load_config_file
+
 
 class StorageNotWritable(RuntimeError):
     """A directory the agent must write to (device id, plugins, logs) is not writable."""
@@ -87,10 +89,20 @@ class DeviceConfig:
         default_factory=lambda: Path(os.environ.get("PAI_PLUGIN_DIR") or pai_home() / "plugins")
     )
 
+    log_dir: Optional[Path] = None                     # None: <pai home>/logs
+
     heartbeat_interval: float = 20.0
     reconcile_interval: float = 60.0
     reconnect_min: float = 1.0
     reconnect_max: float = 60.0
+    progress_keepalive_seconds: float = 20.0           # "still installing" frames; under the backend's 120 s stall limit
+
+    # What other devices may do to this one BEFORE the backend reports the owner's setting (it does on
+    # connect, and again on every change). Fail closed: both False unless the config says otherwise.
+    remote_access_install: bool = False
+    remote_access_invoke: bool = False
+
+    config_file: Optional[Path] = None                 # the file these settings came from, if any
 
     @property
     def api_base(self) -> str:
@@ -103,32 +115,67 @@ class DeviceConfig:
         return u + "/api/v1"
 
     @classmethod
-    def from_env(cls) -> "DeviceConfig":
-        # Accept PAI_USERNAME as an alias of PAI_EMAIL (the backend
-        # field is `email: EmailStr`, so the value must be email-shaped).
-        email = os.environ.get("PAI_SERVER_EMAIL") or os.environ.get("PAI_USERNAME")
-        password = os.environ.get("PAI_SERVER_PASSWORD")
-        backend = os.environ.get("PAI_BACKEND_URL")
+    def from_env(cls, config_file: Optional[str] = None) -> "DeviceConfig":
+        """Kept for callers that predate the config file: same as :meth:`load`."""
+        return cls.load(config_file)
+
+    @classmethod
+    def load(cls, config_file: Optional[str] = None) -> "DeviceConfig":
+        """Environment variable > config file (``pai-device.yaml``, see :mod:`pai_device.config_file`) > default.
+
+        Raises ``RuntimeError`` (``ConfigFileError`` for a bad file) with a message that says what to set."""
+        env = os.environ
+        path = find_config_file(config_file)
+        f = load_config_file(path) if path else DeviceFile()
+
+        # Accept PAI_USERNAME as an alias of PAI_EMAIL (the backend field is `email: EmailStr`).
+        email = env.get("PAI_SERVER_EMAIL") or env.get("PAI_USERNAME") or f.account.email
+        password = env.get("PAI_SERVER_PASSWORD") or f.account.password
+        backend = env.get("PAI_BACKEND_URL") or f.backend.url
 
         missing = [
             name for name, val in (
-                ("PAI_BACKEND_URL", backend),
-                ("PAI_SERVER_EMAIL or PAI_SERVER_EMAIL", email),
-                ("PAI_SERVER_PASSWORD", password),
+                ("backend URL (PAI_BACKEND_URL or backend.url)", backend),
+                ("account email (PAI_SERVER_EMAIL or account.email)", email),
+                ("account password (PAI_SERVER_PASSWORD or account.password)", password),
             ) if not val
         ]
         if missing:
-            raise RuntimeError(
-                f"Missing required environment variable(s): {', '.join(missing)}"
-            )
+            where = f" (config file: {path})" if path else " (no config file found)"
+            raise RuntimeError(f"Missing required setting(s): {', '.join(missing)}{where}")
+
+        home_setting = env.get("PAI_HOME") or f.paths.home
+        home = Path(home_setting).expanduser() if home_setting else pai_home()
+
+        def folder(env_name: str, file_value: Optional[str], default: str) -> Path:
+            chosen = env.get(env_name) or file_value
+            return Path(chosen).expanduser() if chosen else home / default
 
         return cls(
             backend_url=backend,
             email=email,
             password=password,
-            device_name=os.environ.get("PAI_DEVICE_NAME") or socket.gethostname(),
-            device_type=os.environ.get("PAI_DEVICE_TYPE", "server"),
+            device_name=env.get("PAI_DEVICE_NAME") or f.device.name or socket.gethostname(),
+            device_type=env.get("PAI_DEVICE_TYPE") or f.device.type,
+            state_dir=folder("PAI_STATE_DIR", f.paths.state_dir, "state"),
+            plugin_dir=folder("PAI_PLUGIN_DIR", f.paths.plugin_dir, "plugins"),
+            log_dir=folder("PAI_LOG_DIR", f.paths.log_dir, "logs"),
+            heartbeat_interval=f.timing.heartbeat_interval,
+            reconcile_interval=f.timing.reconcile_interval,
+            reconnect_min=f.timing.reconnect_min,
+            reconnect_max=f.timing.reconnect_max,
+            progress_keepalive_seconds=f.timing.progress_keepalive,
+            remote_access_install=_flag(env.get("PAI_REMOTE_INSTALL"), f.remote_access.install),
+            remote_access_invoke=_flag(env.get("PAI_REMOTE_INVOKE"), f.remote_access.invoke),
+            config_file=path,
         )
+
+
+def _flag(env_value: Optional[str], file_value: bool) -> bool:
+    """A true/false setting: the environment variable (1/true/yes/on or 0/false/no/off) wins over the file."""
+    if env_value is None or not env_value.strip():
+        return file_value
+    return env_value.strip().lower() in ("1", "true", "yes", "on")
 
 
 # ---------------------------------------------------------------------------

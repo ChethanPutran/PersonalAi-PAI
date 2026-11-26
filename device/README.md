@@ -114,17 +114,35 @@ uv run --active --env-file .env pai-device install browser --watch
 
 ## Configuration
 
-All configuration is via environment variables. `DeviceConfig.from_env()` (in `src/server/config.py`) validates them at startup and fails fast with a clear error if any are missing.
+Settings come from, in this order: **environment variables**, then a **YAML config file**, then built-in defaults.
+The file is looked for at `--config FILE` / `$PAI_DEVICE_CONFIG` (must exist), `./pai-device.yaml`, then
+`~/.pai/pai-device.yaml`. [`pai-device.yaml`](pai-device.yaml) in this folder is the template: it lists every key
+with its meaning and the environment variable that overrides it. An unknown key is an error, so a typo can't
+silently do nothing. `pai-device config show` prints the effective settings (the password is never shown).
 
-| Variable | Required | Default | Notes |
-|---|---|---|---|
-| `PAI_BACKEND_URL` | **yes** | — | e.g. `http://localhost:8000` |
-| `PAI_EMAIL` | **yes** | — | alias: `PAI_USERNAME` |
-| `PAI_PASSWORD` | **yes** | — | |
-| `PAI_DEVICE_NAME` | no | hostname | Display name in the admin UI |
-| `PAI_DEVICE_TYPE` | no | `server` | `server` \| `desktop` \| `mobile` \| `tablet` |
-| `PAI_PLATFORM` | no | auto-detected | `linux` \| `macos` \| `windows` \| `python` |
-| `PAI_ARCHITECTURE` | no | auto-detected | `x86_64` \| `arm64` \| … |
+```bash
+cp pai-device.yaml ~/.pai/pai-device.yaml        # edit: backend.url, account.email, device.name ...
+export PAI_SERVER_PASSWORD=...                   # keep the password out of the file
+pai-server                                       # or: pai-server --config /path/to/pai-device.yaml
+```
+
+| YAML key | Environment variable | Default |
+|---|---|---|
+| `backend.url` | `PAI_BACKEND_URL` | required, e.g. `http://localhost:8000` |
+| `account.email` | `PAI_SERVER_EMAIL` (alias `PAI_USERNAME`) | required |
+| `account.password` | `PAI_SERVER_PASSWORD` | required (prefer the env var; if it is in a file, `chmod 600` it) |
+| `device.name` / `device.type` | `PAI_DEVICE_NAME` / `PAI_DEVICE_TYPE` | hostname / `server` |
+| `paths.home` | `PAI_HOME` | `~/.pai` |
+| `paths.state_dir` / `plugin_dir` / `log_dir` | `PAI_STATE_DIR` / `PAI_PLUGIN_DIR` / `PAI_LOG_DIR` | `<home>/state`, `/plugins`, `/logs` |
+| `timing.heartbeat_interval` / `reconcile_interval` | | `20` / `60` seconds |
+| `timing.reconnect_min` / `reconnect_max` | | `1` / `60` seconds |
+| `timing.progress_keepalive` | | `20` seconds (keep well under the backend's 120 s stall limit) |
+| `remote_access.install` / `.invoke` | `PAI_REMOTE_INSTALL` / `PAI_REMOTE_INVOKE` | `false` / `false` |
+
+`remote_access.*` are only the **starting** values: what other devices may do to this one is the owner's setting on
+the backend, which the agent receives as soon as it connects (and on every change) and which then replaces them.
+Both default to `false` (fail closed), so until that report arrives nothing remote is accepted. See
+[Remote access](#remote-access-who-may-install--run-plugins-on-this-device).
 
 ### State and data locations
 

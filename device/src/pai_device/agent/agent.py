@@ -66,8 +66,6 @@ class DeviceAgent:
     lifecycle.
     """
 
-    PROGRESS_KEEPALIVE_SECONDS = 20.0     # well under the backend watchdog's stall limit (120 s)
-
     def __init__(self, config: DeviceConfig) -> None:
         """Build the agent's collaborators and prepare the state directory.
 
@@ -90,9 +88,13 @@ class DeviceAgent:
 
         # --- runtime state ---------------------------------------------------
         self.device_id: Optional[str] = None
-        # What the owner allows OTHER devices to do to this one. Fail closed: nothing is allowed
-        # until the backend says so (in the ``connected`` frame, then ``device.remote_access``).
-        self.remote_access: Dict[str, bool] = {"install": False, "invoke": False}
+        # What the owner allows OTHER devices to do to this one. Starts from the config file
+        # (``remote_access.install`` / ``.invoke``; both False by default: fail closed) and is replaced by
+        # the backend's report as soon as it arrives (the ``connected`` frame, then ``device.remote_access``).
+        self.remote_access: Dict[str, bool] = {
+            "install": bool(config.remote_access_install),
+            "invoke": bool(config.remote_access_invoke),
+        }
         # One plugin change at a time. Without it the sync loop (which uninstalls local plugins the
         # backend "does not know") ran in the middle of an install, whose dependency step takes tens
         # of seconds, and removed the plugin that was being installed.
@@ -501,7 +503,7 @@ class DeviceAgent:
             # "device unresponsive". Repeat the current stage until the install ends.
             async def beat() -> None:
                 while True:
-                    await asyncio.sleep(self.PROGRESS_KEEPALIVE_SECONDS)
+                    await asyncio.sleep(self.config.progress_keepalive_seconds)
                     await self._progress(op_id, current["stage"])
             keepalive = asyncio.create_task(beat(), name=f"install-keepalive:{plugin_id}")
 
