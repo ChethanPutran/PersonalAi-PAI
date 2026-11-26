@@ -66,6 +66,11 @@ Message: {goal}
 Answer:"""
 
 
+# One word is needed, but some models spend a few tokens on a leading newline/space or a tag before it;
+# at 4 the answer was cut to "" (finish_reason=length) and every message fell back to the slow planner.
+_CLASSIFIER_MAX_TOKENS = 24
+
+
 def rule_route(goal: str) -> Optional[TurnRoute]:
     """The no-LLM decision, or None when the rules cannot tell."""
     text = (goal or "").strip()
@@ -99,7 +104,7 @@ class FastRouter:
         try:
             resp = await asyncio.wait_for(self._llm.generate_request(
                 LLMRequest(messages=[LLMMessage(role="user", content=_CLASSIFY_PROMPT.format(goal=goal[:400]))],
-                           temperature=0.0, max_tokens=4), route=self._route), timeout=self._timeout)
+                           temperature=0.0, max_tokens=_CLASSIFIER_MAX_TOKENS), route=self._route), timeout=self._timeout)
         except Exception as exc:               # timeout, provider error, ...: the planner can always handle it
             logger.debug("fast route classifier failed after {:.0f}ms: {}", (time.perf_counter() - t0) * 1000, exc)
             return TurnRoute.ACT, "llm_failed"
