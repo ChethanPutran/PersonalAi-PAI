@@ -384,6 +384,10 @@ class PluginManager extends ChangeNotifier {
       // The backend catalog is not the source of truth for local installation.
       await _refreshLocalPluginStates();
       await loadUpdates();
+      // Other devices' installed state comes from the backend too (they may never answer a sync).
+      await Future.wait([
+        for (final group in _otherDeviceGroups) refreshDevicePlugins(group.deviceId),
+      ]);
 
       debugPrint(
         '[PluginManager] Catalog loaded: '
@@ -780,6 +784,8 @@ class PluginManager extends ChangeNotifier {
     try {
       // The other device enabled it locally on install; make the server agree (see _enableOnBackend).
       await _enableOnBackend(op.pluginId, op.deviceId);
+      // The remote device's own state (what the "Install" button reads) comes from the backend.
+      await refreshDevicePlugins(op.deviceId);
       // Refresh catalog after the remote installation completes.
       await loadCatalog();
     } catch (e) {
@@ -1156,7 +1162,7 @@ class PluginManager extends ChangeNotifier {
           item['installed'] == true;
 
       final enabled =
-          installed && item['enabled'] == true;
+          installed && (item['enabled'] == true || item['enabled_on_device'] == true);
 
       states[pluginId] = DevicePluginState(
         installed: installed,
@@ -1167,6 +1173,19 @@ class PluginManager extends ChangeNotifier {
     _devicePluginStates[targetDeviceId] = states;
 
     notifyListeners();
+  }
+
+  /// Fetches what is installed/enabled on another of the user's devices from the backend.
+  /// Needed because servers/desktops without a socket to this app never send a sync response.
+  Future<void> refreshDevicePlugins(String targetDeviceId) async {
+    if (targetDeviceId == deviceId) return;
+    try {
+      final response = await api.get('/plugins/device/$targetDeviceId/installed');
+      final list = response is Map ? response['plugins'] : null;
+      if (list is List) updateDevicePluginStates(targetDeviceId, list);
+    } catch (e) {
+      debugPrint('[PluginManager] refreshing device plugins failed: $e');
+    }
   }
 
   /// Removes all known plugin states for a disconnected remote device.
