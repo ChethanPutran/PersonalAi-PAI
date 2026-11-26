@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="pai_accessibility_label">PAI computer control</string>
+    <string name="pai_accessibility_description">Lets the PAI assistant look at the screen and tap, type and swipe for you when you ask it to control your phone. Only turn this on if you want that; you can turn it off here at any time.</string>
+</resources>

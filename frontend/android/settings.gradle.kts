@@ -24,3 +24,8 @@ plugins {
 }
 
 include(":app")
+
+// The plugin interface (com.pai.plugin.api): the host implements/bundles it, plugins compile against it.
+// frontend/android -> repo root is two levels up.
+include(":plugin-api")
+project(":plugin-api").projectDir = file("../../plugin-api")

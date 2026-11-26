@@ -11,6 +11,10 @@ android {
         minSdk = 24
     }
 
+    testOptions {
+        unitTests.isReturnDefaultValues = true          // android.util.Log etc. return defaults in JVM tests
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -32,14 +36,15 @@ android {
 }
 
 dependencies {
-    // Interface — compileOnly so it's not bundled into the DEX.
+    // Interface: compileOnly so it is not bundled into the DEX (the host provides it).
     compileOnly(project(":plugin-api"))
 
-    // Host already provides coroutines; same reason as above.
+    // The host already provides coroutines; same reason as above.
     compileOnly("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
 
-    // Plugin-owned — safe to bundle.
-    implementation("androidx.camera:camera-core:1.3.4")
-    implementation("androidx.camera:camera-camera2:1.3.4")
-    implementation("androidx.camera:camera-lifecycle:1.3.4")
+    // Camera2 is part of the framework: nothing else is bundled into the plugin.
+
+    testImplementation(project(":plugin-api"))
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
+    testImplementation("junit:junit:4.13.2")
 }

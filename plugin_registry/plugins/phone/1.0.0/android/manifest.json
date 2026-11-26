@@ -1,0 +1,256 @@
+{
+  "schemaVersion": 1,
+  "id": "phone",
+  "name": "Phone",
+  "type": "kotlin",
+  "version": "1.0.0",
+  "description": "Everyday phone actions: clipboard, notifications, volume, media keys, flashlight and apps.",
+  "author": "PAI",
+  "license": "MIT",
+  "changelog": {
+    "summary": "First release: the Android counterpart of the desktop plugin's everyday actions.",
+    "features": [
+      "clipboard.read / clipboard.write",
+      "notifications.send",
+      "audio.volume and media.control",
+      "flashlight.set",
+      "app.list, app.launch (by name) and app.open (safe links only)"
+    ],
+    "fixes": [],
+    "breaking": []
+  },
+  "runtime": {
+    "kind": "device",
+    "nativeModule": "pai.phone",
+    "minPaiVersion": "0.4.0"
+  },
+  "platforms": {
+    "android": {
+      "artifact": "android/plugin.dex",
+      "entrypoint": "com.pai.plugins.phone.PhonePlugin"
+    }
+  },
+  "architectures": [
+    "x86_64",
+    "arm64"
+  ],
+  "deviceTypes": [
+    "phone",
+    "tablet"
+  ],
+  "permissions": [
+    "clipboard",
+    "notifications"
+  ],
+  "capabilities": [
+    {
+      "id": "clipboard.read",
+      "taskType": "one_shot",
+      "description": "Read the text on the clipboard. Android only allows this while PAI is on screen.",
+      "permissions": [
+        "clipboard"
+      ],
+      "requireConfirmation": true,
+      "confirmationReason": "This reads whatever you last copied, which can include passwords. Please confirm.",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "id": "clipboard.write",
+      "taskType": "one_shot",
+      "description": "Put text on the clipboard.",
+      "permissions": [
+        "clipboard"
+      ],
+      "requireConfirmation": true,
+      "confirmationReason": "This replaces what is on your clipboard. Please confirm.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "Text to copy."
+          }
+        },
+        "required": [
+          "text"
+        ]
+      }
+    },
+    {
+      "id": "notifications.send",
+      "taskType": "one_shot",
+      "description": "Show a notification on this phone.",
+      "permissions": [
+        "notifications"
+      ],
+      "requireConfirmation": false,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "Short title."
+          },
+          "message": {
+            "type": "string",
+            "description": "Notification text."
+          }
+        },
+        "required": [
+          "title",
+          "message"
+        ]
+      }
+    },
+    {
+      "id": "audio.volume",
+      "taskType": "one_shot",
+      "description": "Get, set, raise, lower or mute the volume of a stream.",
+      "requireConfirmation": false,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "What to do.",
+            "enum": [
+              "get",
+              "set",
+              "up",
+              "down",
+              "mute",
+              "unmute"
+            ],
+            "default": "get"
+          },
+          "level": {
+            "type": "integer",
+            "description": "Volume 0-100 (for set).",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "stream": {
+            "type": "string",
+            "description": "Which volume.",
+            "enum": [
+              "music",
+              "ring",
+              "alarm",
+              "notification",
+              "voice_call"
+            ],
+            "default": "music"
+          }
+        }
+      }
+    },
+    {
+      "id": "media.control",
+      "taskType": "one_shot",
+      "description": "Play, pause, skip or stop the media that is playing.",
+      "requireConfirmation": false,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "What to do.",
+            "enum": [
+              "play",
+              "pause",
+              "toggle",
+              "next",
+              "previous",
+              "stop"
+            ]
+          }
+        },
+        "required": [
+          "action"
+        ]
+      }
+    },
+    {
+      "id": "flashlight.set",
+      "taskType": "one_shot",
+      "description": "Turn the flashlight on or off.",
+      "requireConfirmation": false,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "on": {
+            "type": "boolean",
+            "description": "true = on."
+          }
+        },
+        "required": [
+          "on"
+        ]
+      }
+    },
+    {
+      "id": "app.list",
+      "taskType": "one_shot",
+      "description": "List the apps that can be opened, optionally filtered by name.",
+      "requireConfirmation": false,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Part of the app name."
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Maximum apps to return.",
+            "default": 100,
+            "minimum": 1,
+            "maximum": 500
+          }
+        }
+      }
+    },
+    {
+      "id": "app.launch",
+      "taskType": "one_shot",
+      "description": "Open an installed app by its name.",
+      "requireConfirmation": true,
+      "confirmationReason": "PAI wants to open an app on your phone. Please confirm.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "App name, like \"WhatsApp\"."
+          },
+          "id": {
+            "type": "string",
+            "description": "Android package name (alternative to name)."
+          }
+        }
+      }
+    },
+    {
+      "id": "app.open",
+      "taskType": "one_shot",
+      "description": "Open a link (web page, phone number, email, map location) in the app that handles it.",
+      "requireConfirmation": true,
+      "confirmationReason": "PAI wants to open a link on your phone. Please confirm.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "http, https, mailto, tel, geo or sms link."
+          }
+        },
+        "required": [
+          "url"
+        ]
+      }
+    }
+  ]
+}

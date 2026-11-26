@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "id": "device_info",
+  "name": "Device info",
+  "type": "kotlin",
+  "version": "1.0.0",
+  "description": "Battery, network, storage and system facts about this phone.",
+  "author": "PAI",
+  "license": "MIT",
+  "changelog": {
+    "summary": "First release: read-only device facts.",
+    "features": [
+      "device.info: battery, network, storage, system",
+      "No identifiers, no Wi-Fi name, no location"
+    ],
+    "fixes": [],
+    "breaking": []
+  },
+  "runtime": {
+    "kind": "device",
+    "nativeModule": "pai.device",
+    "minPaiVersion": "0.4.0"
+  },
+  "platforms": {
+    "android": {
+      "artifact": "android/plugin.dex",
+      "entrypoint": "com.pai.plugins.deviceinfo.DeviceInfoPlugin"
+    }
+  },
+  "architectures": [
+    "x86_64",
+    "arm64"
+  ],
+  "deviceTypes": [
+    "phone",
+    "tablet"
+  ],
+  "permissions": [],
+  "capabilities": [
+    {
+      "id": "device.info",
+      "taskType": "one_shot",
+      "description": "Battery level and charging, network type, free storage, and phone model / Android version.",
+      "requireConfirmation": false,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "sections": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "system",
+                "battery",
+                "network",
+                "storage"
+              ]
+            },
+            "description": "Which parts to return (default: all)."
+          }
+        }
+      }
+    }
+  ]
+}

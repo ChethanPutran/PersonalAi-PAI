@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 1,
+  "id": "location",
+  "name": "Location",
+  "type": "kotlin",
+  "version": "1.0.0",
+  "description": "Find out where the phone is.",
+  "author": "PAI",
+  "license": "MIT",
+  "changelog": {
+    "summary": "First release: current location on request.",
+    "features": [
+      "location.get: one fix with latitude, longitude, accuracy and age",
+      "No tracking: one fix per call"
+    ],
+    "fixes": [],
+    "breaking": []
+  },
+  "runtime": {
+    "kind": "device",
+    "nativeModule": "pai.location",
+    "minPaiVersion": "0.4.0"
+  },
+  "platforms": {
+    "android": {
+      "artifact": "android/plugin.dex",
+      "entrypoint": "com.pai.plugins.location.LocationPlugin"
+    }
+  },
+  "architectures": [
+    "x86_64",
+    "arm64"
+  ],
+  "deviceTypes": [
+    "phone",
+    "tablet"
+  ],
+  "permissions": [
+    "location"
+  ],
+  "capabilities": [
+    {
+      "id": "location.get",
+      "taskType": "one_shot",
+      "description": "Get the phone's current location (latitude, longitude, accuracy in metres, age of the fix).",
+      "timeoutSeconds": 40,
+      "requireConfirmation": true,
+      "confirmationReason": "PAI wants to know where your phone is. Please confirm.",
+      "risk": "medium",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "precision": {
+            "type": "string",
+            "description": "high uses GPS, balanced prefers network, last_known returns the most recent fix without waiting.",
+            "enum": [
+              "high",
+              "balanced",
+              "last_known"
+            ],
+            "default": "high"
+          },
+          "timeoutMs": {
+            "type": "integer",
+            "description": "How long to wait for a fix.",
+            "default": 10000,
+            "minimum": 1000,
+            "maximum": 30000
+          }
+        }
+      }
+    }
+  ]
+}

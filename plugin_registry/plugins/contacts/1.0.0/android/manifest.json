@@ -1,0 +1,91 @@
+{
+  "schemaVersion": 1,
+  "id": "contacts",
+  "name": "Contacts",
+  "type": "kotlin",
+  "version": "1.0.0",
+  "description": "Look up people in the phone's contacts (read-only).",
+  "author": "PAI",
+  "license": "MIT",
+  "changelog": {
+    "summary": "First release: read-only contact lookup.",
+    "features": [
+      "contacts.search by name or number",
+      "contacts.get by id",
+      "Cannot create, change or delete contacts"
+    ],
+    "fixes": [],
+    "breaking": []
+  },
+  "runtime": {
+    "kind": "device",
+    "nativeModule": "pai.contacts",
+    "minPaiVersion": "0.4.0"
+  },
+  "platforms": {
+    "android": {
+      "artifact": "android/plugin.dex",
+      "entrypoint": "com.pai.plugins.contacts.ContactsPlugin"
+    }
+  },
+  "architectures": [
+    "x86_64",
+    "arm64"
+  ],
+  "deviceTypes": [
+    "phone",
+    "tablet"
+  ],
+  "permissions": [
+    "contacts"
+  ],
+  "capabilities": [
+    {
+      "id": "contacts.search",
+      "taskType": "one_shot",
+      "description": "Find contacts by name or phone number. Returns names, phone numbers and emails.",
+      "requireConfirmation": true,
+      "confirmationReason": "PAI wants to look up someone in your contacts. Please confirm.",
+      "risk": "medium",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Part of a name or number (2+ characters)."
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Maximum contacts.",
+            "default": 20,
+            "minimum": 1,
+            "maximum": 100
+          }
+        },
+        "required": [
+          "query"
+        ]
+      }
+    },
+    {
+      "id": "contacts.get",
+      "taskType": "one_shot",
+      "description": "Get one contact by id (from contacts.search).",
+      "requireConfirmation": true,
+      "confirmationReason": "PAI wants to read a contact. Please confirm.",
+      "risk": "medium",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Contact id."
+          }
+        },
+        "required": [
+          "id"
+        ]
+      }
+    }
+  ]
+}

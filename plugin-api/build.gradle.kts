@@ -11,7 +11,12 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlinOptions { jvmTarget = "17" }
+}
+
+// `kotlinOptions { jvmTarget = ... }` is an error since Kotlin 2.2 (the Flutter host is on 2.4) but the
+// compilerOptions DSL on the task works there and in the plugins' Kotlin 1.9 builds alike.
+tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
+    compilerOptions.jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
 }
 
 dependencies {

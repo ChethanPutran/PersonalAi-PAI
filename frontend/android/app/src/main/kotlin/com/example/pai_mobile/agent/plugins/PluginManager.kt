@@ -1,6 +1,7 @@
 package com.pai.agent.plugins
 
 import com.pai.agent.permissions.PermissionManager
+import com.pai.plugin.api.PluginModule
 
 class PluginManager(
     private val registry: NativeModuleRegistry,

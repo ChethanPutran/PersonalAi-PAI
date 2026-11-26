@@ -1,0 +1,408 @@
+{
+  "schemaVersion": 1,
+  "id": "computer_control_android",
+  "name": "Computer control",
+  "type": "kotlin",
+  "version": "1.0.0",
+  "description": "Let the assistant look at the screen and tap, type, scroll and open apps on this phone, through Android's Accessibility Service (which you switch on yourself).",
+  "author": "PAI",
+  "license": "MIT",
+  "changelog": {
+    "summary": "First release: Android implementation of the cross-platform computer-control contract.",
+    "features": [
+      "computer.observe: accessibility tree (roles, names, bounds, states) and optional screenshot",
+      "computer.click / long_press / type / key / scroll / swipe",
+      "computer.apps.list / launch / foreground",
+      "computer.status says what is missing (for example the Accessibility Service is off) and how to fix it",
+      "Never types into password fields; password text is never reported"
+    ],
+    "fixes": [],
+    "breaking": []
+  },
+  "runtime": {
+    "kind": "device",
+    "nativeModule": "pai.computer_control",
+    "minPaiVersion": "0.4.0"
+  },
+  "platforms": {
+    "android": {
+      "artifact": "android/plugin.dex",
+      "entrypoint": "com.pai.plugins.computercontrol.ComputerControlPlugin"
+    }
+  },
+  "architectures": [
+    "x86_64",
+    "arm64"
+  ],
+  "deviceTypes": [
+    "phone",
+    "tablet"
+  ],
+  "permissions": [
+    "screen",
+    "input"
+  ],
+  "capabilities": [
+    {
+      "id": "computer.status",
+      "taskType": "one_shot",
+      "description": "Say whether computer control is ready on this phone, what is missing and how to fix it.",
+      "timeoutSeconds": 10,
+      "requireConfirmation": false,
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "id": "computer.observe",
+      "taskType": "one_shot",
+      "description": "Look at the screen: the app in front, the accessibility tree (buttons, text, fields with ids, bounds and states) and optionally a screenshot. Call this before acting and again after each action.",
+      "timeoutSeconds": 30,
+      "permissions": [
+        "screen"
+      ],
+      "requireConfirmation": true,
+      "confirmationReason": "PAI wants to read what is on your phone screen. Please confirm.",
+      "risk": "medium",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "include_tree": {
+            "type": "boolean",
+            "description": "Return the accessibility tree.",
+            "default": true
+          },
+          "include_screenshot": {
+            "type": "boolean",
+            "description": "Also return a screenshot (PNG, base64).",
+            "default": false
+          },
+          "max_nodes": {
+            "type": "integer",
+            "description": "Maximum nodes in the tree.",
+            "default": 150,
+            "minimum": 1,
+            "maximum": 1000
+          },
+          "max_depth": {
+            "type": "integer",
+            "description": "Maximum depth of the tree.",
+            "default": 12,
+            "minimum": 1,
+            "maximum": 40
+          }
+        }
+      }
+    },
+    {
+      "id": "computer.click",
+      "taskType": "one_shot",
+      "description": "Tap an element (by element_id) or a point (x, y). count 2 = double tap.",
+      "timeoutSeconds": 20,
+      "permissions": [
+        "input"
+      ],
+      "requireConfirmation": true,
+      "confirmationReason": "PAI wants to control your phone screen (tap, type or swipe for you). Please confirm.",
+      "risk": "high",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "element_id": {
+            "type": "string",
+            "description": "Element id from the latest computer.observe."
+          },
+          "x": {
+            "type": "number",
+            "description": "Screen x in pixels of the latest observation."
+          },
+          "y": {
+            "type": "number",
+            "description": "Screen y in pixels."
+          },
+          "button": {
+            "type": "string",
+            "description": "Only left exists on a phone; use long_press for a context menu.",
+            "enum": [
+              "left"
+            ],
+            "default": "left"
+          },
+          "count": {
+            "type": "integer",
+            "description": "1 or 2.",
+            "default": 1,
+            "minimum": 1,
+            "maximum": 2
+          },
+          "observation_id": {
+            "type": "string",
+            "description": "Optional: the observation the id came from."
+          }
+        }
+      }
+    },
+    {
+      "id": "computer.long_press",
+      "taskType": "one_shot",
+      "description": "Press and hold an element or a point.",
+      "timeoutSeconds": 20,
+      "permissions": [
+        "input"
+      ],
+      "requireConfirmation": true,
+      "confirmationReason": "PAI wants to control your phone screen (tap, type or swipe for you). Please confirm.",
+      "risk": "high",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "element_id": {
+            "type": "string",
+            "description": "Element id from the latest computer.observe."
+          },
+          "x": {
+            "type": "number",
+            "description": "Screen x in pixels of the latest observation."
+          },
+          "y": {
+            "type": "number",
+            "description": "Screen y in pixels."
+          },
+          "duration_ms": {
+            "type": "integer",
+            "description": "How long to hold.",
+            "default": 600,
+            "minimum": 50,
+            "maximum": 5000
+          }
+        }
+      }
+    },
+    {
+      "id": "computer.type",
+      "taskType": "one_shot",
+      "description": "Type text into a text field (not password fields). Without element_id it uses the focused field.",
+      "timeoutSeconds": 20,
+      "permissions": [
+        "input"
+      ],
+      "requireConfirmation": true,
+      "confirmationReason": "PAI wants to control your phone screen (tap, type or swipe for you). Please confirm.",
+      "risk": "high",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "Text to type."
+          },
+          "element_id": {
+            "type": "string",
+            "description": "Element id from the latest computer.observe."
+          },
+          "clear_first": {
+            "type": "boolean",
+            "description": "Replace the field's content.",
+            "default": false
+          }
+        },
+        "required": [
+          "text"
+        ]
+      }
+    },
+    {
+      "id": "computer.key",
+      "taskType": "one_shot",
+      "description": "Press a navigation key: BACK, HOME, RECENTS, NOTIFICATIONS, QUICK_SETTINGS, ENTER or DELETE.",
+      "timeoutSeconds": 20,
+      "permissions": [
+        "input"
+      ],
+      "requireConfirmation": true,
+      "confirmationReason": "PAI wants to control your phone screen (tap, type or swipe for you). Please confirm.",
+      "risk": "high",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "keys": {
+            "type": "string",
+            "description": "The key.",
+            "enum": [
+              "BACK",
+              "HOME",
+              "RECENTS",
+              "NOTIFICATIONS",
+              "QUICK_SETTINGS",
+              "ENTER",
+              "DELETE"
+            ]
+          }
+        },
+        "required": [
+          "keys"
+        ]
+      }
+    },
+    {
+      "id": "computer.scroll",
+      "taskType": "one_shot",
+      "description": "Scroll the screen or an element.",
+      "timeoutSeconds": 30,
+      "permissions": [
+        "input"
+      ],
+      "requireConfirmation": true,
+      "confirmationReason": "PAI wants to control your phone screen (tap, type or swipe for you). Please confirm.",
+      "risk": "high",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "direction": {
+            "type": "string",
+            "description": "Which way the content moves into view.",
+            "enum": [
+              "up",
+              "down",
+              "left",
+              "right"
+            ]
+          },
+          "amount": {
+            "type": "integer",
+            "description": "How many steps.",
+            "default": 3,
+            "minimum": 1,
+            "maximum": 10
+          },
+          "element_id": {
+            "type": "string",
+            "description": "Element id from the latest computer.observe."
+          },
+          "x": {
+            "type": "number",
+            "description": "Screen x in pixels of the latest observation."
+          },
+          "y": {
+            "type": "number",
+            "description": "Screen y in pixels."
+          }
+        },
+        "required": [
+          "direction"
+        ]
+      }
+    },
+    {
+      "id": "computer.swipe",
+      "taskType": "one_shot",
+      "description": "Drag from one point to another.",
+      "timeoutSeconds": 20,
+      "permissions": [
+        "input"
+      ],
+      "requireConfirmation": true,
+      "confirmationReason": "PAI wants to control your phone screen (tap, type or swipe for you). Please confirm.",
+      "risk": "high",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "from": {
+            "type": "object",
+            "properties": {
+              "x": {
+                "type": "number",
+                "description": "x"
+              },
+              "y": {
+                "type": "number",
+                "description": "y"
+              }
+            },
+            "required": [
+              "x",
+              "y"
+            ]
+          },
+          "to": {
+            "type": "object",
+            "properties": {
+              "x": {
+                "type": "number",
+                "description": "x"
+              },
+              "y": {
+                "type": "number",
+                "description": "y"
+              }
+            },
+            "required": [
+              "x",
+              "y"
+            ]
+          },
+          "duration_ms": {
+            "type": "integer",
+            "description": "How long the swipe takes.",
+            "default": 300,
+            "minimum": 50,
+            "maximum": 3000
+          }
+        },
+        "required": [
+          "from",
+          "to"
+        ]
+      }
+    },
+    {
+      "id": "computer.apps.list",
+      "taskType": "one_shot",
+      "description": "List the apps that can be opened, optionally filtered by name.",
+      "requireConfirmation": false,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Part of the app name."
+          }
+        }
+      }
+    },
+    {
+      "id": "computer.apps.launch",
+      "taskType": "one_shot",
+      "description": "Open an installed app by name.",
+      "timeoutSeconds": 20,
+      "requireConfirmation": true,
+      "confirmationReason": "PAI wants to open an app on your phone. Please confirm.",
+      "risk": "medium",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "App name."
+          },
+          "id": {
+            "type": "string",
+            "description": "Android package name (alternative to name)."
+          }
+        }
+      }
+    },
+    {
+      "id": "computer.apps.foreground",
+      "taskType": "one_shot",
+      "description": "Say which app is in front.",
+      "timeoutSeconds": 10,
+      "requireConfirmation": false,
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    }
+  ]
+}

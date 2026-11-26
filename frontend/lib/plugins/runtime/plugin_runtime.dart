@@ -315,6 +315,32 @@ Future<String> getAbi() async {
     }
   }
 
+  /// Computer control on Android needs PAI's Accessibility Service, which only the user can switch on in
+  /// Android Settings. `enabled`: switched on; `connected`: running, so plugins can use it. Null when the
+  /// platform has no such service (every non-Android platform) or the native side cannot answer.
+  Future<({bool enabled, bool connected})?> accessibilityStatus() async {
+    try {
+      final r = await _channel.invokeMethod<Map<dynamic, dynamic>>('accessibilityStatus');
+      if (r == null) return null;
+      return (enabled: r['enabled'] == true, connected: r['connected'] == true);
+    } on MissingPluginException {
+      return null;
+    } on PlatformException {
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Opens Android's Accessibility settings, where the user turns the service on. False when it could not open.
+  Future<bool> openAccessibilitySettings() async {
+    try {
+      return await _channel.invokeMethod<bool>('openAccessibilitySettings') ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
   /// What the user has ALREADY decided on this device, without asking: {permission: granted|denied|pending}.
   ///
   /// Returns null when this platform cannot answer without prompting (Android asks on request; no native

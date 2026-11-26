@@ -95,12 +95,41 @@ class PluginChannel(
                 }
             }
             
+            // ---- Computer control: the Accessibility Service the user must switch on in Android Settings ----
+            "accessibilityStatus" -> result.success(accessibilityStatus())
+
+            "openAccessibilitySettings" -> {
+                try {
+                    activity.startActivity(
+                        android.content.Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                            .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
+                    result.success(true)
+                } catch (e: Exception) {
+                    result.success(false)
+                }
+            }
+
             "debugRegistry" -> {
                 result.success(registry.list().associateWith { "<registered>" })
             }
 
             else -> result.notImplemented()
         }
+    }
+
+    /**
+     * `enabled`: the user switched PAI's service on in Android Settings. `connected`: the system has started
+     * it and plugins can use it. (Enabled but not yet connected happens for a moment after switching it on.)
+     */
+    private fun accessibilityStatus(): Map<String, Any?> {
+        val flat = android.provider.Settings.Secure.getString(
+            activity.contentResolver, android.provider.Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES).orEmpty()
+        val me = "${activity.packageName}/com.pai.agent.accessibility.PaiAccessibilityService"
+        return mapOf(
+            "enabled" to flat.split(':').any { it.equals(me, ignoreCase = true) },
+            "connected" to (com.pai.plugin.api.PaiHost.accessibility != null),
+            "sdk" to Build.VERSION.SDK_INT,
+        )
     }
 
     /** Install flow: safe to call from IO; suspends on the permission dialog. */

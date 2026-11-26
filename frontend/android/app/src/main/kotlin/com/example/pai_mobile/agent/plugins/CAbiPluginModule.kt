@@ -34,7 +34,7 @@ class CAbiPluginModule(
 
 
     @Synchronized
-    fun destroy() {
+    override fun destroy() {
         if (destroyed) return
         destroyed = true
         DynamicLoader.nativeDestroyModule(handle)

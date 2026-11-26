@@ -21,6 +21,5 @@ dependencyResolutionManagement {
 rootProject.name = "camera-kotlin"
 
 include(":plugin-api")
-// Adjust this relative path to wherever plugin-api lives relative to
-// plugin_registry/camera/1.0.0/android/
-project(":plugin-api").projectDir = file("../../../../plugin-api")
+// plugin-api lives at the repo root: plugin_registry/plugins/<id>/<version>/android -> 5 levels up.
+project(":plugin-api").projectDir = file("../../../../../plugin-api")

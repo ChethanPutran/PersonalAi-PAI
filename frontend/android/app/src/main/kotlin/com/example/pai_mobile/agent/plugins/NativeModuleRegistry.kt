@@ -1,5 +1,6 @@
 package com.pai.agent.plugins
 
+import com.pai.plugin.api.PluginModule
 import java.util.concurrent.ConcurrentHashMap
 
 class NativeModuleRegistry {

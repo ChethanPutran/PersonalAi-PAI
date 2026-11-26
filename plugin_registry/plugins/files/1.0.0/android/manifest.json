@@ -1,0 +1,266 @@
+{
+  "schemaVersion": 1,
+  "id": "files_android",
+  "name": "Files",
+  "type": "kotlin",
+  "version": "1.0.0",
+  "description": "Read, write and organise files in PAI's own folder on the phone.",
+  "author": "PAI",
+  "license": "MIT",
+  "changelog": {
+    "summary": "First release: the Android counterpart of the desktop files plugin, limited to PAI's own folders.",
+    "features": [
+      "files.list, files.read, files.write, files.stat, files.delete, files.copy, files.move",
+      "Only PAI's own folders are reachable (app storage, visible over USB); nothing else on the phone",
+      "No Android permission needed"
+    ],
+    "fixes": [],
+    "breaking": []
+  },
+  "runtime": {
+    "kind": "device",
+    "nativeModule": "pai.files",
+    "minPaiVersion": "0.4.0"
+  },
+  "platforms": {
+    "android": {
+      "artifact": "android/plugin.dex",
+      "entrypoint": "com.pai.plugins.files.FilesPlugin"
+    }
+  },
+  "architectures": [
+    "x86_64",
+    "arm64"
+  ],
+  "deviceTypes": [
+    "phone",
+    "tablet"
+  ],
+  "permissions": [
+    "filesystem"
+  ],
+  "capabilities": [
+    {
+      "id": "files.list",
+      "taskType": "one_shot",
+      "description": "List a folder. Returns entries with path, type, size and modified time.",
+      "timeoutSeconds": 60,
+      "permissions": [
+        "filesystem"
+      ],
+      "requireConfirmation": true,
+      "confirmationReason": "PAI wants to look at the files in a folder on your phone.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Path inside PAI's folder (relative paths start there)."
+          },
+          "recursive": {
+            "type": "boolean",
+            "description": "Include sub-folders.",
+            "default": false
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Maximum entries.",
+            "default": 500,
+            "minimum": 1,
+            "maximum": 5000
+          }
+        },
+        "required": [
+          "path"
+        ]
+      }
+    },
+    {
+      "id": "files.read",
+      "taskType": "one_shot",
+      "description": "Read a text file. Max 1 MB by default (10 MB hard cap).",
+      "permissions": [
+        "filesystem"
+      ],
+      "requireConfirmation": true,
+      "confirmationReason": "PAI wants to read a file on your phone.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Path inside PAI's folder (relative paths start there)."
+          },
+          "maxBytes": {
+            "type": "integer",
+            "description": "Maximum bytes to read.",
+            "default": 1048576
+          }
+        },
+        "required": [
+          "path"
+        ]
+      }
+    },
+    {
+      "id": "files.write",
+      "taskType": "one_shot",
+      "description": "Write text to a file (replaces it unless append is true).",
+      "permissions": [
+        "filesystem"
+      ],
+      "requireConfirmation": true,
+      "confirmationReason": "PAI wants to write a file on your phone.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Path inside PAI's folder (relative paths start there)."
+          },
+          "content": {
+            "type": "string",
+            "description": "Text to write."
+          },
+          "append": {
+            "type": "boolean",
+            "description": "Add to the end instead of replacing.",
+            "default": false
+          },
+          "createDirs": {
+            "type": "boolean",
+            "description": "Create missing folders.",
+            "default": true
+          }
+        },
+        "required": [
+          "path",
+          "content"
+        ]
+      }
+    },
+    {
+      "id": "files.stat",
+      "taskType": "one_shot",
+      "description": "Say whether a file or folder exists, and its size and type.",
+      "permissions": [
+        "filesystem"
+      ],
+      "requireConfirmation": false,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Path inside PAI's folder (relative paths start there)."
+          }
+        },
+        "required": [
+          "path"
+        ]
+      }
+    },
+    {
+      "id": "files.delete",
+      "taskType": "one_shot",
+      "description": "Delete a file or folder.",
+      "permissions": [
+        "filesystem"
+      ],
+      "requireConfirmation": true,
+      "confirmationReason": "PAI wants to delete something on your phone. This cannot be undone.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Path inside PAI's folder (relative paths start there)."
+          },
+          "recursive": {
+            "type": "boolean",
+            "description": "Delete a non-empty folder with everything in it.",
+            "default": false
+          }
+        },
+        "required": [
+          "path"
+        ]
+      }
+    },
+    {
+      "id": "files.copy",
+      "taskType": "one_shot",
+      "description": "Copy a file or folder.",
+      "timeoutSeconds": 120,
+      "permissions": [
+        "filesystem"
+      ],
+      "requireConfirmation": true,
+      "confirmationReason": "PAI wants to copy files on your phone.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": "string",
+            "description": "Path inside PAI's folder (relative paths start there)."
+          },
+          "destination": {
+            "type": "string",
+            "description": "Path inside PAI's folder (relative paths start there)."
+          },
+          "overwrite": {
+            "type": "boolean",
+            "description": "Replace an existing destination.",
+            "default": false
+          }
+        },
+        "required": [
+          "source",
+          "destination"
+        ]
+      }
+    },
+    {
+      "id": "files.move",
+      "taskType": "one_shot",
+      "description": "Move or rename a file or folder.",
+      "timeoutSeconds": 120,
+      "permissions": [
+        "filesystem"
+      ],
+      "requireConfirmation": true,
+      "confirmationReason": "PAI wants to move files on your phone.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": "string",
+            "description": "Path inside PAI's folder (relative paths start there)."
+          },
+          "destination": {
+            "type": "string",
+            "description": "Path inside PAI's folder (relative paths start there)."
+          },
+          "overwrite": {
+            "type": "boolean",
+            "description": "Replace an existing destination.",
+            "default": false
+          }
+        },
+        "required": [
+          "source",
+          "destination"
+        ]
+      }
+    }
+  ],
+  "metadata": {
+    "allowedRoots": [
+      "/storage/emulated/0/Android/data/com.example.pai_mobile/files",
+      "/sdcard/Android/data/com.example.pai_mobile/files",
+      "/data/user/0/com.example.pai_mobile/files/plugins/pai.files/user_files",
+      "/data/data/com.example.pai_mobile/files/plugins/pai.files/user_files"
+    ],
+    "note": "Android shared storage (Downloads, Pictures...) is not reachable: it needs a folder chosen by the user."
+  }
+}

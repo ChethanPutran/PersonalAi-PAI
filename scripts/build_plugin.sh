@@ -5,9 +5,9 @@
 #   scripts/build_plugin.sh <plugin-dir> <version>
 #
 # Example:
-#   scripts/build_plugin.sh plugin_registry/camera/1.0.0/android 1.0.0
+#   scripts/build_plugin.sh plugin_registry/plugins/camera/1.0.0/android 1.0.0
 #
-# Output: <plugin-dir>/plugin.dex
+# Output: <plugin-dir>/artifact/plugin.dex
 set -euo pipefail
 
 # -----------------------------------------------------------------
@@ -150,7 +150,9 @@ fi
 #    Manifest declares `android/plugin.dex` relative to the version dir.
 #    $PLUGIN_DIR is <version-dir>/android, so the file goes right here.
 # -----------------------------------------------------------------
-DEX_OUT="$PLUGIN_DIR/plugin.dex"
+# The packager ships ONLY <platform>/artifact/, so the dex goes there (manifest path android/plugin.dex).
+mkdir -p "$PLUGIN_DIR/artifact"
+DEX_OUT="$PLUGIN_DIR/artifact/plugin.dex"
 cp "$WORK/out/classes.dex" "$DEX_OUT"
 
 SIZE=$(stat -c %s "$DEX_OUT" 2>/dev/null || stat -f %z "$DEX_OUT")

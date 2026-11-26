@@ -25,14 +25,12 @@ class PermissionManager(private val activity: Activity) {
         put("camera", listOf(Manifest.permission.CAMERA))
         put("microphone", listOf(Manifest.permission.RECORD_AUDIO))
 
-        // Scoped storage: API 33+ uses READ_MEDIA_*, older uses READ_EXTERNAL_STORAGE.
-        put("filesystem", buildList {
-            if (Build.VERSION.SDK_INT >= 33) {
-                add(Manifest.permission.READ_MEDIA_IMAGES)
-            } else {
-                add(Manifest.permission.READ_EXTERNAL_STORAGE)
-            }
-        })
+        // "filesystem" plugins (camera, files) only touch PAI's own app-scoped folders, which need no Android
+        // permission. It used to map to READ_MEDIA_IMAGES / READ_EXTERNAL_STORAGE, so installing the camera
+        // plugin asked for access to the user's photos it never reads, and a "no" rolled the install back.
+        put("filesystem", emptyList())
+
+        put("contacts", listOf(Manifest.permission.READ_CONTACTS))
 
         put("notifications", buildList {
             if (Build.VERSION.SDK_INT >= 33) add(Manifest.permission.POST_NOTIFICATIONS)

@@ -6,6 +6,7 @@ import 'package:pai_mobile/plugins/plugin_service.dart';
 import '../../core/app_version.dart';
 import '../../plugins/models/plugin_info.dart';
 import '../../plugins/models/plugin_update.dart';
+import 'widgets/accessibility_setup_notice.dart';
 import 'widgets/plugin_update_sheet.dart';
 import '../../plugins/plugin_manager.dart';
 import 'capability_config_screen.dart';
@@ -386,7 +387,7 @@ Future<void> _handleInstall(String pluginId, String version) async {
         ? (widget.manager.installedCapabilities(plugin.id) ?? plugin.capabilities)
         : plugin.capabilities;
 
-    return _PluginRow(
+    final row = _PluginRow(
       title: Text(plugin.name),
       subtitle: _versionLine(
         plugin, update, installed ? widget.manager.installedVersion(plugin.id) : null, caps),
@@ -485,6 +486,12 @@ Future<void> _handleInstall(String pluginId, String version) async {
             )
           : _installButton(plugin),
     );
+    // Android computer control only works once the user turns on PAI's Accessibility Service in Android
+    // Settings: say so, right under the plugin, and show whether it is on.
+    if (plugin.id == 'computer_control_android' && installed) {
+      return Column(children: [row, const AccessibilitySetupNotice()]);
+    }
+    return row;
   }
 
   /// Install, unless no version of the plugin can run on this device/app.
