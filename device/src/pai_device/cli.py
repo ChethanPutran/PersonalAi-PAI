@@ -14,7 +14,7 @@ import argcomplete
 import time
 import httpx
 
-from . import chatcli, cli_settings, voicecli
+from . import chatcli, cli_index, cli_settings, voicecli
 from .cli_support import (
     Ctx, dim, error_text, follow_operation, parse_params, print_confirmation, print_json as _print_json,
     print_table as _print_table, print_task_outcome, wait_for_task,
@@ -23,7 +23,7 @@ from .config import DeviceConfig
 from .transport import APIClient
 
 # Commands that live in their own modules: name -> async handler(args, ctx)
-MODULE_COMMANDS = {**cli_settings.COMMANDS, **chatcli.COMMANDS, **voicecli.COMMANDS}
+MODULE_COMMANDS = {**cli_settings.COMMANDS, **chatcli.COMMANDS, **voicecli.COMMANDS, **cli_index.COMMANDS}
 
 
 def _read_device_id(config: DeviceConfig) -> Optional[str]:
@@ -728,7 +728,7 @@ def _build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--scope", choices=["once", "session", "always"], default="once",
                     help="how long an --approve lasts (the server limits what is allowed)")
 
-    for module in (cli_settings, chatcli, voicecli):
+    for module in (cli_settings, chatcli, voicecli, cli_index):
         module.register(sub, common)
     return p
 

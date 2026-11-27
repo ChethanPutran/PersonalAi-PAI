@@ -150,3 +150,29 @@ async def test_uninstall_forgets_settings(agent, tmp_path):
     await agent._handle_ws_message({"type": "plugin.uninstall", "plugin_id": "files",
                                     "requested_by_device": "B", "operation_id": "o"})
     assert "files" not in agent.plugin_configs and "files" not in agent.config_store.load_all()
+
+
+async def test_files_settings_change_wakes_the_indexer_and_off_forces_clear(agent):
+    agent._set_plugin_config("files", {"allowedPaths": ["/a"], "indexDocuments": True})
+    assert agent._index_wake.is_set() and not agent._index_force_clear
+    agent._index_wake.clear()
+    agent._set_plugin_config("files", {"allowedPaths": ["/a"], "indexDocuments": True, "readOnly": True})
+    assert not agent._index_wake.is_set()                       # unrelated setting
+    agent._set_plugin_config("files", {"allowedPaths": ["/a"], "indexDocuments": False})
+    assert agent._index_wake.is_set() and agent._index_force_clear
+    agent._index_wake.clear()
+    agent._set_plugin_config("notes", {"indexDocuments": True})
+    assert not agent._index_wake.is_set()
+
+
+async def test_index_cycle_clears_server_when_turned_off(agent):
+    calls = []
+
+    async def request_json(method, path, json=None, params=None, timeout=None):
+        calls.append((method, path, json))
+        return {}
+    agent.api.request_json = request_json
+    agent._set_plugin_config("files", {"allowedPaths": ["/a"], "indexDocuments": False})
+    agent._index_force_clear = True
+    await agent._index_cycle()
+    assert calls == [("POST", "/documents/remove", {"device_id": "B"})] and not agent._index_force_clear

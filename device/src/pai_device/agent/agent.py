@@ -40,6 +40,7 @@ from ..config import (
 )
 from ..path_policy import PathPolicy, apply_roots_env, has_policy
 from ..plugin_config_store import PluginConfigStore
+from ..indexer import DocumentIndexer, enabled as index_enabled, policy_changed as index_policy_changed
 from ..plugins import DevicePluginManager
 from ..transport import APIClient, WSClient, sha256_file
 from pai_device.agent.capabilities import BuiltinCapabilities
@@ -58,6 +59,9 @@ logger = logging.getLogger(__name__)
 _WS_CLOSE_AUTH = 4401
 _WS_CLOSE_OWNERSHIP = 4003
 _WS_CLOSE_REGISTER_FAILED = 4500
+
+
+INDEX_PLUGIN_ID = "files"          # the Linux files plugin owns the "Index documents" setting
 
 
 class DeviceAgent:
@@ -109,6 +113,11 @@ class DeviceAgent:
         # Background asyncio.Tasks started by ``run``; cancelled on shutdown.
         self._background: list[asyncio.Task] = []
         self.builtins = BuiltinCapabilities()
+        # Document search (Files plugin "Index documents"): own task, woken by settings changes.
+        self._index_wake = asyncio.Event()
+        self._index_ok_once = False
+        self._index_force_clear = False
+        self._indexer: Optional[DocumentIndexer] = None
 
         logger.debug(
             "DeviceAgent initialised (state_dir=%s, plugin_dir=%s)",
@@ -161,6 +170,7 @@ class DeviceAgent:
         self._background.append(asyncio.create_task(self._ws_loop()))
         self._background.append(asyncio.create_task(self._heartbeat_loop()))
         self._background.append(asyncio.create_task(self._sync_loop()))
+        self._background.append(asyncio.create_task(self._index_loop()))
 
         # Block until someone sets the stop event (signal or fatal WS close).
         await self._stop.wait()
@@ -389,6 +399,8 @@ class DeviceAgent:
             logger.info("WS handshake complete for %s", self.device_id)
             self._apply_remote_access(message.get("remote_access"))
             self._background.append(asyncio.create_task(self._sync_plugin_configs()))
+            if not self._index_ok_once:
+                self._index_wake.set()
             if not self._remote_access_synced:                  # once per start: a reconnect must not undo the owner
                 self._remote_access_synced = True
                 self._background.append(asyncio.create_task(self._sync_remote_access_from_config()))
@@ -451,7 +463,12 @@ class DeviceAgent:
         """Remember (memory + disk) the effective settings of a plugin and align the native upper bound."""
         if not isinstance(values, dict) or not plugin_id:
             return
+        previous = self.plugin_configs.get(plugin_id)
         self.plugin_configs[plugin_id] = values
+        if plugin_id == INDEX_PLUGIN_ID and index_policy_changed(previous, values):
+            if index_enabled(previous) and not index_enabled(values):
+                self._index_force_clear = True           # turned off: clear the server even if local state is gone
+            self._index_wake.set()                       # re-index now / clear promptly when turned off
         try:
             self.config_store.save(plugin_id, values)
         except Exception:
@@ -488,6 +505,63 @@ class DeviceAgent:
             if isinstance(eff, dict) and eff != self.plugin_configs.get(plugin_id):
                 self._set_plugin_config(plugin_id, eff)
                 logger.info("Settings of %s synced from the backend", plugin_id)
+
+    # ------------------------------------------------------------------
+    # Document index (runs beside the WS loop; file work happens in a worker thread)
+    # ------------------------------------------------------------------
+
+    async def _index_cycle(self) -> None:
+        if not self.device_id:
+            return
+        if self._indexer is None or self._indexer.device_id != self.device_id:
+            self._indexer = DocumentIndexer(self.api, self.device_id, self.state_dir)
+        values = self.plugin_configs.get(INDEX_PLUGIN_ID)
+        force = self._index_force_clear
+        report = await self._indexer.apply(values, force_clear=force)
+        if force and not report.stopped:
+            self._index_force_clear = False
+        if report.stopped:
+            logger.info("Document indexing: %s", report.message)
+        elif report.enabled:
+            self._index_ok_once = True
+            logger.info("Document indexing done: %d sent (%d chunks), %d unchanged, %d removed, skipped %s",
+                        report.files_sent, report.chunks_sent, report.files_unchanged, report.files_removed,
+                        dict(report.skipped) or "none")
+        else:
+            self._index_ok_once = True
+
+    async def _index_loop(self) -> None:
+        """Once shortly after connecting, then every ``index_interval_minutes``, and at once when the folder or
+        indexing settings change (which cancels a run in progress so a removed folder is dropped promptly)."""
+        interval = max(60.0, self.config.index_interval_minutes * 60.0)
+        try:
+            await asyncio.wait_for(self._index_wake.wait(), timeout=15.0)     # first: shortly after connect
+        except asyncio.TimeoutError:
+            pass
+        while not self._stop.is_set():
+            self._index_wake.clear()
+            cycle = asyncio.create_task(self._index_cycle())
+            wake = asyncio.create_task(self._index_wake.wait())
+            try:
+                await asyncio.wait({cycle, wake}, return_when=asyncio.FIRST_COMPLETED)
+            except asyncio.CancelledError:
+                cycle.cancel()
+                wake.cancel()
+                raise
+            if not cycle.done():                         # settings changed mid-run: start over now
+                cycle.cancel()
+                wake.cancel()
+                await asyncio.gather(cycle, wake, return_exceptions=True)
+                continue
+            wake.cancel()
+            try:
+                cycle.result()
+            except Exception:
+                logger.exception("Document indexing failed")
+            try:
+                await asyncio.wait_for(self._index_wake.wait(), timeout=interval)
+            except asyncio.TimeoutError:
+                pass
 
     def _enforce_plugin_config(self, capability: str, parameters: Dict[str, Any]) -> Optional[str]:
         """Plain-words refusal when the plugin's folder settings forbid this call (else ``None``)."""

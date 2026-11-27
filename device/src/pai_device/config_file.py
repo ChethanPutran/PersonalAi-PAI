@@ -66,6 +66,7 @@ class TimingSection(_Section):
     reconcile_interval: float = Field(default=60.0, gt=0)      # seconds between plugin syncs with the backend
     reconnect_min: float = Field(default=1.0, gt=0)            # WebSocket reconnect backoff, first wait
     reconnect_max: float = Field(default=60.0, gt=0)           # ... and the cap
+    index_interval_minutes: float = Field(default=30.0, gt=0)  # how often documents are re-indexed (Files plugin, "Index documents")
     progress_keepalive: float = Field(default=20.0, gt=0)      # seconds between "still installing" frames; keep well
                                                                # under the backend's 120 s stall limit
 

@@ -95,6 +95,7 @@ class DeviceConfig:
     reconcile_interval: float = 60.0
     reconnect_min: float = 1.0
     reconnect_max: float = 60.0
+    index_interval_minutes: float = 30.0               # document re-index period (only when the Files plugin has "Index documents" on)
     progress_keepalive_seconds: float = 20.0           # "still installing" frames; under the backend's 120 s stall limit
 
     # Remote access from the config file / environment: True or False = apply that to the backend when the agent
@@ -165,6 +166,7 @@ class DeviceConfig:
             reconcile_interval=f.timing.reconcile_interval,
             reconnect_min=f.timing.reconnect_min,
             reconnect_max=f.timing.reconnect_max,
+            index_interval_minutes=f.timing.index_interval_minutes,
             progress_keepalive_seconds=f.timing.progress_keepalive,
             remote_access_install=_flag(env.get("PAI_REMOTE_INSTALL"), f.remote_access.install),
             remote_access_invoke=_flag(env.get("PAI_REMOTE_INVOKE"), f.remote_access.invoke),
