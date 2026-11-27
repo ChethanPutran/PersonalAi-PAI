@@ -426,6 +426,23 @@ class VectorStore:
                 span.set_error(f"{type(exc).__name__}: {exc}")
                 raise
 
+    async def add_documents(
+        self, texts: List[str], metadatas: List[Dict[str, Any]], ids: List[str],
+    ) -> int:
+        """Add many documents with ONE embedding batch (document indexing). Existing ids are replaced."""
+        if not texts:
+            return 0
+        if not (len(texts) == len(metadatas) == len(ids)):
+            raise ValueError("texts, metadatas and ids must have the same length")
+        if self.collection is None:
+            for t, m, i in zip(texts, metadatas, ids):
+                self._fallback_documents = [d for d in self._fallback_documents if d["id"] != i]
+                self._fallback_documents.append({"id": i, "text": t, "metadata": m})
+            return len(texts)
+        await self._ensure_embedder()
+        await asyncio.to_thread(self.collection.upsert, documents=texts, metadatas=metadatas, ids=ids)
+        return len(texts)
+
     # ------------------------------------------------------------------
     # Read
     # ------------------------------------------------------------------

@@ -7,6 +7,7 @@ from pai.api.middleware.auth import AuthMiddleware
 from pai.api.middleware.logging import LoggingMiddleware
 from pai.api.routes import account as account_routes
 from pai.api.routes import agents as agents_routes
+from pai.api.routes import documents as documents_routes
 from pai.api.routes import auth, chat, devices, plugins, system, tasks
 from pai.api.routes import consents as consents_routes
 from pai.api.routes.schedules import router as schedules_router
@@ -72,6 +73,7 @@ def create_app(config: Config, context: PAIAppContext) -> FastAPI:
         app.mount("/admin/static", AdminStaticFiles(directory=str(ADMIN_STATIC_DIR)), name="admin-static")
     app.include_router(system.router, prefix=config.api.prefix)
     app.include_router(observability_routes.router, prefix=config.api.prefix)
+    app.include_router(documents_routes.router, prefix=config.api.prefix)
     app.include_router(schedules_router, prefix=config.api.prefix)
     app.include_router(push_tokens_router, prefix=config.api.prefix)
 

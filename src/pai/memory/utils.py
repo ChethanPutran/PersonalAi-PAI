@@ -40,6 +40,14 @@ def _matches_where(
     runs — the subset above is sufficient.
     """
     for key, cond in where.items():
+        if key == "$and":                       # compound clauses (document index filters)
+            if not all(_matches_where(metadata, c) for c in cond):
+                return False
+            continue
+        if key == "$or":
+            if not any(_matches_where(metadata, c) for c in cond):
+                return False
+            continue
         value = metadata.get(key)
         if isinstance(cond, dict):
             if "$eq" in cond and value != cond["$eq"]:

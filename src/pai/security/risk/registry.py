@@ -39,6 +39,7 @@ CAPABILITY_RISK_REGISTRY: dict[str, RiskLevel] = {
     "schedule.create": RiskLevel.LOW,
     "schedule.list": RiskLevel.LOW,
     "schedule.delete": RiskLevel.LOW,
+    "files.search": RiskLevel.MEDIUM,      # reveals file contents; gated by the user's 'Index documents' switch
 
     # Network
     "network.request": RiskLevel.MEDIUM,

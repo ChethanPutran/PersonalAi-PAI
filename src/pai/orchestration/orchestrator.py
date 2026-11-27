@@ -172,6 +172,7 @@ class TaskOrchestrator(Manager):
         self.chat_reply_max_tokens = orchestrator_config.chat_reply_max_tokens
         self.chat_reply_temperature = orchestrator_config.chat_reply_temperature
         # Plain conversation skips the planner LLM call (see orchestration/fast_route.py).
+        self.documents = None            # DocumentService (wired in app_context); None in bare unit tests
         self.user_profiles = None        # UserProfileService (wired in app_context); None in bare unit tests
         self.fast_router = FastRouter(
             getattr(self.planner, "llm", None), enabled=orchestrator_config.fast_chat_path,

@@ -229,7 +229,8 @@
     "summary": "You choose which folders the plugin may use (and which it must never touch).",
     "features": [
       "Plugin settings: allowed folders, denied folders and a read-only switch, per device",
-      "Settings can be chosen when installing and changed later, on the device or remotely"
+      "Settings can be chosen when installing and changed later, on the device or remotely",
+      "Optional document search: PDFs, Word files and text in your allowed folders can be searched ('what did my insurance PDF say about X?')"
     ],
     "fixes": [],
     "breaking": []
@@ -311,6 +312,20 @@
         "title": "Read-only",
         "description": "PAI may look at and read files but not write, copy, move or delete them.",
         "default": false
+      },
+      "indexDocuments": {
+        "type": "boolean",
+        "title": "Index documents for search",
+        "description": "Lets PAI answer questions about what is in your documents. Text from files inside the allowed folders is read on this device and sent to your PAI server, which stores it for search. Off by default.",
+        "default": false
+      },
+      "indexMaxFileMb": {
+        "type": "integer",
+        "title": "Largest file to index (MB)",
+        "description": "Bigger files are skipped.",
+        "default": 20,
+        "minimum": 1,
+        "maximum": 200
       }
     }
   }

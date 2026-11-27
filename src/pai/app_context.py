@@ -335,6 +335,21 @@ def create_app_context(config: Config) -> PAIAppContext:
     for cap in build_agent_capabilities(agent_runtime):     # lets the planner start/steer agents
         builtin_registry.register(cap)
 
+    # Document search (RAG over the folders the user allowed in the files plugin): devices upload text chunks,
+    # the backend embeds and searches them (own collection; never mixed into memory).
+    from pai.documents.builtins import build_document_capabilities
+    from pai.documents.index import DocumentIndex
+    from pai.documents.service import DocumentService
+    from pai.memory.vector_store import VectorStore
+    vs_cfg = config.memory.vector_store
+    document_service = DocumentService(
+        DocumentIndex(VectorStore(persistence_path=vs_cfg.persist_directory, collection_name="pai_documents",
+                                  embedding_model=vs_cfg.embeddings.model_name)),
+        plugin_manager, device_manager)
+    orchestrator.documents = document_service
+    for cap in build_document_capabilities(document_service):
+        builtin_registry.register(cap)
+
     session_manager = SessionManager(session_factory=database.factory)
 
     voice = VoiceService.build(config.voice, OrchestratorTurnRunner(orchestrator, database), cost_tracker=cost_tracker)
