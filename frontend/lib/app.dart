@@ -1,4 +1,7 @@
 import 'dart:async';
+import 'dart:io';
+
+import 'package:path_provider/path_provider.dart';
 
 import 'plugins/permissions/permission_labels.dart';
 import 'plugins/reconcile_gate.dart';
@@ -49,6 +52,9 @@ import 'ui/tasks/tasks_screen.dart';
 import 'profile/profile_service.dart';
 import 'profile/settings_service.dart';
 import 'ui/profile/profile_screen.dart';
+import 'documents/document_api.dart';
+import 'documents/document_indexer.dart';
+import 'documents/document_index_service.dart';
 import 'ui/shell/pai_shell.dart';
 import 'ui/theme/theme.dart';
 import 'ui/widgets/hud/hud.dart';
@@ -303,6 +309,7 @@ if (context == null || !mounted) {
       );
 
       await pluginService.restoreInstalled();
+      await _startDocumentIndexing(pluginService, runtime);
 
       final scheduleService = ScheduleService(api: api);
       final taskService = TaskService(api);
@@ -587,6 +594,9 @@ unawaited(_refreshDevicesAfterConnect());
 
         // Plugin settings may have changed while the socket was down: take the server's word for them.
         unawaited(_pluginManager?.syncSettingsFromServer() ?? Future<void>.value());
+
+        // Document search: tidy and (when charging) catch up. Throttled; does nothing while the setting is off.
+        unawaited(DocumentIndexHub.instance?.automatic() ?? Future<IndexRunResult?>.value(null));
 
         unawaited(
           _reconcilePlugins().catchError((e, st) {
@@ -882,6 +892,48 @@ Future<void> _refreshDevicesAfterConnect() async {
     }
   }
 
+  /// Document search (Files plugin): the phone reads the allowed folders and sends text chunks to the
+  /// backend, which embeds them. Runs only while the setting is on; see [DocumentIndexService] for the rules.
+  Future<void> _startDocumentIndexing(PluginService pluginService, PluginRuntime runtime) async {
+    _stopDocumentIndexing();
+    final dir = (await getApplicationSupportDirectory()).path;
+    final service = DocumentIndexService(
+      indexer: DocumentIndexer(
+        api: HttpDocumentIndexApi(api),
+        store: IndexStateStore(File('$dir/document_index_state.json')),
+        deviceId: () => deviceId,
+        allFilesAccess: runtime.allFilesAccessGranted,
+        appStorageRoots: _appStorageRoots,
+      ),
+      api: HttpDocumentIndexApi(api),
+      deviceId: () => deviceId,
+      readConfig: () => pluginService.configStore.get(kFilesAndroidPluginId),
+      isCharging: runtime.isCharging,
+      allFilesAccess: runtime.allFilesAccessGranted,
+    );
+    DocumentIndexHub.instance = service;
+    pluginService.onConfigApplied = (id, _) {
+      if (id == kFilesAndroidPluginId) unawaited(service.settingsChanged());
+    };
+    service.start();
+  }
+
+  void _stopDocumentIndexing() {
+    DocumentIndexHub.instance?.dispose();
+    DocumentIndexHub.instance = null;
+  }
+
+  Future<List<String>> _appStorageRoots() async {
+    final out = <String>[];
+    for (final f in [getApplicationDocumentsDirectory, getApplicationSupportDirectory, getExternalStorageDirectory]) {
+      try {
+        final d = await f();
+        if (d != null) out.add(d.path);
+      } catch (_) {}
+    }
+    return out;
+  }
+
   /// `plugin.config`: new settings for a plugin on THIS device. Changing settings from another device is the
   /// same kind of act as installing there, so it needs the owner's "Allow remote plugin install" switch
   /// (fail closed until the backend has said what is allowed).
@@ -929,6 +981,7 @@ Future<void> _refreshDevicesAfterConnect() async {
   // ----------------------------------------------------------------
 
   Future<void> _logout() async {
+    _stopDocumentIndexing();
     _connectionService?.dispose();
     _testTaskRunner?.dispose();
     unawaited(_taskEventStream?.dispose() ?? Future<void>.value());
@@ -1006,6 +1059,7 @@ Future<void> _refreshDevicesAfterConnect() async {
 
   @override
   void dispose() {
+    _stopDocumentIndexing();
     unawaited(_taskEventStream?.dispose() ?? Future<void>.value());
     _taskEventsController.close();
     _testTaskRunner?.dispose();

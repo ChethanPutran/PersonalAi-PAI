@@ -14,6 +14,8 @@ import '../../plugins/plugin_manager.dart';
 import 'capability_config_screen.dart';
 import 'plugin_settings_screen.dart';
 import 'widgets/all_files_access_notice.dart';
+import 'widgets/document_search_section.dart';
+import '../../documents/document_index_service.dart';
 import 'widgets/plugin_install_dialog.dart';
 import '../../plugins/plugin_settings.dart';
 import 'plugin_test_screen.dart';
@@ -813,9 +815,21 @@ Future<void> _installLocal(PluginInfo plugin, String version, Map<String, dynami
           isThisDevice: isThisDevice,
           load: () => widget.manager.loadSettings(targetId, plugin.id),
           save: (changes) => widget.manager.saveSettings(targetId, plugin.id, changes),
-          footer: isThisDevice && plugin.id == _filesAndroidId ? const AllFilesAccessNotice() : null,
+          footer: isThisDevice && plugin.id == _filesAndroidId ? _filesFooter() : null,
         ),
       ),
+    );
+  }
+
+  /// All files access notice, plus Document search when the app has the indexer running.
+  Widget _filesFooter() {
+    final index = DocumentIndexHub.instance;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const AllFilesAccessNotice(),
+        if (index != null) ...[const SizedBox(height: 12), DocumentSearchSection(controller: index)],
+      ],
     );
   }
 

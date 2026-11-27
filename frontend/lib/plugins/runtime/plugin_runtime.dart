@@ -381,6 +381,15 @@ Future<String> getAbi() async {
     }
   }
 
+  /// Is the phone on a charger right now? Null when unknown / not Android.
+  Future<bool?> isCharging() async {
+    try {
+      return await _channel.invokeMethod<bool>('isCharging');
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// Opens Android's "All files access" screen for PAI. False when it could not open.
   Future<bool> openAllFilesAccessSettings() async {
     try {

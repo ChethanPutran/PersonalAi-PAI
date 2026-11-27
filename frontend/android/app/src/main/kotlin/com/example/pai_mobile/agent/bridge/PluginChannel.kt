@@ -127,6 +127,15 @@ class PluginChannel(
             "allFilesAccessStatus" -> result.success(mapOf(
                 "granted" to permissionManager.allFilesAccessGranted(), "sdk" to Build.VERSION.SDK_INT))
 
+            // ---- Document indexing runs on its own only while the phone is charging ----
+            "isCharging" -> {
+                val i = activity.applicationContext.registerReceiver(
+                    null, android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED))
+                val st = i?.getIntExtra(android.os.BatteryManager.EXTRA_STATUS, -1) ?: -1
+                result.success(st == android.os.BatteryManager.BATTERY_STATUS_CHARGING ||
+                    st == android.os.BatteryManager.BATTERY_STATUS_FULL)
+            }
+
             "openAllFilesAccessSettings" -> result.success(permissionManager.openAllFilesAccessSettings())
 
             "debugRegistry" -> {

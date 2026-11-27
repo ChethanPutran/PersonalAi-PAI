@@ -175,7 +175,7 @@ class _PluginSettingsScreenState extends State<PluginSettingsScreen> {
                 _fieldErrors = {};
               }),
             ),
-            if (widget.footer != null) ...[widget.footer!, const SizedBox(height: PaiSpacing.lg)],
+            if (widget.footer != null) ...[KeyedSubtree(key: ValueKey('footer-$_formGeneration'), child: widget.footer!), const SizedBox(height: PaiSpacing.lg)],
             if (_message != null)
               Padding(
                 padding: const EdgeInsets.only(bottom: PaiSpacing.md),

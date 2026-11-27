@@ -69,6 +69,9 @@ class PluginService {
   /// The plugin settings (effective values) chosen for this device; handed to a plugin whenever it loads.
   final PluginConfigStore configStore;
 
+  /// Told after a plugin's settings were stored (every way they arrive: install, save, frame, server sync).
+  void Function(String pluginId, Map<String, dynamic> config)? onConfigApplied;
+
   PluginService({
     required this.installer,
     required this.repository,
@@ -81,6 +84,9 @@ class PluginService {
   /// plugin took it (otherwise it applies the next time the plugin loads).
   Future<bool> applyConfig(String id, Map<String, dynamic> config) async {
     await configStore.save(id, config);
+    try {
+      onConfigApplied?.call(id, config);
+    } catch (_) {/* a listener must never break applying settings */}
     final nativeModule = registry.byId(id)?.info.runtimeSpec.nativeModule;
     if (nativeModule == null || nativeModule.isEmpty) return false;
     return runtime.configurePlugin(nativeModule, config);
