@@ -20,6 +20,7 @@ from pai.common.enums.task import TaskType
 from pai.memory.manager import MemoryManager, _looks_like_retry
 from pai.observability.tracer import get_tracer
 from pai.orchestration.capability_router import CapabilityRouter
+from pai.planning.capability_select import missing_from, restrict, select_capabilities
 from pai.planning.models import TaskSpec
 import re
 
@@ -137,6 +138,9 @@ class GoalDecomposer(Lifecycle):
         self.prompts = prompt_registry
         self.prompt_tracker = prompt_tracker
         self.prompt_guard = prompt_guard
+        # Set by the orchestrator from config (orchestration.capability_retrieval); see planning/capability_select.py.
+        self.capability_retrieval = False
+        self.capability_retrieval_families = 4
 
     async def initialize(self) -> None:
         logger.info("GoalDecomposer initialized")
@@ -171,6 +175,8 @@ class GoalDecomposer(Lifecycle):
         self,
         goal: str,
         context: Dict[str, Any] | None = None,
+        *,
+        _show_all: bool = False,
     ) -> List[TaskSpec]:
         context = context or {}
         tracer = get_tracer()
@@ -281,6 +287,22 @@ class GoalDecomposer(Lifecycle):
             is_retry = _looks_like_retry(goal or "")
             span.set_attribute("is_retry", is_retry)
 
+            # Capability retrieval: show the planner only what fits the request. Validation below still uses
+            # the FULL set, so a plan that names a capability we did not show is detected and re-planned.
+            shown = capabilities
+            if self.capability_retrieval and not _show_all and not is_retry:
+                selection = select_capabilities(
+                    goal or "", capabilities, top_families=self.capability_retrieval_families,
+                    sticky=context.get("last_capabilities") or (),
+                )
+                # A short follow-up ("and another one") means what the history says, not what it spells.
+                if selection.confident and history_block and len(goal.split()) < 4:
+                    selection = type(selection)(sorted(capabilities), False, "short_followup")
+                shown = restrict(capabilities, selection)
+                span.set_attribute("retrieval", selection.reason)
+                span.set_attribute("retrieval_shown", len(shown))
+                span.set_attribute("retrieval_of", len(capabilities))
+
             user_tz = (
                 context.get("timezone")
                 or (context.get("user_preferences") or {}).get("timezone")
@@ -304,7 +326,7 @@ class GoalDecomposer(Lifecycle):
                 sections=prompt_parts,
                 goal=goal,
                 context=context,
-                capabilities=capabilities,
+                capabilities=shown,
                 memory_block=inspection.memory_block,
                 history_block=inspection.history_block,
                 is_retry=is_retry,
@@ -389,6 +411,12 @@ class GoalDecomposer(Lifecycle):
                 span.set_attribute("raw_task_count", len(raw_tasks))
 
                 tasks = self._normalize_tasks(raw_tasks, capabilities)
+                unseen = missing_from((t.capability for t in tasks), shown)
+                if unseen:
+                    # The plan used something the planner was not shown its schema for: plan again with all.
+                    logger.info("Capability retrieval missed {}; re-planning with the full list", unseen)
+                    span.set_attribute("retrieval_missed", unseen)
+                    return await self.decompose(goal, context, _show_all=True)
                 span.set_attribute("task_count", len(tasks))
                 span.set_attribute("task_ids", [t.id for t in tasks])
                 span.set_attribute(

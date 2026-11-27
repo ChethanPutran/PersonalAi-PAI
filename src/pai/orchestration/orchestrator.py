@@ -177,6 +177,10 @@ class TaskOrchestrator(Manager):
         self.fast_router = FastRouter(
             getattr(self.planner, "llm", None), enabled=orchestrator_config.fast_chat_path,
             timeout_seconds=orchestrator_config.fast_route_timeout_seconds)
+        decomposer = getattr(self.planner, "goal_decomposer", None)
+        if decomposer is not None:
+            decomposer.capability_retrieval = orchestrator_config.capability_retrieval
+            decomposer.capability_retrieval_families = orchestrator_config.capability_retrieval_families
         self.scheduler_service = scheduler_service
         self.prompt_guard = prompt_guard
         self._tracker = TaskTracker()

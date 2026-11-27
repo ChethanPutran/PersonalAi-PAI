@@ -13,6 +13,11 @@ class OrchestratorConfig(BaseModel):
     # Skip the planner LLM call for plain conversation (rules, then a tiny classifier call on the fast chat
     # model); anything that might need a tool still goes through the planner. See orchestration/fast_route.py.
     fast_chat_path: bool = Field(default=True)
+    # Show the planner only the capabilities that fit the request (planning/capability_select.py): a shorter
+    # prompt and a faster planning call. Any doubt, or a plan naming a capability that was not shown, re-plans
+    # with the full list. Off by default until it has been compared against real traffic.
+    capability_retrieval: bool = Field(default=False)
+    capability_retrieval_families: int = Field(default=4, ge=1, le=12)
     fast_route_timeout_seconds: float = Field(default=2.5, gt=0.2)
     max_concurrent_tasks: int = Field(default=5)
     task_timeout_seconds: int = Field(default=300)  # 5 minutes
